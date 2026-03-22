@@ -31,14 +31,14 @@ The LilyGO T-2CAN uses isolated CAN transceivers. **Ensure you use the SGND (Sig
 ### **A. Daly WNT to LilyGO (Port B - Internal)**
 | RJ45 Pin | Wire Color (T568B) | Signal | LilyGO Terminal |
 | :--- | :--- | :--- | :--- |
-| **2** | Orange | **GND** | **SGNDB** |
+| **2** | White/Green | **GND** | **SGNDB** |
 | **4** | Blue | **CAN High** | **CANHB** |
 | **5** | White/Blue | **CAN Low** | **CANLB** |
 
 ### **B. LilyGO to SMA Master L1 (Port A - MCP2515)**
 | RJ45 Pin | Wire Color (T568B) | Signal | LilyGO Terminal |
 | :--- | :--- | :--- | :--- |
-| **2** | Orange | **GND** | **SGNDA** |
+| **2** | White/Green | **GND** | **SGNDA** |
 | **4** | Blue | **CAN High** | **CANHA** |
 | **5** | White/Blue | **CAN Low** | **CANLA** |
 

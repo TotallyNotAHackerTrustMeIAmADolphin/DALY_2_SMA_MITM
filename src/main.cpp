@@ -6,6 +6,7 @@
 #include "pin_config.h"
 #include "mcp2515.h"
 #include <SPI.h>
+#include <deque>
 
 // --- NETWORK CONFIGURATION ---
 const char* ssid = "wlesswg";
@@ -14,23 +15,28 @@ IPAddress local_IP(192, 168, 178, 55);
 IPAddress gateway(192, 168, 178, 1);
 IPAddress subnet(255, 255, 255, 0);
 
-// --- SEPARATE HIGH-POWER CAPS ---
-const float MAX_CHARGE_LIMIT_A    = 250.0; // Your Charge Cap
-const float MAX_DISCHARGE_LIMIT_A = 500.0; // Your Discharge Cap (High Power)
+// --- POWER LIMITS (Adjust for your specific BMS/Cables) ---
+const float MAX_CHARGE_LIMIT_A    = 250.0; 
+const float MAX_DISCHARGE_LIMIT_A = 500.0; 
+const float BALANCING_A           = 1.0;   // Drops to 1A if a cell "runs away"
 
-// --- TAPER THRESHOLDS ---
+// --- VOLTAGE THRESHOLDS ---
 const float V_MAX_CHARGE     = 55.20; 
 const float V_START_C_TAPER  = 54.00; 
 const float V_START_D_TAPER  = 49.60; 
 const float V_MIN_DISCHARGE  = 48.00; 
+const float V_ALARM_GATE     = 53.50; // Don't trigger cell alarms below this voltage
 
 // --- STATE STORAGE ---
 float packVoltage = 52.6; 
-float packCurrent = 0.0; // Real-time Amps from BMS
+float packCurrent = 0.0;
 uint16_t packSOC = 50;
 uint16_t packSOH = 100;
-uint16_t lastDalyCCL = 0; // What the Daly is requesting (Raw)
-uint16_t lastDalyDCL = 0; // What the Daly is requesting (Raw)
+bool cellHighAlarm = false; 
+
+// Voltage Filtering (Moving Average to stop flicker)
+std::deque<float> vHistory;
+const int V_SAMPLES = 10; 
 
 unsigned long lastSmaTx = 0;
 unsigned long lastBmsRx = 0;
@@ -46,35 +52,50 @@ void netLog(const char* format, ...) {
     TelnetStream.print(loc_res);
 }
 
-// --- CALCULATION LOGIC ---
+// Filtered Voltage Calculation
+float getFilteredVoltage(float newV) {
+    vHistory.push_back(newV);
+    if (vHistory.size() > V_SAMPLES) vHistory.pop_front();
+    float sum = 0;
+    for (float v : vHistory) sum += v;
+    return sum / vHistory.size();
+}
+
+// Logic: Charge Current Limit
 uint16_t calculateCCL(float v) {
+    // Cell Runner Protection: Only engage if near full and BMS reports high cell
+    if (cellHighAlarm && v > V_ALARM_GATE) return (uint16_t)(BALANCING_A * 10);
+    
     if (v >= V_MAX_CHARGE) return 0;
     if (v < V_START_C_TAPER) return (uint16_t)(MAX_CHARGE_LIMIT_A * 10);
+    
     float ratio = (V_MAX_CHARGE - v) / (V_MAX_CHARGE - V_START_C_TAPER);
     float target = ratio * MAX_CHARGE_LIMIT_A;
     return (uint16_t)(max(target, 2.0f) * 10);
 }
 
+// Logic: Discharge Current Limit
 uint16_t calculateDCL(float v) {
     if (v <= V_MIN_DISCHARGE) return 0;
     if (v > V_START_D_TAPER) return (uint16_t)(MAX_DISCHARGE_LIMIT_A * 10);
+    
     float ratio = (v - V_MIN_DISCHARGE) / (V_START_D_TAPER - V_MIN_DISCHARGE);
     float target = ratio * MAX_DISCHARGE_LIMIT_A;
     return (uint16_t)(max(target, 10.0f) * 10);
 }
 
-// --- SMA HEARTBEAT ENGINE ---
+// SMA Heartbeat Function (Timed)
 void sendToSma() {
     struct can_frame f;
-    uint16_t bridgeCCL = calculateCCL(packVoltage);
-    uint16_t bridgeDCL = calculateDCL(packVoltage);
+    uint16_t ccl = calculateCCL(packVoltage);
+    uint16_t dcl = calculateDCL(packVoltage);
 
     // 0x351: Limits
     f.can_id = 0x351; f.can_dlc = 8;
-    f.data[0] = 0x58; f.data[1] = 0x02; // 58.4V
-    f.data[2] = lowByte(bridgeCCL); f.data[3] = highByte(bridgeCCL);
-    f.data[4] = lowByte(bridgeDCL); f.data[5] = highByte(bridgeDCL);
-    f.data[6] = 0x40; f.data[7] = 0x01; // 44.8V
+    f.data[0] = 0x58; f.data[1] = 0x02; // 58.4V Request
+    f.data[2] = lowByte(ccl); f.data[3] = highByte(ccl);
+    f.data[4] = lowByte(dcl); f.data[5] = highByte(dcl);
+    f.data[6] = 0x40; f.data[7] = 0x01; // 44.8V Request
     Can_SMA.sendMessage(&f);
 
     // 0x355: SOC / SOH
@@ -89,30 +110,34 @@ void sendToSma() {
     f.can_id = 0x356; f.can_dlc = 6;
     f.data[0] = lowByte(v); f.data[1] = highByte(v);
     f.data[2] = lowByte(i); f.data[3] = highByte(i);
-    f.data[4] = 0x00; f.data[5] = 0x00;
+    f.data[4] = 0x00; f.data[5] = 0x00; 
     Can_SMA.sendMessage(&f);
 
-    // Alarms & Handshake
+    // Alarms, Heartbeat & Handshake
     f.can_id = 0x359; f.can_dlc = 7; memset(f.data, 0, 7); Can_SMA.sendMessage(&f);
     f.can_id = 0x35A; f.can_dlc = 8; memset(f.data, 0, 8); Can_SMA.sendMessage(&f);
     f.can_id = 0x35E; f.can_dlc = 8; memcpy(f.data, "SMA     ", 8); Can_SMA.sendMessage(&f);
 }
 
 void setup() {
+    Serial.begin(115200);
+
+    // 1. WiFi & Fixed IP
     WiFi.config(local_IP, gateway, subnet);
     WiFi.begin(ssid, password);
     while (WiFi.status() != WL_CONNECTED) delay(100);
+    ArduinoOTA.setHostname("SMA-BMS-Bridge");
     ArduinoOTA.begin();
     TelnetStream.begin();
 
-    // CAN B (Daly)
+    // 2. Init Port B (Daly)
     twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)CAN_TX, (gpio_num_t)CAN_RX, TWAI_MODE_NORMAL);
     twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS();
     twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
     twai_driver_install(&g_config, &t_config, &f_config);
     twai_start();
 
-    // CAN A (SMA)
+    // 3. Init Port A (SMA)
     pinMode(MCP2515_RST, OUTPUT);
     digitalWrite(MCP2515_RST, HIGH); delay(50);
     digitalWrite(MCP2515_RST, LOW); delay(50);
@@ -122,7 +147,7 @@ void setup() {
     Can_SMA.setBitrate(CAN_500KBPS);
     Can_SMA.setNormalMode();
 
-    netLog("\n[BRIDGE] HIGH-POWER VERBOSE MODE LOADED.\n");
+    netLog("\n[BRIDGE] PRO-EDITION LOADED. IP: 192.168.178.55\n");
 }
 
 void loop() {
@@ -134,20 +159,21 @@ void loop() {
         lastBmsRx = millis();
         if (b_msg.identifier == 0x356) {
             uint16_t v_raw = (b_msg.data[1] << 8) | b_msg.data[0];
-            packVoltage = v_raw / 100.0;
+            packVoltage = getFilteredVoltage(v_raw / 100.0);
             int16_t i_raw = (int16_t)((b_msg.data[3] << 8) | b_msg.data[2]);
             packCurrent = i_raw / 10.0;
         }
         if (b_msg.identifier == 0x355) {
-            packSOC = (b_msg.data[1] << 8) | b_msg.data[0];
+            uint16_t incomingSOC = (b_msg.data[1] << 8) | b_msg.data[0];
+            if (incomingSOC <= 100) packSOC = incomingSOC;
         }
-        if (b_msg.identifier == 0x351) {
-            lastDalyCCL = (b_msg.data[3] << 8) | b_msg.data[2];
-            lastDalyDCL = (b_msg.data[5] << 8) | b_msg.data[4];
+        if (b_msg.identifier == 0x35A || b_msg.identifier == 0x359) {
+            // Refined: Only bit 2 (0x04) is "Cell Over Voltage"
+            cellHighAlarm = (b_msg.data[0] & 0x04) || (b_msg.data[2] & 0x04);
         }
     }
 
-    // --- FORWARD SMA SYNC ---
+    // --- FORWARD SMA CLUSTER SYNC ---
     struct can_frame in_frame;
     if (Can_SMA.readMessage(&in_frame) == MCP2515::ERROR_OK) {
         twai_message_t back_msg;
@@ -157,27 +183,30 @@ void loop() {
         twai_transmit(&back_msg, 0);
     }
 
-    // --- SMA HEARTBEAT & DASHBOARD (Every 1s for log, 200ms for Tx) ---
-    if (millis() - lastSmaTx > 200) {
+    // --- TIMED SMA TX (Every 250ms) ---
+    if (millis() - lastSmaTx > 250) {
         sendToSma();
         lastSmaTx = millis();
         
-        static unsigned long lastDashboard = 0;
-        if (millis() - lastDashboard > 2000) { // Update Dashboard every 2s
-            netLog("\n--- BMS BRIDGE DASHBOARD ---\n");
-            netLog("BATTERY: %.2fV | %.1fA | %d%% SOC\n", packVoltage, packCurrent, packSOC);
-            netLog("CHARGE : Daly Req: %dA | Bridge Allowed: %.1fA ", lastDalyCCL/10, calculateCCL(packVoltage)/10.0);
-            if (packVoltage > V_START_C_TAPER) netLog("[Tapering!]");
-            netLog("\nDISCHRG: Daly Req: %dA | Bridge Allowed: %.1fA ", lastDalyDCL/10, calculateDCL(packVoltage)/10.0);
-            if (packVoltage < V_START_D_TAPER) netLog("[Tapering!]");
-            netLog("\n----------------------------\n");
-            lastDashboard = millis();
+        static unsigned long lastDash = 0;
+        if (millis() - lastDash > 2000) {
+            netLog("\n--- SMA-DALY PRO DASHBOARD ---\n");
+            netLog("BATT: %.2fV | %.1fA | %d%% SOC\n", packVoltage, packCurrent, packSOC);
+            netLog("LIMITS: CCL: %.1fA | DCL: %.1fA\n", calculateCCL(packVoltage)/10.0, calculateDCL(packVoltage)/10.0);
+            if (cellHighAlarm && packVoltage > V_ALARM_GATE) 
+                netLog("ALARM: [CELL RUNNER! Forced Balance at 1.0A]\n");
+            else if (packVoltage > V_START_C_TAPER) 
+                netLog("STATUS: [Charge Tapering active]\n");
+            else 
+                netLog("STATUS: [Normal Operation]\n");
+            netLog("------------------------------\n");
+            lastDash = millis();
         }
     }
 
     // Safety: Emergency Cutoff
-    if (millis() - lastBmsRx > 10000 && lastBmsRx != 0) {
-        packVoltage = 55.2; // Force logic stop
-        netLog("[WARN] DALY BMS TIMEOUT - CUTTING POWER\n");
+    if (millis() - lastBmsRx > 15000 && lastBmsRx != 0) {
+        packVoltage = V_MAX_CHARGE; // Stop charging
+        netLog("[WARN] DALY BMS TIMEOUT - CUTTING CHARGE\n");
     }
 }

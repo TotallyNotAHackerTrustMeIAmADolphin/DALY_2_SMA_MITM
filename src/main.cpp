@@ -24,12 +24,12 @@ struct Config {
     float vMaxCharge;       float vStartDTaper;     float vMinDischarge;    
     float vHighAlarmGate;   float vLowAlarmGate;    float trickleA;         
     float limpDischargeA;   int   vSamples;         int   bmsTimeout;       
-    int   socStartTaper;    int   socStartDTaper;   float slewRate; // New: Amps per packet change
+    int   socStartTaper;    int   socStartDTaper;   float slewRate; 
 } cfg;
 
 // --- STATE STORAGE ---
 float packVoltage = 52.6; float packCurrent = 0.0; uint16_t packSOC = 50;
-float currentCCL = 0.0;   float currentDCL = 0.0; // Tracked for Slew Rate
+float currentCCL = 0.0;   float currentDCL = 0.0; 
 bool cellHighAlarm = false; bool cellLowAlarm = false;
 unsigned long lastSmaTx = 0; unsigned long lastBmsRx = 0;
 std::deque<float> vHistory;
@@ -56,7 +56,7 @@ void loadConfig() {
     prefs.putUInt("boots", ++bootCount); 
     cfg.maxChargeA = prefs.getFloat("ca", 250.0);
     cfg.maxDischargeA = prefs.getFloat("da", 500.0);
-    cfg.vStartTaper = prefs.getFloat("vt", 54.00);
+    cfg.vStartTaper = prefs.getFloat("vt", 54.20);
     cfg.vMaxCharge = prefs.getFloat("mv", 55.20);
     cfg.vStartDTaper = prefs.getFloat("dvt", 49.60);
     cfg.vMinDischarge = prefs.getFloat("mdv", 48.00);
@@ -66,9 +66,9 @@ void loadConfig() {
     cfg.limpDischargeA = prefs.getFloat("ld_v2", 5.0); 
     cfg.vSamples = prefs.getInt("vs", 10);
     cfg.bmsTimeout = prefs.getInt("to", 15);
-    cfg.socStartTaper = prefs.getInt("st", 95); 
+    cfg.socStartTaper = prefs.getInt("st", 96); 
     cfg.socStartDTaper = prefs.getInt("sdt", 15); 
-    cfg.slewRate = prefs.getFloat("sr", 2.0); // Default 2A per 250ms change
+    cfg.slewRate = prefs.getFloat("sr", 2.0); 
     prefs.end();
 }
 
@@ -80,24 +80,18 @@ float getFilteredVoltage(float newV) {
 }
 
 float applySlewRate(float target, float current, float rate) {
-    if (target < current) return target; // Safety: Instant drop allowed
-    if (target > current + rate) return current + rate; // Slow ramp up
+    if (target < current) return target; 
+    if (target > current + rate) return current + rate; 
     return target;
 }
 
 uint16_t calculateCCL(float v, int soc) {
     if (millis() - lastBmsRx > (cfg.bmsTimeout * 1000)) return 0;
     if (v >= cfg.vMaxCharge) return 0;
-    
-    // Base Taper Calculation
     float vRatio = (v > cfg.vStartTaper) ? (cfg.vMaxCharge - v) / (cfg.vMaxCharge - cfg.vStartTaper) : 1.0;
     float socRatio = (soc > cfg.socStartTaper) ? (100.0 - (float)soc) / (100.0 - (float)cfg.socStartTaper) : 1.0;
     float target = max(min(vRatio, socRatio) * cfg.maxChargeA, cfg.trickleA);
-
-    // Balancing / High Cell Override
     if ((cellHighAlarm && v > cfg.vHighAlarmGate) || (soc >= 100)) target = cfg.trickleA;
-
-    // Apply Slew Rate to smooth the SMA request
     currentCCL = applySlewRate(target, currentCCL, cfg.slewRate);
     return (uint16_t)(currentCCL * 10);
 }
@@ -105,19 +99,15 @@ uint16_t calculateCCL(float v, int soc) {
 uint16_t calculateDCL(float v, int soc) {
     if (millis() - lastBmsRx > (cfg.bmsTimeout * 1000)) return 0;
     if (v <= cfg.vMinDischarge || soc <= 0) return 0;
-    
     float vRatio = (v < cfg.vStartDTaper) ? (v - cfg.vMinDischarge) / (cfg.vStartDTaper - cfg.vMinDischarge) : 1.0;
     float socRatio = (soc < cfg.socStartDTaper) ? (float)soc / (float)cfg.socStartDTaper : 1.0;
     float target = max(min(vRatio, socRatio) * cfg.maxDischargeA, cfg.limpDischargeA);
-
-    // Low Cell Override
     if (cellLowAlarm && v < cfg.vLowAlarmGate) target = cfg.limpDischargeA;
-
     currentDCL = applySlewRate(target, currentDCL, cfg.slewRate);
     return (uint16_t)(currentDCL * 10);
 }
 
-// --- UI COMPONENTS ---
+// --- UI DASHBOARD ---
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML><html><head><title>BMS Bridge Pro</title><meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
@@ -154,6 +144,7 @@ const char index_html[] PROGMEM = R"rawliteral(
   }, false);
 </script></body></html>)rawliteral";
 
+// --- UI CONFIG ---
 const char config_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML><html><head><title>Settings</title><meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
@@ -169,7 +160,7 @@ const char config_html[] PROGMEM = R"rawliteral(
   <a href="/" style="color:#4caf50;text-decoration:none;">&larr; Back to Dashboard</a>
   <h2>Advanced Tapering & Slew</h2>
   <form action="/save" method="GET">
-    <div class="row"><div class="text-group"><strong>Slew Rate (A/step)</strong><span class="desc">Max Amps change per 250ms (Lower = Smoother).</span></div>
+    <div class="row"><div class="text-group"><strong>Slew Rate (A/step)</strong><span class="desc">Max Amps change per 250ms (e.g., 2.0).</span></div>
       <input type="number" name="sr" step="0.1" value="!!VAL_SR!!"></div>
     <div class="row"><div class="text-group"><strong>SOC Start Taper (C) %</strong><span class="desc">Lower charge current gradually above this level.</span></div>
       <input type="number" name="st" step="1" value="!!VAL_ST!!"></div>
@@ -202,7 +193,6 @@ void sendToSma() {
     f.can_id = 0x351; f.can_dlc = 8; f.data[0] = 0x58; f.data[1] = 0x02; f.data[2] = lowByte(ccl); f.data[3] = highByte(ccl); f.data[4] = lowByte(dcl); f.data[5] = highByte(dcl); f.data[6] = 0x40; f.data[7] = 0x01; Can_SMA.sendMessage(&f);
     f.can_id = 0x355; f.can_dlc = 4; f.data[0] = lowByte(packSOC); f.data[1] = highByte(packSOC); f.data[2] = 100; f.data[3] = 0; Can_SMA.sendMessage(&f);
     f.can_id = 0x356; f.can_dlc = 6; uint16_t v = (uint16_t)(packVoltage * 100); int16_t i = (int16_t)(packCurrent * 10.0); f.data[0] = lowByte(v); f.data[1] = highByte(v); f.data[2] = lowByte(i); f.data[3] = highByte(i); f.data[4] = 0; f.data[5] = 0; Can_SMA.sendMessage(&f);
-    f.can_id = 0x35E; f.can_dlc = 8; memcpy(f.data, "SMA     ", 8); Can_SMA.sendMessage(&f);
 }
 
 void setup() {
@@ -258,7 +248,7 @@ void setup() {
     SPI.begin(MCP2515_SCLK, MCP2515_MISO, MCP2515_MOSI, MCP2515_CS);
     Can_SMA.reset(); Can_SMA.setBitrate(CAN_500KBPS); Can_SMA.setNormalMode();
 
-    netLog("[SYSTEM] Advanced Slew-Taper Logic Active.\n");
+    netLog("[SYSTEM] Logic Pro Active. RAM: %d\n", ESP.getFreeHeap());
 }
 
 void loop() {
@@ -298,14 +288,15 @@ void loop() {
             char json[256]; snprintf(json, sizeof(json), "{\"v\":%.2f,\"i\":%.1f,\"soc\":%d,\"smam\":\"%s\",\"smag\":%d}", packVoltage, packCurrent, packSOC, smaChargeMode.c_str(), gridPresent);
             events.send(json, "data", millis());
             
-            String mode = "NORMAL";
+            String mode = "RUN";
             if (millis() - lastBmsRx > (cfg.bmsTimeout * 1000) && lastBmsRx != 0) mode = "BMS_OFFLINE";
             else if (cellHighAlarm && packVoltage > cfg.vHighAlarmGate) mode = "BALANCING";
             else if (cellLowAlarm && packVoltage < cfg.vLowAlarmGate) mode = "LOW_CELL_LIMP";
             else if (packVoltage >= cfg.vMaxCharge || packSOC >= 100) mode = "FULL/TRICKLE";
             else if (packVoltage > cfg.vStartTaper || packSOC > cfg.socStartTaper) mode = "TAPER_C";
             
-            netLog("[STATUS] Mode:%s V:%.2f I:%.1f SOC:%d%% CCL:%.1f RAM:%d\n", mode.c_str(), packVoltage, packCurrent, packSOC, currentCCL, ESP.getFreeHeap());
+            // Log with CCL AND DCL
+            netLog("[STATUS] Mode:%s V:%.2f I:%.1f SOC:%d%% CCL:%.1f DCL:%.1f SMA:%s\n", mode.c_str(), packVoltage, packCurrent, packSOC, currentCCL, currentDCL, smaChargeMode.c_str());
             lastPush = millis();
         }
     }

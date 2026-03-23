@@ -10,7 +10,7 @@
 #include <deque>
 #include <esp_task_wdt.h>
 
-// --- SETTINGS & NETWORK ---
+// --- CONFIG & NETWORK ---
 const char* ssid = "wlesswg";
 const char* password = "hba.1245";
 IPAddress local_IP(192, 168, 178, 55);
@@ -24,11 +24,12 @@ struct Config {
     float vMaxCharge;       float vStartDTaper;     float vMinDischarge;    
     float vHighAlarmGate;   float vLowAlarmGate;    float trickleA;         
     float limpDischargeA;   int   vSamples;         int   bmsTimeout;       
-    int   socStartTaper;    int   socStartDTaper;
+    int   socStartTaper;    int   socStartDTaper;   float slewRate; // New: Amps per packet change
 } cfg;
 
-// --- STATE ---
+// --- STATE STORAGE ---
 float packVoltage = 52.6; float packCurrent = 0.0; uint16_t packSOC = 50;
+float currentCCL = 0.0;   float currentDCL = 0.0; // Tracked for Slew Rate
 bool cellHighAlarm = false; bool cellLowAlarm = false;
 unsigned long lastSmaTx = 0; unsigned long lastBmsRx = 0;
 std::deque<float> vHistory;
@@ -62,40 +63,61 @@ void loadConfig() {
     cfg.vHighAlarmGate = prefs.getFloat("ag", 53.50);
     cfg.vLowAlarmGate = prefs.getFloat("lag", 50.00);
     cfg.trickleA = prefs.getFloat("ta", 2.0); 
-    cfg.limpDischargeA = prefs.getFloat("ld_v2", 5.0); // Renamed Key to fix visibility
+    cfg.limpDischargeA = prefs.getFloat("ld_v2", 5.0); 
     cfg.vSamples = prefs.getInt("vs", 10);
     cfg.bmsTimeout = prefs.getInt("to", 15);
     cfg.socStartTaper = prefs.getInt("st", 95); 
     cfg.socStartDTaper = prefs.getInt("sdt", 15); 
+    cfg.slewRate = prefs.getFloat("sr", 2.0); // Default 2A per 250ms change
     prefs.end();
 }
 
-// --- LOGIC ---
+// --- ADVANCED TAPER LOGIC ---
 float getFilteredVoltage(float newV) {
     if (newV < 30.0 || newV > 70.0) return packVoltage;
     vHistory.push_back(newV); while (vHistory.size() > cfg.vSamples) vHistory.pop_front();
     float sum = 0; for (float v : vHistory) sum += v; return sum / (float)vHistory.size();
 }
 
+float applySlewRate(float target, float current, float rate) {
+    if (target < current) return target; // Safety: Instant drop allowed
+    if (target > current + rate) return current + rate; // Slow ramp up
+    return target;
+}
+
 uint16_t calculateCCL(float v, int soc) {
     if (millis() - lastBmsRx > (cfg.bmsTimeout * 1000)) return 0;
     if (v >= cfg.vMaxCharge) return 0;
-    if ((cellHighAlarm && v > cfg.vHighAlarmGate) || (soc >= 100)) return (uint16_t)(cfg.trickleA * 10);
+    
+    // Base Taper Calculation
     float vRatio = (v > cfg.vStartTaper) ? (cfg.vMaxCharge - v) / (cfg.vMaxCharge - cfg.vStartTaper) : 1.0;
     float socRatio = (soc > cfg.socStartTaper) ? (100.0 - (float)soc) / (100.0 - (float)cfg.socStartTaper) : 1.0;
-    return (uint16_t)(max(min(vRatio, socRatio) * cfg.maxChargeA, cfg.trickleA) * 10);
+    float target = max(min(vRatio, socRatio) * cfg.maxChargeA, cfg.trickleA);
+
+    // Balancing / High Cell Override
+    if ((cellHighAlarm && v > cfg.vHighAlarmGate) || (soc >= 100)) target = cfg.trickleA;
+
+    // Apply Slew Rate to smooth the SMA request
+    currentCCL = applySlewRate(target, currentCCL, cfg.slewRate);
+    return (uint16_t)(currentCCL * 10);
 }
 
 uint16_t calculateDCL(float v, int soc) {
     if (millis() - lastBmsRx > (cfg.bmsTimeout * 1000)) return 0;
     if (v <= cfg.vMinDischarge || soc <= 0) return 0;
-    if (cellLowAlarm && v < cfg.vLowAlarmGate) return (uint16_t)(cfg.limpDischargeA * 10);
+    
     float vRatio = (v < cfg.vStartDTaper) ? (v - cfg.vMinDischarge) / (cfg.vStartDTaper - cfg.vMinDischarge) : 1.0;
     float socRatio = (soc < cfg.socStartDTaper) ? (float)soc / (float)cfg.socStartDTaper : 1.0;
-    return (uint16_t)(max(min(vRatio, socRatio) * cfg.maxDischargeA, cfg.limpDischargeA) * 10);
+    float target = max(min(vRatio, socRatio) * cfg.maxDischargeA, cfg.limpDischargeA);
+
+    // Low Cell Override
+    if (cellLowAlarm && v < cfg.vLowAlarmGate) target = cfg.limpDischargeA;
+
+    currentDCL = applySlewRate(target, currentDCL, cfg.slewRate);
+    return (uint16_t)(currentDCL * 10);
 }
 
-// --- HTML: DASHBOARD ---
+// --- UI COMPONENTS ---
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML><html><head><title>BMS Bridge Pro</title><meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
@@ -132,7 +154,6 @@ const char index_html[] PROGMEM = R"rawliteral(
   }, false);
 </script></body></html>)rawliteral";
 
-// --- HTML: CONFIG ---
 const char config_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML><html><head><title>Settings</title><meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
@@ -146,8 +167,10 @@ const char config_html[] PROGMEM = R"rawliteral(
 </style></head><body>
 <div class="container">
   <a href="/" style="color:#4caf50;text-decoration:none;">&larr; Back to Dashboard</a>
-  <h2>Protection & Tapering</h2>
+  <h2>Advanced Tapering & Slew</h2>
   <form action="/save" method="GET">
+    <div class="row"><div class="text-group"><strong>Slew Rate (A/step)</strong><span class="desc">Max Amps change per 250ms (Lower = Smoother).</span></div>
+      <input type="number" name="sr" step="0.1" value="!!VAL_SR!!"></div>
     <div class="row"><div class="text-group"><strong>SOC Start Taper (C) %</strong><span class="desc">Lower charge current gradually above this level.</span></div>
       <input type="number" name="st" step="1" value="!!VAL_ST!!"></div>
     <div class="row"><div class="text-group"><strong>SOC Start Taper (D) %</strong><span class="desc">Lower discharge current gradually below this level.</span></div>
@@ -183,12 +206,8 @@ void sendToSma() {
 }
 
 void setup() {
-    Serial.begin(115200);
-    loadConfig(); 
-
-    // Watchdog
-    esp_task_wdt_init(WDT_TIMEOUT_SECONDS, true);
-    esp_task_wdt_add(NULL);
+    Serial.begin(115200); loadConfig(); 
+    esp_task_wdt_init(WDT_TIMEOUT_SECONDS, true); esp_task_wdt_add(NULL);
 
     WiFi.config(local_IP, gateway, subnet); WiFi.begin(ssid, password);
     while (WiFi.status() != WL_CONNECTED && millis() < 10000) delay(100);
@@ -197,7 +216,7 @@ void setup() {
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){ request->send_P(200, "text/html", index_html); });
     server.on("/config", HTTP_GET, [](AsyncWebServerRequest *request){
         String h = String(config_html);
-        // Important: Replace LIMP first and use explicit integer conversion
+        h.replace("!!VAL_SR!!", String(cfg.slewRate, 1));
         h.replace("!!VAL_LIMP!!", String((int)cfg.limpDischargeA));
         h.replace("!!VAL_LAG!!", String(cfg.vLowAlarmGate, 1));
         h.replace("!!VAL_AG!!", String(cfg.vHighAlarmGate, 1));
@@ -212,31 +231,24 @@ void setup() {
         request->send(200, "text/html", h);
     });
     server.on("/save", HTTP_GET, [](AsyncWebServerRequest *request){
-        prefs.begin("bms-bridge", false); String audit = "[AUDIT] Changes: "; bool changed = false;
-        auto checkF = [&](String p, float &v, String k, String l) {
-            if(request->hasParam(p)) {
-                float n = request->getParam(p)->value().toFloat();
-                if (abs(n - v) > 0.01) { audit += l + "(" + String(v,1) + "->" + String(n,1) + ") "; v = n; prefs.putFloat(k.c_str(), v); changed = true; }
-            }
-        };
-        auto checkI = [&](String p, int &v, String k, String l) {
-            if(request->hasParam(p)) {
-                int n = request->getParam(p)->value().toInt();
-                if (n != v) { audit += l + "(" + String(v) + "->" + String(n) + ") "; v = n; prefs.putInt(k.c_str(), v); changed = true; }
-            }
-        };
-        checkI("st", cfg.socStartTaper, "st", "SOC_C_Tap"); checkI("sdt", cfg.socStartDTaper, "sdt", "SOC_D_Tap");
-        checkF("ta", cfg.trickleA, "ta", "Trickle"); checkF("ca", cfg.maxChargeA, "ca", "Max_C");
-        checkF("da", cfg.maxDischargeA, "da", "Max_D"); checkF("mv", cfg.vMaxCharge, "mv", "Stop_V");
-        checkF("mdv", cfg.vMinDischarge, "mdv", "Cutoff_V"); checkF("ld", cfg.limpDischargeA, "ld_v2", "Limp_A");
-        checkF("ag", cfg.vHighAlarmGate, "ag", "Hi_Gate"); checkF("lag", cfg.vLowAlarmGate, "lag", "Lo_Gate");
-        checkI("vs", cfg.vSamples, "vs", "Samples");
-        prefs.end(); if (changed) netLog("%s\n", audit.c_str());
+        prefs.begin("bms-bridge", false);
+        if(request->hasParam("sr")) { cfg.slewRate = request->getParam("sr")->value().toFloat(); prefs.putFloat("sr", cfg.slewRate); }
+        if(request->hasParam("st")) { cfg.socStartTaper = request->getParam("st")->value().toInt(); prefs.putInt("st", cfg.socStartTaper); }
+        if(request->hasParam("sdt")) { cfg.socStartDTaper = request->getParam("sdt")->value().toInt(); prefs.putInt("sdt", cfg.socStartDTaper); }
+        if(request->hasParam("ta")) { cfg.trickleA = request->getParam("ta")->value().toFloat(); prefs.putFloat("ta", cfg.trickleA); }
+        if(request->hasParam("ca")) { cfg.maxChargeA = request->getParam("ca")->value().toFloat(); prefs.putFloat("ca", cfg.maxChargeA); }
+        if(request->hasParam("da")) { cfg.maxDischargeA = request->getParam("da")->value().toFloat(); prefs.putFloat("da", cfg.maxDischargeA); }
+        if(request->hasParam("mv")) { cfg.vMaxCharge = request->getParam("mv")->value().toFloat(); prefs.putFloat("mv", cfg.vMaxCharge); }
+        if(request->hasParam("mdv")) { cfg.vMinDischarge = request->getParam("mdv")->value().toFloat(); prefs.putFloat("mdv", cfg.vMinDischarge); }
+        if(request->hasParam("ld")) { cfg.limpDischargeA = request->getParam("ld")->value().toFloat(); prefs.putFloat("ld_v2", cfg.limpDischargeA); }
+        if(request->hasParam("ag")) { cfg.vHighAlarmGate = request->getParam("ag")->value().toFloat(); prefs.putFloat("ag", cfg.vHighAlarmGate); }
+        if(request->hasParam("lag")) { cfg.vLowAlarmGate = request->getParam("lag")->value().toFloat(); prefs.putFloat("lag", cfg.vLowAlarmGate); }
+        if(request->hasParam("vs")) { cfg.vSamples = request->getParam("vs")->value().toInt(); prefs.putInt("vs", cfg.vSamples); }
+        prefs.end();
         request->redirect("/");
     });
     server.addHandler(&events); server.begin();
 
-    // CAN
     twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)CAN_TX, (gpio_num_t)CAN_RX, TWAI_MODE_NORMAL);
     twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS();
     twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
@@ -246,21 +258,15 @@ void setup() {
     SPI.begin(MCP2515_SCLK, MCP2515_MISO, MCP2515_MOSI, MCP2515_CS);
     Can_SMA.reset(); Can_SMA.setBitrate(CAN_500KBPS); Can_SMA.setNormalMode();
 
-    netLog("[SYSTEM] Fixed-Limp Started. Boot: %d, RAM: %d\n", bootCount, ESP.getFreeHeap());
+    netLog("[SYSTEM] Advanced Slew-Taper Logic Active.\n");
 }
 
 void loop() {
-    esp_task_wdt_reset(); 
-    ArduinoOTA.handle();
-
+    esp_task_wdt_reset(); ArduinoOTA.handle();
     if (logServer.hasClient()) { if (logClient) logClient.stop(); logClient = logServer.available(); }
 
-    twai_status_info_t twai_stat;
-    twai_get_status_info(&twai_stat);
-    if (twai_stat.state == TWAI_STATE_BUS_OFF) {
-        netLog("[CRITICAL] CAN BUS OFF - Restarting...\n");
-        twai_initiate_recovery();
-    }
+    twai_status_info_t twai_stat; twai_get_status_info(&twai_stat);
+    if (twai_stat.state == TWAI_STATE_BUS_OFF) twai_initiate_recovery();
 
     twai_message_t b_msg;
     if (twai_receive(&b_msg, 0) == ESP_OK) {
@@ -280,9 +286,9 @@ void loop() {
 
     struct can_frame in_frame;
     if (Can_SMA.readMessage(&in_frame) == MCP2515::ERROR_OK) {
+        twai_message_t back_msg; back_msg.identifier = in_frame.can_id; back_msg.data_length_code = in_frame.can_dlc; memcpy(back_msg.data, in_frame.data, 8); twai_transmit(&back_msg, 0);
         if (in_frame.can_id == 0x305) { uint8_t m = in_frame.data[0]; smaChargeMode = (m==1)?"Bulk":(m==2)?"Absorption":(m==3)?"Float":"Equalize"; }
         if (in_frame.can_id == 0x300) gridPresent = (in_frame.data[0] & 0x01);
-        twai_message_t back_msg; back_msg.identifier = in_frame.can_id; back_msg.data_length_code = in_frame.can_dlc; memcpy(back_msg.data, in_frame.data, 8); twai_transmit(&back_msg, 0);
     }
 
     if (millis() - lastSmaTx > 250) {
@@ -298,13 +304,10 @@ void loop() {
             else if (cellLowAlarm && packVoltage < cfg.vLowAlarmGate) mode = "LOW_CELL_LIMP";
             else if (packVoltage >= cfg.vMaxCharge || packSOC >= 100) mode = "FULL/TRICKLE";
             else if (packVoltage > cfg.vStartTaper || packSOC > cfg.socStartTaper) mode = "TAPER_C";
-            else if (packVoltage < cfg.vStartDTaper || packSOC < cfg.socStartDTaper) mode = "TAPER_D";
             
-            netLog("[STATUS] Mode:%s V:%.2f I:%.1f SOC:%d%% CCL:%.1f DCL:%.1f RAM:%d\n", mode.c_str(), packVoltage, packCurrent, packSOC, calculateCCL(packVoltage, packSOC)/10.0, calculateDCL(packVoltage, packSOC)/10.0, smaChargeMode.c_str(), ESP.getFreeHeap());
+            netLog("[STATUS] Mode:%s V:%.2f I:%.1f SOC:%d%% CCL:%.1f RAM:%d\n", mode.c_str(), packVoltage, packCurrent, packSOC, currentCCL, ESP.getFreeHeap());
             lastPush = millis();
         }
     }
-
-    if (ESP.getFreeHeap() < 20000) { delay(1000); ESP.restart(); }
-    // if (WiFi.status() != WL_CONNECTED && millis() > 60000) { delay(1000); ESP.restart(); }
+    if (ESP.getFreeHeap() < 18000) ESP.restart();
 }

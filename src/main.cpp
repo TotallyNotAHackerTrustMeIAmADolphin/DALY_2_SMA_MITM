@@ -16,11 +16,19 @@ IPAddress local_IP(192, 168, 178, 55);
 IPAddress gateway(192, 168, 178, 1);
 IPAddress subnet(255, 255, 255, 0);
 
-// --- SETTINGS (Defaults) ---
-float maxChargeA = 250.0;
-float maxDischargeA = 500.0;
-float vStartTaper = 54.00;
-float vMaxCharge = 55.20;
+// --- GLOBAL SETTINGS (Loaded from Flash) ---
+struct Config {
+    float maxChargeA;       // Bulk charge current
+    float maxDischargeA;    // Max house load current
+    float vStartTaper;      // Voltage to start slowing down
+    float vMaxCharge;       // Target finish voltage
+    float vStartDTaper;     // Voltage to start slowing discharge
+    float vMinDischarge;    // Hard cutoff voltage
+    float vAlarmGate;       // Voltage above which Cell Alarms are active
+    float balancingA;       // Current during cell runner alarm
+    int   vSamples;         // Moving average window
+    int   bmsTimeout;       // Seconds until safety cutoff
+} cfg;
 
 // --- STATE STORAGE ---
 float packVoltage = 52.6; 
@@ -31,7 +39,6 @@ unsigned long lastSmaTx = 0;
 unsigned long lastBmsRx = 0;
 
 std::deque<float> vHistory;
-const int V_SAMPLES = 10; 
 
 MCP2515 Can_SMA(MCP2515_CS, 10000000, &SPI);
 AsyncWebServer server(80);
@@ -40,52 +47,34 @@ WiFiServer logServer(2323);
 WiFiClient logClient;
 Preferences prefs;
 
-// --- HTML DASHBOARD (With Settings Form) ---
+// --- HTML: DASHBOARD ---
 const char index_html[] PROGMEM = R"rawliteral(
-<!DOCTYPE HTML><html>
-<head>
-  <title>BMS Bridge Pro</title>
+<!DOCTYPE HTML><html><head>
+  <title>BMS Bridge Dashboard</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <style>
     body { font-family: sans-serif; text-align: center; background: #121212; color: #e0e0e0; margin: 0; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; padding: 15px; }
+    .nav { background: #1e1e1e; padding: 10px; border-bottom: 1px solid #333; }
+    .nav a { color: #4caf50; text-decoration: none; margin: 0 15px; font-weight: bold; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 15px; padding: 20px; }
     .card { background: #1e1e1e; padding: 15px; border-radius: 12px; border: 1px solid #333; }
     .value { font-size: 1.8em; font-weight: bold; color: #4caf50; }
-    .config-card { background: #252525; margin: 15px; padding: 15px; border-radius: 12px; text-align: left; }
-    input { background: #333; color: white; border: 1px solid #555; padding: 8px; border-radius: 4px; width: 80px; margin: 5px; }
-    button { background: #2e7d32; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; }
-    #chart-container { width: 95%; max-width: 1000px; margin: auto; background: #1e1e1e; padding: 10px; border-radius: 12px; }
-    #console { width: 95%; max-width: 1000px; height: 100px; margin: 10px auto; background: #000; color: #00ff00; font-family: monospace; text-align: left; padding: 10px; overflow-y: scroll; font-size: 0.8em; }
+    #chart-container { width: 95%; max-width: 1000px; margin: 10px auto; background: #1e1e1e; padding: 15px; border-radius: 12px; border: 1px solid #333; }
+    #console { width: 95%; max-width: 1000px; height: 120px; margin: 10px auto; background: #000; color: #00ff00; font-family: monospace; text-align: left; padding: 10px; overflow-y: scroll; border-radius: 8px; font-size: 0.85em; }
   </style>
-</head>
-<body>
-  <h2>SMA-DALY BRIDGE PRO</h2>
+</head><body>
+  <div class="nav"><a href="/">Dashboard</a> | <a href="/config">Configuration</a></div>
+  <h2>SYSTEM STATUS</h2>
   <div class="grid">
     <div class="card"><div>Voltage</div><div id="v" class="value">0.00</div></div>
-    <div class="card"><div>Amps</div><div id="i" class="value">0.0</div></div>
+    <div class="card"><div>Current</div><div id="i" class="value">0.0</div></div>
+    <div class="card"><div>Power</div><div id="p" class="value">0.0</div></div>
     <div class="card"><div>SOC</div><div id="soc" class="value">0</div></div>
   </div>
-
-  <div class="config-card">
-    <strong>Live Tuning:</strong><br>
-    Start Taper: <input type="number" step="0.1" id="in_vt" value="54.0"> V | 
-    Max Charge: <input type="number" id="in_ca" value="250"> A | 
-    Max Dischg: <input type="number" id="in_da" value="500"> A
-    <button onclick="saveSettings()">Apply Settings</button>
-  </div>
-
   <div id="chart-container"><canvas id="liveChart"></canvas></div>
-  <div id="console">System Ready.</div>
-
+  <div id="console">Log: Standing by...</div>
   <script>
-    function saveSettings() {
-      const vt = document.getElementById('in_vt').value;
-      const ca = document.getElementById('in_ca').value;
-      const da = document.getElementById('in_da').value;
-      fetch(`/set?vt=${vt}&ca=${ca}&da=${da}`).then(r => alert('Settings Saved!'));
-    }
-
     const ctx = document.getElementById('liveChart').getContext('2d');
     const chart = new Chart(ctx, {
       type: 'line',
@@ -98,7 +87,6 @@ const char index_html[] PROGMEM = R"rawliteral(
         yA: { type: 'linear', position: 'right', min: -550, max: 300 }
       }}
     });
-
     if (!!window.EventSource) {
       var source = new EventSource('/events');
       source.addEventListener('data', function(e) {
@@ -106,6 +94,7 @@ const char index_html[] PROGMEM = R"rawliteral(
         document.getElementById('v').innerHTML = obj.v.toFixed(2);
         document.getElementById('i').innerHTML = obj.i.toFixed(1);
         document.getElementById('soc').innerHTML = obj.soc;
+        document.getElementById('p').innerHTML = ((obj.v * obj.i)/1000).toFixed(2);
         const now = new Date().toLocaleTimeString();
         if(chart.data.labels.length > 60) { chart.data.labels.shift(); chart.data.datasets.forEach(d => d.data.shift()); }
         chart.data.labels.push(now);
@@ -122,6 +111,41 @@ const char index_html[] PROGMEM = R"rawliteral(
   </script>
 </body></html>)rawliteral";
 
+// --- HTML: CONFIG PAGE ---
+const char config_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE HTML><html><head>
+  <title>BMS Bridge Configuration</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font-family: sans-serif; background: #121212; color: #e0e0e0; margin: 0; padding: 20px; }
+    .container { max-width: 600px; margin: auto; background: #1e1e1e; padding: 20px; border-radius: 12px; border: 1px solid #333; }
+    .row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; padding-bottom: 10px; border-bottom: 1px solid #2a2a2a; }
+    .desc { font-size: 0.8em; color: #aaa; margin-top: 4px; display: block; }
+    input { background: #333; color: white; border: 1px solid #555; padding: 8px; border-radius: 4px; width: 100px; }
+    button { background: #2e7d32; color: white; border: none; padding: 15px; border-radius: 8px; width: 100%; cursor: pointer; font-weight: bold; margin-top: 20px; }
+    .back { color: #4caf50; text-decoration: none; display: block; margin-bottom: 20px; }
+  </style>
+</head><body>
+  <div class="container">
+    <a href="/" class="back">&larr; Back to Dashboard</a>
+    <h2>Configuration Settings</h2>
+    <form action="/save" method="GET">
+      <div class="row"><div><strong>Max Charge Amps</strong><span class="desc">Bulk charging limit (Safe hardware limit).</span></div><input name="ca" value="{ca}"></div>
+      <div class="row"><div><strong>Max Discharge Amps</strong><span class="desc">Peak house load limit (Check fuses!).</span></div><input name="da" value="{da}"></div>
+      <div class="row"><div><strong>Charge Start Taper (V)</strong><span class="desc">Voltage where current reduction begins.</span></div><input name="vt" value="{vt}"></div>
+      <div class="row"><div><strong>Charge Stop Volts (V)</strong><span class="desc">Target full voltage (usually 55.2V).</span></div><input name="mv" value="{mv}"></div>
+      <div class="row"><div><strong>Discharge Start Taper (V)</strong><span class="desc">Voltage to begin limiting house loads.</span></div><input name="dvt" value="{dvt}"></div>
+      <div class="row"><div><strong>Discharge Cutoff (V)</strong><span class="desc">Hard stop for discharging (usually 48.0V).</span></div><input name="mdv" value="{mdv}"></div>
+      <div class="row"><div><strong>Alarm Gate (V)</strong><span class="desc">Enable Cell Runner protection above this voltage.</span></div><input name="ag" value="{ag}"></div>
+      <div class="row"><div><strong>Balancing Amps</strong><span class="desc">Current limit during high-cell runners.</span></div><input name="ba" value="{ba}"></div>
+      <div class="row"><div><strong>Voltage Samples</strong><span class="desc">Moving average window size (1-20).</span></div><input name="vs" value="{vs}"></div>
+      <div class="row"><div><strong>BMS Timeout (s)</strong><span class="desc">Safety cutoff if BMS signal is lost.</span></div><input name="to" value="{to}"></div>
+      <button type="submit">Save & Apply Changes</button>
+    </form>
+  </div>
+</body></html>)rawliteral";
+
+// --- LOGGING ---
 void netLog(const char* format, ...) {
     char loc_res[256];
     va_list arg; va_start(arg, format);
@@ -132,26 +156,43 @@ void netLog(const char* format, ...) {
     events.send(loc_res, "log", millis());
 }
 
+// --- CONFIG PERSISTENCE ---
+void loadConfig() {
+    prefs.begin("bms-bridge", false);
+    cfg.maxChargeA = prefs.getFloat("ca", 250.0);
+    cfg.maxDischargeA = prefs.getFloat("da", 500.0);
+    cfg.vStartTaper = prefs.getFloat("vt", 54.00);
+    cfg.vMaxCharge = prefs.getFloat("mv", 55.20);
+    cfg.vStartDTaper = prefs.getFloat("dvt", 49.60);
+    cfg.vMinDischarge = prefs.getFloat("mdv", 48.00);
+    cfg.vAlarmGate = prefs.getFloat("ag", 53.50);
+    cfg.balancingA = prefs.getFloat("ba", 1.0);
+    cfg.vSamples = prefs.getInt("vs", 10);
+    cfg.bmsTimeout = prefs.getInt("to", 15);
+    prefs.end();
+}
+
+// --- CALCULATION LOGIC ---
 float getFilteredVoltage(float newV) {
     vHistory.push_back(newV);
-    if (vHistory.size() > V_SAMPLES) vHistory.pop_front();
+    while (vHistory.size() > cfg.vSamples) vHistory.pop_front();
     float sum = 0; for (float v : vHistory) sum += v;
     return sum / vHistory.size();
 }
 
 uint16_t calculateCCL(float v) {
-    if (cellHighAlarm && v > 53.5) return 10; // 1A balancing
-    if (v >= vMaxCharge) return 0;
-    if (v < vStartTaper) return (uint16_t)(maxChargeA * 10);
-    float ratio = (vMaxCharge - v) / (vMaxCharge - vStartTaper);
-    return (uint16_t)(max(ratio * maxChargeA, 2.0f) * 10);
+    if (cellHighAlarm && v > cfg.vAlarmGate) return (uint16_t)(cfg.balancingA * 10);
+    if (v >= cfg.vMaxCharge) return 0;
+    if (v < cfg.vStartTaper) return (uint16_t)(cfg.maxChargeA * 10);
+    float ratio = (cfg.vMaxCharge - v) / (cfg.vMaxCharge - cfg.vStartTaper);
+    return (uint16_t)(max(ratio * cfg.maxChargeA, 2.0f) * 10);
 }
 
 uint16_t calculateDCL(float v) {
-    if (v <= 48.0) return 0;
-    if (v > 49.6) return (uint16_t)(maxDischargeA * 10);
-    float ratio = (v - 48.0) / (49.6 - 48.0);
-    return (uint16_t)(max(ratio * maxDischargeA, 10.0f) * 10);
+    if (v <= cfg.vMinDischarge) return 0;
+    if (v > cfg.vStartDTaper) return (uint16_t)(cfg.maxDischargeA * 10);
+    float ratio = (v - cfg.vMinDischarge) / (cfg.vStartDTaper - cfg.vMinDischarge);
+    return (uint16_t)(max(ratio * cfg.maxDischargeA, 10.0f) * 10);
 }
 
 void sendToSma() {
@@ -185,32 +226,56 @@ void setup() {
     while (WiFi.status() != WL_CONNECTED) delay(100);
     WiFi.setSleep(false);
     
-    // Load Persisted Settings
-    prefs.begin("bms-bridge", false);
-    vStartTaper = prefs.getFloat("vt", 54.00);
-    maxChargeA = prefs.getFloat("ca", 250.0);
-    maxDischargeA = prefs.getFloat("da", 500.0);
-
+    loadConfig();
     ArduinoOTA.begin();
     logServer.begin(); 
 
+    // --- WEB HANDLERS ---
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
         request->send_P(200, "text/html", index_html);
     });
 
-    server.on("/set", HTTP_GET, [](AsyncWebServerRequest *request){
-        if (request->hasParam("vt")) vStartTaper = request->getParam("vt")->value().toFloat();
-        if (request->hasParam("ca")) maxChargeA = request->getParam("ca")->value().toFloat();
-        if (request->hasParam("da")) maxDischargeA = request->getParam("da")->value().toFloat();
-        prefs.putFloat("vt", vStartTaper);
-        prefs.putFloat("ca", maxChargeA);
-        prefs.putFloat("da", maxDischargeA);
-        request->send(200, "text/plain", "OK");
+    server.on("/config", HTTP_GET, [](AsyncWebServerRequest *request){
+        String html = String(config_html);
+        html.replace("{ca}", String(cfg.maxChargeA));
+        html.replace("{da}", String(cfg.maxDischargeA));
+        html.replace("{vt}", String(cfg.vStartTaper));
+        html.replace("{mv}", String(cfg.vMaxCharge));
+        html.replace("{dvt}", String(cfg.vStartDTaper));
+        html.replace("{mdv}", String(cfg.vMinDischarge));
+        html.replace("{ag}", String(cfg.vAlarmGate));
+        html.replace("{ba}", String(cfg.balancingA));
+        html.replace("{vs}", String(cfg.vSamples));
+        html.replace("{to}", String(cfg.bmsTimeout));
+        request->send(200, "text/html", html);
+    });
+
+    server.on("/save", HTTP_GET, [](AsyncWebServerRequest *request){
+        prefs.begin("bms-bridge", false);
+        if(request->hasParam("ca")) cfg.maxChargeA = request->getParam("ca")->value().toFloat();
+        if(request->hasParam("da")) cfg.maxDischargeA = request->getParam("da")->value().toFloat();
+        if(request->hasParam("vt")) cfg.vStartTaper = request->getParam("vt")->value().toFloat();
+        if(request->hasParam("mv")) cfg.vMaxCharge = request->getParam("mv")->value().toFloat();
+        if(request->hasParam("dvt")) cfg.vStartDTaper = request->getParam("dvt")->value().toFloat();
+        if(request->hasParam("mdv")) cfg.vMinDischarge = request->getParam("mdv")->value().toFloat();
+        if(request->hasParam("ag")) cfg.vAlarmGate = request->getParam("ag")->value().toFloat();
+        if(request->hasParam("ba")) cfg.balancingA = request->getParam("ba")->value().toFloat();
+        if(request->hasParam("vs")) cfg.vSamples = request->getParam("vs")->value().toInt();
+        if(request->hasParam("to")) cfg.bmsTimeout = request->getParam("to")->value().toInt();
+        
+        prefs.putFloat("ca", cfg.maxChargeA); prefs.putFloat("da", cfg.maxDischargeA);
+        prefs.putFloat("vt", cfg.vStartTaper); prefs.putFloat("mv", cfg.vMaxCharge);
+        prefs.putFloat("dvt", cfg.vStartDTaper); prefs.putFloat("mdv", cfg.vMinDischarge);
+        prefs.putFloat("ag", cfg.vAlarmGate); prefs.putFloat("ba", cfg.balancingA);
+        prefs.putInt("vs", cfg.vSamples); prefs.putInt("to", cfg.bmsTimeout);
+        prefs.end();
+        request->redirect("/");
     });
 
     server.addHandler(&events);
     server.begin();
 
+    // CAN Init
     twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)CAN_TX, (gpio_num_t)CAN_RX, TWAI_MODE_NORMAL);
     twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS();
     twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
@@ -260,8 +325,9 @@ void loop() {
         
         static unsigned long lastPush = 0;
         if (millis() - lastPush > 2000) {
-            String mode = (packVoltage > vStartTaper) ? "TAPER" : "NORMAL";
-            if (cellHighAlarm && packVoltage > 53.5) mode = "BALANCE";
+            String mode = (packVoltage > cfg.vStartTaper) ? "TAPER_C" : "NORMAL";
+            if (packVoltage < cfg.vStartDTaper) mode = "TAPER_D";
+            if (cellHighAlarm && packVoltage > cfg.vAlarmGate) mode = "BALANCE";
             
             char json[128];
             snprintf(json, sizeof(json), "{\"v\":%.2f,\"i\":%.1f,\"soc\":%d}", packVoltage, packCurrent, packSOC);
@@ -272,7 +338,9 @@ void loop() {
         }
     }
 
-    if (millis() - lastBmsRx > 15000 && lastBmsRx != 0) {
-        packVoltage = vMaxCharge;
+    // Fail-safe logic
+    if (millis() - lastBmsRx > (cfg.bmsTimeout * 1000) && lastBmsRx != 0) {
+        packVoltage = cfg.vMaxCharge; // Triggers 0A logic
+        netLog("[CRITICAL] BMS TIMEOUT!\n");
     }
 }

@@ -1,7 +1,3 @@
-This is the comprehensive documentation for the **Pro-Edition v4.0** of the SMA-Daly CAN Bridge. It reflects the finalized transition from ambiguous SOC-based logic to **Pure Voltage Glideslope Management**, providing industrial-grade stability and precision for large-scale DIY LiFePO4 storage.
-
----
-
 # SMA Sunny Island & Daly BMS: Active CAN Bridge (Pro-Edition v4.0)
 
 An ESP32-S3 based "Man-in-the-Middle" appliance designed to sit between a **Daly Smart BMS** and an **SMA Sunny Island Cluster** (L1 Master). It intercepts raw BMS data and calculates stabilized, high-resolution control signals to ensure professional-grade battery management.

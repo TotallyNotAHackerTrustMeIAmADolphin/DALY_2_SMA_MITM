@@ -2,6 +2,7 @@
 #include <WiFi.h>
 #include <ESPAsyncWebServer.h>
 #include <ArduinoOTA.h>
+#include <Preferences.h>
 #include "driver/twai.h"
 #include "pin_config.h"
 #include "mcp2515.h"
@@ -15,17 +16,11 @@ IPAddress local_IP(192, 168, 178, 55);
 IPAddress gateway(192, 168, 178, 1);
 IPAddress subnet(255, 255, 255, 0);
 
-// --- POWER LIMITS ---
-const float MAX_CHARGE_LIMIT_A    = 250.0; 
-const float MAX_DISCHARGE_LIMIT_A = 500.0; 
-const float BALANCING_A           = 1.0;   
-
-// --- VOLTAGE THRESHOLDS ---
-const float V_MAX_CHARGE     = 55.20; 
-const float V_START_C_TAPER  = 54.00; 
-const float V_START_D_TAPER  = 49.60; 
-const float V_MIN_DISCHARGE  = 48.00; 
-const float V_ALARM_GATE     = 53.50; 
+// --- SETTINGS (Defaults) ---
+float maxChargeA = 250.0;
+float maxDischargeA = 500.0;
+float vStartTaper = 54.00;
+float vMaxCharge = 55.20;
 
 // --- STATE STORAGE ---
 float packVoltage = 52.6; 
@@ -43,34 +38,54 @@ AsyncWebServer server(80);
 AsyncEventSource events("/events");
 WiFiServer logServer(2323); 
 WiFiClient logClient;
+Preferences prefs;
 
-// --- HTML DASHBOARD ---
+// --- HTML DASHBOARD (With Settings Form) ---
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML><html>
 <head>
-  <title>BMS Bridge Dashboard</title>
+  <title>BMS Bridge Pro</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <style>
     body { font-family: sans-serif; text-align: center; background: #121212; color: #e0e0e0; margin: 0; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 15px; padding: 20px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; padding: 15px; }
     .card { background: #1e1e1e; padding: 15px; border-radius: 12px; border: 1px solid #333; }
-    .value { font-size: 1.8em; font-weight: bold; color: #4caf50; margin: 5px 0; }
-    #chart-container { width: 95%; max-width: 1000px; margin: 20px auto; background: #1e1e1e; padding: 15px; border-radius: 12px; border: 1px solid #333; }
-    #console { width: 95%; max-width: 1000px; height: 120px; margin: 10px auto; background: #000; color: #00ff00; font-family: monospace; text-align: left; padding: 10px; overflow-y: scroll; border-radius: 8px; font-size: 0.85em; }
+    .value { font-size: 1.8em; font-weight: bold; color: #4caf50; }
+    .config-card { background: #252525; margin: 15px; padding: 15px; border-radius: 12px; text-align: left; }
+    input { background: #333; color: white; border: 1px solid #555; padding: 8px; border-radius: 4px; width: 80px; margin: 5px; }
+    button { background: #2e7d32; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; }
+    #chart-container { width: 95%; max-width: 1000px; margin: auto; background: #1e1e1e; padding: 10px; border-radius: 12px; }
+    #console { width: 95%; max-width: 1000px; height: 100px; margin: 10px auto; background: #000; color: #00ff00; font-family: monospace; text-align: left; padding: 10px; overflow-y: scroll; font-size: 0.8em; }
   </style>
 </head>
 <body>
-  <h2 style="margin-top:20px;">SMA-DALY BRIDGE PRO</h2>
+  <h2>SMA-DALY BRIDGE PRO</h2>
   <div class="grid">
-    <div class="card"><div>Voltage</div><div id="v" class="value">0.00</div><div>Volts</div></div>
-    <div class="card"><div>Current</div><div id="i" class="value">0.0</div><div>Amps</div></div>
-    <div class="card"><div>Power</div><div id="p" class="value">0.0</div><div>kW</div></div>
-    <div class="card"><div>SOC</div><div id="soc" class="value">0</div><div>%</div></div>
+    <div class="card"><div>Voltage</div><div id="v" class="value">0.00</div></div>
+    <div class="card"><div>Amps</div><div id="i" class="value">0.0</div></div>
+    <div class="card"><div>SOC</div><div id="soc" class="value">0</div></div>
   </div>
+
+  <div class="config-card">
+    <strong>Live Tuning:</strong><br>
+    Start Taper: <input type="number" step="0.1" id="in_vt" value="54.0"> V | 
+    Max Charge: <input type="number" id="in_ca" value="250"> A | 
+    Max Dischg: <input type="number" id="in_da" value="500"> A
+    <button onclick="saveSettings()">Apply Settings</button>
+  </div>
+
   <div id="chart-container"><canvas id="liveChart"></canvas></div>
-  <div id="console">Log: Standing by...</div>
+  <div id="console">System Ready.</div>
+
   <script>
+    function saveSettings() {
+      const vt = document.getElementById('in_vt').value;
+      const ca = document.getElementById('in_ca').value;
+      const da = document.getElementById('in_da').value;
+      fetch(`/set?vt=${vt}&ca=${ca}&da=${da}`).then(r => alert('Settings Saved!'));
+    }
+
     const ctx = document.getElementById('liveChart').getContext('2d');
     const chart = new Chart(ctx, {
       type: 'line',
@@ -79,10 +94,11 @@ const char index_html[] PROGMEM = R"rawliteral(
         { label: 'Current', data: [], borderColor: '#4caf50', yAxisID: 'yA', pointRadius: 0 }
       ]},
       options: { animation: false, scales: { 
-        yV: { type: 'linear', position: 'left', min: 46, max: 57 },
+        yV: { type: 'linear', position: 'left', min: 46, max: 58 },
         yA: { type: 'linear', position: 'right', min: -550, max: 300 }
       }}
     });
+
     if (!!window.EventSource) {
       var source = new EventSource('/events');
       source.addEventListener('data', function(e) {
@@ -90,7 +106,6 @@ const char index_html[] PROGMEM = R"rawliteral(
         document.getElementById('v').innerHTML = obj.v.toFixed(2);
         document.getElementById('i').innerHTML = obj.i.toFixed(1);
         document.getElementById('soc').innerHTML = obj.soc;
-        document.getElementById('p').innerHTML = ((obj.v * obj.i)/1000).toFixed(2);
         const now = new Date().toLocaleTimeString();
         if(chart.data.labels.length > 60) { chart.data.labels.shift(); chart.data.datasets.forEach(d => d.data.shift()); }
         chart.data.labels.push(now);
@@ -101,14 +116,12 @@ const char index_html[] PROGMEM = R"rawliteral(
       source.addEventListener('log', function(e) {
         const con = document.getElementById('console');
         con.innerHTML += e.data + "<br>";
-        if(con.childNodes.length > 50) con.removeChild(con.firstChild);
         con.scrollTop = con.scrollHeight;
       }, false);
     }
   </script>
 </body></html>)rawliteral";
 
-// --- CUSTOM LOGGER ---
 void netLog(const char* format, ...) {
     char loc_res[256];
     va_list arg; va_start(arg, format);
@@ -127,18 +140,18 @@ float getFilteredVoltage(float newV) {
 }
 
 uint16_t calculateCCL(float v) {
-    if (cellHighAlarm && v > V_ALARM_GATE) return (BALANCING_A * 10);
-    if (v >= V_MAX_CHARGE) return 0;
-    if (v < V_START_C_TAPER) return (MAX_CHARGE_LIMIT_A * 10);
-    float ratio = (V_MAX_CHARGE - v) / (V_MAX_CHARGE - V_START_C_TAPER);
-    return (uint16_t)(max(ratio * MAX_CHARGE_LIMIT_A, 2.0f) * 10);
+    if (cellHighAlarm && v > 53.5) return 10; // 1A balancing
+    if (v >= vMaxCharge) return 0;
+    if (v < vStartTaper) return (uint16_t)(maxChargeA * 10);
+    float ratio = (vMaxCharge - v) / (vMaxCharge - vStartTaper);
+    return (uint16_t)(max(ratio * maxChargeA, 2.0f) * 10);
 }
 
 uint16_t calculateDCL(float v) {
-    if (v <= V_MIN_DISCHARGE) return 0;
-    if (v > V_START_D_TAPER) return (uint16_t)(MAX_DISCHARGE_LIMIT_A * 10);
-    float ratio = (v - V_MIN_DISCHARGE) / (V_START_D_TAPER - V_MIN_DISCHARGE);
-    return (uint16_t)(max(ratio * MAX_DISCHARGE_LIMIT_A, 10.0f) * 10);
+    if (v <= 48.0) return 0;
+    if (v > 49.6) return (uint16_t)(maxDischargeA * 10);
+    float ratio = (v - 48.0) / (49.6 - 48.0);
+    return (uint16_t)(max(ratio * maxDischargeA, 10.0f) * 10);
 }
 
 void sendToSma() {
@@ -171,16 +184,39 @@ void setup() {
     WiFi.begin(ssid, password);
     while (WiFi.status() != WL_CONNECTED) delay(100);
     WiFi.setSleep(false);
+    
+    // Load Persisted Settings
+    prefs.begin("bms-bridge", false);
+    vStartTaper = prefs.getFloat("vt", 54.00);
+    maxChargeA = prefs.getFloat("ca", 250.0);
+    maxDischargeA = prefs.getFloat("da", 500.0);
+
     ArduinoOTA.begin();
     logServer.begin(); 
-    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){ request->send_P(200, "text/html", index_html); });
+
+    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+        request->send_P(200, "text/html", index_html);
+    });
+
+    server.on("/set", HTTP_GET, [](AsyncWebServerRequest *request){
+        if (request->hasParam("vt")) vStartTaper = request->getParam("vt")->value().toFloat();
+        if (request->hasParam("ca")) maxChargeA = request->getParam("ca")->value().toFloat();
+        if (request->hasParam("da")) maxDischargeA = request->getParam("da")->value().toFloat();
+        prefs.putFloat("vt", vStartTaper);
+        prefs.putFloat("ca", maxChargeA);
+        prefs.putFloat("da", maxDischargeA);
+        request->send(200, "text/plain", "OK");
+    });
+
     server.addHandler(&events);
     server.begin();
+
     twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)CAN_TX, (gpio_num_t)CAN_RX, TWAI_MODE_NORMAL);
     twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS();
     twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
     twai_driver_install(&g_config, &t_config, &f_config);
     twai_start();
+
     pinMode(MCP2515_RST, OUTPUT);
     digitalWrite(MCP2515_RST, HIGH); delay(50); digitalWrite(MCP2515_RST, LOW); delay(50); digitalWrite(MCP2515_RST, HIGH);
     SPI.begin(MCP2515_SCLK, MCP2515_MISO, MCP2515_MOSI, MCP2515_CS);
@@ -192,7 +228,6 @@ void loop() {
     if (logServer.hasClient()) {
         if (logClient) logClient.stop();
         logClient = logServer.available();
-        logClient.println("Bridge Logger Connected.");
     }
 
     twai_message_t b_msg;
@@ -225,28 +260,19 @@ void loop() {
         
         static unsigned long lastPush = 0;
         if (millis() - lastPush > 2000) {
-            // Determine System Mode for Log
-            String mode = "NORMAL";
-            if (cellHighAlarm && packVoltage > V_ALARM_GATE) mode = "BALANCING";
-            else if (packVoltage >= V_MAX_CHARGE) mode = "FULL";
-            else if (packVoltage > V_START_C_TAPER) mode = "TAPER_CHG";
-            else if (packVoltage < V_START_D_TAPER) mode = "TAPER_DISCH";
-
-            // Push JSON to Browser
+            String mode = (packVoltage > vStartTaper) ? "TAPER" : "NORMAL";
+            if (cellHighAlarm && packVoltage > 53.5) mode = "BALANCE";
+            
             char json[128];
             snprintf(json, sizeof(json), "{\"v\":%.2f,\"i\":%.1f,\"soc\":%d}", packVoltage, packCurrent, packSOC);
             events.send(json, "data", millis());
-            
-            // Detailed Log for Python script
-            netLog("[STATUS] Mode:%s V:%.2f I:%.1f SOC:%d CCL:%.1f DCL:%.1f\n", 
-                   mode.c_str(), packVoltage, packCurrent, packSOC, calculateCCL(packVoltage)/10.0, calculateDCL(packVoltage)/10.0);
-            
+            netLog("[STATUS] Mode:%s V:%.2f I:%.1f CCL:%.1f DCL:%.1f\n", 
+                   mode.c_str(), packVoltage, packCurrent, calculateCCL(packVoltage)/10.0, calculateDCL(packVoltage)/10.0);
             lastPush = millis();
         }
     }
 
     if (millis() - lastBmsRx > 15000 && lastBmsRx != 0) {
-        packVoltage = V_MAX_CHARGE; // Stop current
-        netLog("[CRITICAL] BMS TIMEOUT - SAFETY CUTOFF\n");
+        packVoltage = vMaxCharge;
     }
 }

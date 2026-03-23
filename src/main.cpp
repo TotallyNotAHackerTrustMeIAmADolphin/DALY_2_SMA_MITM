@@ -24,12 +24,11 @@ struct Config {
     float vMaxCharge;       float vStartDTaper;     float vMinDischarge;    
     float vHighAlarmGate;   float vLowAlarmGate;    float trickleA;         
     float limpDischargeA;   int   vSamples;         int   bmsTimeout;       
-    int   socStartTaper;    int   socStartDTaper;   float slewRate; 
+    int   socStartTaper;    int   socStartDTaper;
 } cfg;
 
 // --- STATE STORAGE ---
 float packVoltage = 52.6; float packCurrent = 0.0; uint16_t packSOC = 50;
-float currentCCL = 0.0;   float currentDCL = 0.0; 
 bool cellHighAlarm = false; bool cellLowAlarm = false;
 unsigned long lastSmaTx = 0; unsigned long lastBmsRx = 0;
 std::deque<float> vHistory;
@@ -54,57 +53,71 @@ void loadConfig() {
     prefs.begin("bms-bridge", false);
     bootCount = prefs.getUInt("boots", 0);
     prefs.putUInt("boots", ++bootCount); 
+    // Hardcoded Fallbacks serve as the "Default Values"
     cfg.maxChargeA = prefs.getFloat("ca", 250.0);
     cfg.maxDischargeA = prefs.getFloat("da", 500.0);
-    cfg.vStartTaper = prefs.getFloat("vt", 54.20);
-    cfg.vMaxCharge = prefs.getFloat("mv", 55.20);
+    cfg.vStartTaper = prefs.getFloat("vt", 54.00);      
+    cfg.vMaxCharge = prefs.getFloat("mv", 55.20);       
     cfg.vStartDTaper = prefs.getFloat("dvt", 49.60);
     cfg.vMinDischarge = prefs.getFloat("mdv", 48.00);
-    cfg.vHighAlarmGate = prefs.getFloat("ag", 53.50);
-    cfg.vLowAlarmGate = prefs.getFloat("lag", 50.00);
-    cfg.trickleA = prefs.getFloat("ta", 2.0); 
+    cfg.vHighAlarmGate = prefs.getFloat("ag", 54.80);   
+    cfg.vLowAlarmGate = prefs.getFloat("lag", 49.00);    
+    cfg.trickleA = prefs.getFloat("ta", 15.0); 
     cfg.limpDischargeA = prefs.getFloat("ld_v2", 5.0); 
     cfg.vSamples = prefs.getInt("vs", 10);
     cfg.bmsTimeout = prefs.getInt("to", 15);
-    cfg.socStartTaper = prefs.getInt("st", 96); 
+    cfg.socStartTaper = prefs.getInt("st", 95); 
     cfg.socStartDTaper = prefs.getInt("sdt", 15); 
-    cfg.slewRate = prefs.getFloat("sr", 2.0); 
     prefs.end();
 }
 
-// --- ADVANCED TAPER LOGIC ---
+// --- CROSS-COMPUTED LINEAR MATH ---
 float getFilteredVoltage(float newV) {
     if (newV < 30.0 || newV > 70.0) return packVoltage;
     vHistory.push_back(newV); while (vHistory.size() > cfg.vSamples) vHistory.pop_front();
     float sum = 0; for (float v : vHistory) sum += v; return sum / (float)vHistory.size();
 }
 
-float applySlewRate(float target, float current, float rate) {
-    if (target < current) return target; 
-    if (target > current + rate) return current + rate; 
-    return target;
-}
-
 uint16_t calculateCCL(float v, int soc) {
     if (millis() - lastBmsRx > (cfg.bmsTimeout * 1000)) return 0;
     if (v >= cfg.vMaxCharge) return 0;
-    float vRatio = (v > cfg.vStartTaper) ? (cfg.vMaxCharge - v) / (cfg.vMaxCharge - cfg.vStartTaper) : 1.0;
-    float socRatio = (soc > cfg.socStartTaper) ? (100.0 - (float)soc) / (100.0 - (float)cfg.socStartTaper) : 1.0;
-    float target = max(min(vRatio, socRatio) * cfg.maxChargeA, cfg.trickleA);
-    if ((cellHighAlarm && v > cfg.vHighAlarmGate) || (soc >= 100)) target = cfg.trickleA;
-    currentCCL = applySlewRate(target, currentCCL, cfg.slewRate);
-    return (uint16_t)(currentCCL * 10);
+
+    float vLimit = cfg.maxChargeA;
+    if (v > cfg.vStartTaper) {
+        float vSlope = (cfg.vHighAlarmGate - v) / (cfg.vHighAlarmGate - cfg.vStartTaper);
+        vLimit = cfg.trickleA + (vSlope * (cfg.maxChargeA - cfg.trickleA));
+    }
+
+    float socLimit = cfg.maxChargeA;
+    if (soc > cfg.socStartTaper) {
+        float socSlope = (100.0 - (float)soc) / (100.0 - (float)cfg.socStartTaper);
+        socLimit = cfg.trickleA + (socSlope * (cfg.maxChargeA - cfg.trickleA));
+    }
+
+    float targetA = min(vLimit, socLimit);
+    if (cellHighAlarm || soc >= 100 || v >= cfg.vHighAlarmGate) targetA = cfg.trickleA;
+    return (uint16_t)(max(targetA, cfg.trickleA) * 10);
 }
 
 uint16_t calculateDCL(float v, int soc) {
     if (millis() - lastBmsRx > (cfg.bmsTimeout * 1000)) return 0;
     if (v <= cfg.vMinDischarge || soc <= 0) return 0;
-    float vRatio = (v < cfg.vStartDTaper) ? (v - cfg.vMinDischarge) / (cfg.vStartDTaper - cfg.vMinDischarge) : 1.0;
-    float socRatio = (soc < cfg.socStartDTaper) ? (float)soc / (float)cfg.socStartDTaper : 1.0;
-    float target = max(min(vRatio, socRatio) * cfg.maxDischargeA, cfg.limpDischargeA);
-    if (cellLowAlarm && v < cfg.vLowAlarmGate) target = cfg.limpDischargeA;
-    currentDCL = applySlewRate(target, currentDCL, cfg.slewRate);
-    return (uint16_t)(currentDCL * 10);
+
+    float vLimit = cfg.maxDischargeA;
+    if (v < cfg.vStartDTaper) {
+        float vSlope = (v - cfg.vLowAlarmGate) / (cfg.vStartDTaper - cfg.vLowAlarmGate);
+        vLimit = cfg.limpDischargeA + (vSlope * (cfg.maxDischargeA - cfg.limpDischargeA));
+    }
+
+    float socLimit = cfg.maxDischargeA;
+    if (soc < cfg.socStartDTaper) {
+        float socSlope = (float)soc / (float)cfg.socStartDTaper;
+        socLimit = cfg.limpDischargeA + (socSlope * (cfg.maxDischargeA - cfg.limpDischargeA));
+    }
+
+    float targetA = min(vLimit, socLimit);
+    if (cellLowAlarm || v <= cfg.vLowAlarmGate) targetA = cfg.limpDischargeA;
+    return (uint16_t)(max(targetA, cfg.limpDischargeA) * 10);
 }
 
 // --- UI DASHBOARD ---
@@ -154,38 +167,44 @@ const char config_html[] PROGMEM = R"rawliteral(
   .text-group { text-align: left; padding-right: 15px; }
   .desc { font-size: 0.8em; color: #999; display: block; margin-top: 3px; }
   input { font-size: 1.2em; padding: 5px; width: 110px; text-align: center; background: #000; color: #0f0; border: 1px solid #555; border-radius: 4px; }
-  .save { background: #2e7d32; color: white; border: none; padding: 15px; width: 100%; border-radius: 5px; font-weight: bold; cursor: pointer; font-size: 1.1em; }
+  .save { background: #2e7d32; color: white; border: none; padding: 15px; width: 100%; border-radius: 5px; font-weight: bold; cursor: pointer; font-size: 1.1em; margin-bottom: 10px; }
+  .reset { background: #e65100; color: white; border: none; padding: 10px; width: 100%; border-radius: 5px; font-weight: bold; cursor: pointer; font-size: 0.9em; text-decoration: none; display: block; text-align: center; }
 </style></head><body>
 <div class="container">
   <a href="/" style="color:#4caf50;text-decoration:none;">&larr; Back to Dashboard</a>
-  <h2>Advanced Tapering & Slew</h2>
+  <h2>Cross-Computed Tapering</h2>
   <form action="/save" method="GET">
-    <div class="row"><div class="text-group"><strong>Slew Rate (A/step)</strong><span class="desc">Max Amps change per 250ms (e.g., 2.0).</span></div>
-      <input type="number" name="sr" step="0.1" value="!!VAL_SR!!"></div>
-    <div class="row"><div class="text-group"><strong>SOC Start Taper (C) %</strong><span class="desc">Lower charge current gradually above this level.</span></div>
+    <div class="row"><div class="text-group"><strong>Voltage Start Taper (C)</strong><span class="desc">Voltage at which slowing begins.</span></div>
+      <input type="number" name="vt" step="0.1" value="!!VAL_VT!!"></div>
+    <div class="row"><div class="text-group"><strong>SOC Start Taper (C) %</strong><span class="desc">SOC at which slowing begins.</span></div>
       <input type="number" name="st" step="1" value="!!VAL_ST!!"></div>
-    <div class="row"><div class="text-group"><strong>SOC Start Taper (D) %</strong><span class="desc">Lower discharge current gradually below this level.</span></div>
-      <input type="number" name="sdt" step="1" value="!!VAL_SDT!!"></div>
-    <div class="row"><div class="text-group"><strong>Trickle Charge (A)</strong><span class="desc">Current for balancing and finishing charge.</span></div>
-      <input type="number" name="ta" step="1" value="!!VAL_TA!!"></div>
-    <div class="row"><div class="text-group"><strong>Max Charge Amps (A)</strong><span class="desc">Global bulk charging limit.</span></div>
-      <input type="number" name="ca" step="10" value="!!VAL_CA!!"></div>
-    <div class="row"><div class="text-group"><strong>Max Discharge Amps (A)</strong><span class="desc">Peak household load limit.</span></div>
-      <input type="number" name="da" step="10" value="!!VAL_DA!!"></div>
-    <div class="row"><div class="text-group"><strong>Charge Stop Volts (V)</strong><span class="desc">Target finish voltage (Hard cutoff).</span></div>
-      <input type="number" name="mv" step="0.1" value="!!VAL_MV!!"></div>
-    <div class="row"><div class="text-group"><strong>Discharge Cutoff (V)</strong><span class="desc">Absolute minimum battery voltage.</span></div>
-      <input type="number" name="mdv" step="0.1" value="!!VAL_MDV!!"></div>
-    <div class="row"><div class="text-group"><strong>Limp Discharge (A)</strong><span class="desc">Fixed limit when a low cell is detected.</span></div>
-      <input type="number" name="ld" step="1" value="!!VAL_LIMP!!"></div>
-    <div class="row"><div class="text-group"><strong>High Cell Gate (V)</strong><span class="desc">Enable Trickle logic above this voltage.</span></div>
+    <div class="row"><div class="text-group"><strong>High Cell Gate (V)</strong><span class="desc">Voltage where current reaches Trickle level.</span></div>
       <input type="number" name="ag" step="0.1" value="!!VAL_AG!!"></div>
-    <div class="row"><div class="text-group"><strong>Low Cell Gate (V)</strong><span class="desc">Enable Limp logic below this voltage.</span></div>
+    <hr style="border:1px solid #333;margin:15px 0;">
+    <div class="row"><div class="text-group"><strong>Voltage Start Taper (D)</strong><span class="desc">Voltage at which slowing begins.</span></div>
+      <input type="number" name="dvt" step="0.1" value="!!VAL_DVT!!"></div>
+    <div class="row"><div class="text-group"><strong>SOC Start Taper (D) %</strong><span class="desc">SOC at which slowing begins.</span></div>
+      <input type="number" name="sdt" step="1" value="!!VAL_SDT!!"></div>
+    <div class="row"><div class="text-group"><strong>Low Cell Gate (V)</strong><span class="desc">Voltage where current reaches Limp level.</span></div>
       <input type="number" name="lag" step="0.1" value="!!VAL_LAG!!"></div>
+    <hr style="border:1px solid #333;margin:15px 0;">
+    <div class="row"><div class="text-group"><strong>Trickle Charge (A)</strong><span class="desc">Current floor at top end.</span></div>
+      <input type="number" name="ta" step="1" value="!!VAL_TA!!"></div>
+    <div class="row"><div class="text-group"><strong>Limp Discharge (A)</strong><span class="desc">Current floor at bottom end.</span></div>
+      <input type="number" name="ld" step="1" value="!!VAL_LIMP!!"></div>
+    <div class="row"><div class="text-group"><strong>Max Charge Amps (A)</strong><span class="desc">Global bulk charge limit.</span></div>
+      <input type="number" name="ca" step="10" value="!!VAL_CA!!"></div>
+    <div class="row"><div class="text-group"><strong>Max Discharge Amps (A)</strong><span class="desc">Global peak load limit.</span></div>
+      <input type="number" name="da" step="10" value="!!VAL_DA!!"></div>
+    <div class="row"><div class="text-group"><strong>Charge Stop Volts (V)</strong><span class="desc">Absolute hard cutoff.</span></div>
+      <input type="number" name="mv" step="0.1" value="!!VAL_MV!!"></div>
+    <div class="row"><div class="text-group"><strong>Discharge Cutoff (V)</strong><span class="desc">Absolute hard floor.</span></div>
+      <input type="number" name="mdv" step="0.1" value="!!VAL_MDV!!"></div>
     <div class="row"><div class="text-group"><strong>Voltage Samples</strong><span class="desc">Smoothing window (1-20).</span></div>
       <input type="number" name="vs" step="1" value="!!VAL_VS!!"></div>
     <button type="submit" class="save">SAVE & APPLY ALL CHANGES</button>
   </form>
+  <a href="/reset" class="reset" onclick="return confirm('Restore all factory defaults? This will wipe your current settings.')">RESTORE FACTORY DEFAULTS</a>
 </div></body></html>)rawliteral";
 
 void sendToSma() {
@@ -198,15 +217,18 @@ void sendToSma() {
 void setup() {
     Serial.begin(115200); loadConfig(); 
     esp_task_wdt_init(WDT_TIMEOUT_SECONDS, true); esp_task_wdt_add(NULL);
-
     WiFi.config(local_IP, gateway, subnet); WiFi.begin(ssid, password);
     while (WiFi.status() != WL_CONNECTED && millis() < 10000) delay(100);
-    
     ArduinoOTA.begin(); logServer.begin(); 
-    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){ request->send_P(200, "text/html", index_html); });
+
+    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){ 
+        request->send(200, "text/html", index_html); 
+    });
+
     server.on("/config", HTTP_GET, [](AsyncWebServerRequest *request){
         String h = String(config_html);
-        h.replace("!!VAL_SR!!", String(cfg.slewRate, 1));
+        h.replace("!!VAL_VT!!", String(cfg.vStartTaper, 1));
+        h.replace("!!VAL_DVT!!", String(cfg.vStartDTaper, 1));
         h.replace("!!VAL_LIMP!!", String((int)cfg.limpDischargeA));
         h.replace("!!VAL_LAG!!", String(cfg.vLowAlarmGate, 1));
         h.replace("!!VAL_AG!!", String(cfg.vHighAlarmGate, 1));
@@ -220,9 +242,11 @@ void setup() {
         h.replace("!!VAL_VS!!", String(cfg.vSamples));
         request->send(200, "text/html", h);
     });
+
     server.on("/save", HTTP_GET, [](AsyncWebServerRequest *request){
         prefs.begin("bms-bridge", false);
-        if(request->hasParam("sr")) { cfg.slewRate = request->getParam("sr")->value().toFloat(); prefs.putFloat("sr", cfg.slewRate); }
+        if(request->hasParam("vt")) { cfg.vStartTaper = request->getParam("vt")->value().toFloat(); prefs.putFloat("vt", cfg.vStartTaper); }
+        if(request->hasParam("dvt")) { cfg.vStartDTaper = request->getParam("dvt")->value().toFloat(); prefs.putFloat("dvt", cfg.vStartDTaper); }
         if(request->hasParam("st")) { cfg.socStartTaper = request->getParam("st")->value().toInt(); prefs.putInt("st", cfg.socStartTaper); }
         if(request->hasParam("sdt")) { cfg.socStartDTaper = request->getParam("sdt")->value().toInt(); prefs.putInt("sdt", cfg.socStartDTaper); }
         if(request->hasParam("ta")) { cfg.trickleA = request->getParam("ta")->value().toFloat(); prefs.putFloat("ta", cfg.trickleA); }
@@ -237,24 +261,31 @@ void setup() {
         prefs.end();
         request->redirect("/");
     });
-    server.addHandler(&events); server.begin();
 
+    // --- FACTORY RESET ROUTE ---
+    server.on("/reset", HTTP_GET, [](AsyncWebServerRequest *request){
+        prefs.begin("bms-bridge", false);
+        prefs.clear(); // Wipes all stored keys in this namespace
+        prefs.end();
+        loadConfig(); // Re-loads hardcoded fallbacks from function into cfg struct
+        netLog("[SYSTEM] Factory Reset Applied. Values restored to defaults.\n");
+        request->redirect("/config");
+    });
+
+    server.addHandler(&events); server.begin();
     twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)CAN_TX, (gpio_num_t)CAN_RX, TWAI_MODE_NORMAL);
     twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS();
     twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
     twai_driver_install(&g_config, &t_config, &f_config); twai_start();
-    
     pinMode(MCP2515_RST, OUTPUT); digitalWrite(MCP2515_RST, HIGH); delay(50); digitalWrite(MCP2515_RST, LOW); delay(50); digitalWrite(MCP2515_RST, HIGH);
     SPI.begin(MCP2515_SCLK, MCP2515_MISO, MCP2515_MOSI, MCP2515_CS);
     Can_SMA.reset(); Can_SMA.setBitrate(CAN_500KBPS); Can_SMA.setNormalMode();
-
-    netLog("[SYSTEM] Logic Pro Active. RAM: %d\n", ESP.getFreeHeap());
+    netLog("[SYSTEM] Cross-Computed Linear Logic Started. RAM: %d\n", ESP.getFreeHeap());
 }
 
 void loop() {
     esp_task_wdt_reset(); ArduinoOTA.handle();
     if (logServer.hasClient()) { if (logClient) logClient.stop(); logClient = logServer.available(); }
-
     twai_status_info_t twai_stat; twai_get_status_info(&twai_stat);
     if (twai_stat.state == TWAI_STATE_BUS_OFF) twai_initiate_recovery();
 
@@ -290,15 +321,16 @@ void loop() {
             
             String mode = "RUN";
             if (millis() - lastBmsRx > (cfg.bmsTimeout * 1000) && lastBmsRx != 0) mode = "BMS_OFFLINE";
-            else if (cellHighAlarm && packVoltage > cfg.vHighAlarmGate) mode = "BALANCING";
-            else if (cellLowAlarm && packVoltage < cfg.vLowAlarmGate) mode = "LOW_CELL_LIMP";
-            else if (packVoltage >= cfg.vMaxCharge || packSOC >= 100) mode = "FULL/TRICKLE";
+            else if (cellHighAlarm || packVoltage >= cfg.vHighAlarmGate) mode = "TRICKLE";
+            else if (cellLowAlarm || packVoltage <= cfg.vLowAlarmGate) mode = "LIMP";
             else if (packVoltage > cfg.vStartTaper || packSOC > cfg.socStartTaper) mode = "TAPER_C";
+            else if (packVoltage < cfg.vStartDTaper || packSOC < cfg.socStartDTaper) mode = "TAPER_D";
             
-            // Log with CCL AND DCL
-            netLog("[STATUS] Mode:%s V:%.2f I:%.1f SOC:%d%% CCL:%.1f DCL:%.1f SMA:%s\n", mode.c_str(), packVoltage, packCurrent, packSOC, currentCCL, currentDCL, smaChargeMode.c_str());
+            uint16_t finalCCL = calculateCCL(packVoltage, packSOC);
+            uint16_t finalDCL = calculateDCL(packVoltage, packSOC);
+            netLog("[STATUS] Mode:%s V:%.2f I:%.1f SOC:%d%% CCL:%.1f DCL:%.1f SMA:%s\n", mode.c_str(), packVoltage, packCurrent, packSOC, finalCCL/10.0, finalDCL/10.0, smaChargeMode.c_str());
             lastPush = millis();
         }
     }
-    if (ESP.getFreeHeap() < 18000) ESP.restart();
+    if (ESP.getFreeHeap() < 20000) ESP.restart();
 }

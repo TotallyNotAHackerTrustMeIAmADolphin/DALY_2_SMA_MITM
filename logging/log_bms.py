@@ -3,7 +3,7 @@ import time
 from datetime import datetime
 
 IP = "192.168.178.55"
-PORT = 2323  # <--- UPDATED PORT
+PORT = 2323
 LOG_FILE = "bms_bridge.log"
 
 def start_logging():

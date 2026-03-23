@@ -8,15 +8,17 @@
 #include "mcp2515.h"
 #include <SPI.h>
 #include <deque>
+#include <esp_task_wdt.h> // Watchdog Library
 
-// --- NETWORK ---
+// --- SETTINGS & NETWORK ---
 const char* ssid = "wlesswg";
 const char* password = "hba.1245";
 IPAddress local_IP(192, 168, 178, 55);
 IPAddress gateway(192, 168, 178, 1);
 IPAddress subnet(255, 255, 255, 0);
 
-// --- SETTINGS STRUCTURE ---
+#define WDT_TIMEOUT_SECONDS 15
+
 struct Config {
     float maxChargeA;       float maxDischargeA;    float vStartTaper;      
     float vMaxCharge;       float vStartDTaper;     float vMinDischarge;    
@@ -25,12 +27,13 @@ struct Config {
     int   socStartTaper;    int   socStartDTaper;
 } cfg;
 
-// --- STATE STORAGE ---
+// --- STATE ---
 float packVoltage = 52.6; float packCurrent = 0.0; uint16_t packSOC = 50;
 bool cellHighAlarm = false; bool cellLowAlarm = false;
 unsigned long lastSmaTx = 0; unsigned long lastBmsRx = 0;
 std::deque<float> vHistory;
 String smaChargeMode = "Unknown"; bool gridPresent = false;
+uint32_t bootCount = 0;
 
 MCP2515 Can_SMA(MCP2515_CS, 10000000, &SPI);
 AsyncWebServer server(80);
@@ -38,7 +41,7 @@ AsyncEventSource events("/events");
 WiFiServer logServer(2323); WiFiClient logClient;
 Preferences prefs;
 
-// --- LOGGING ---
+// --- UTILITIES ---
 void netLog(const char* format, ...) {
     char loc_res[256]; va_list arg; va_start(arg, format);
     vsnprintf(loc_res, sizeof(loc_res), format, arg); va_end(arg);
@@ -46,9 +49,10 @@ void netLog(const char* format, ...) {
     events.send(loc_res, "log", millis());
 }
 
-// --- CONFIG PERSISTENCE ---
 void loadConfig() {
     prefs.begin("bms-bridge", false);
+    bootCount = prefs.getUInt("boots", 0);
+    prefs.putUInt("boots", ++bootCount); // Track reboots for stability audit
     cfg.maxChargeA = prefs.getFloat("ca", 250.0);
     cfg.maxDischargeA = prefs.getFloat("da", 500.0);
     cfg.vStartTaper = prefs.getFloat("vt", 54.00);
@@ -66,13 +70,15 @@ void loadConfig() {
     prefs.end();
 }
 
-// --- CALCULATION LOGIC ---
+// --- LOGIC ---
 float getFilteredVoltage(float newV) {
+    if (newV < 30.0 || newV > 70.0) return packVoltage; // Sanity check
     vHistory.push_back(newV); while (vHistory.size() > cfg.vSamples) vHistory.pop_front();
     float sum = 0; for (float v : vHistory) sum += v; return sum / (float)vHistory.size();
 }
 
 uint16_t calculateCCL(float v, int soc) {
+    if (millis() - lastBmsRx > (cfg.bmsTimeout * 1000)) return 0; // Emergency Zero
     if (v >= cfg.vMaxCharge) return 0;
     if ((cellHighAlarm && v > cfg.vHighAlarmGate) || (soc >= 100)) return (uint16_t)(cfg.trickleA * 10);
     float vRatio = (v > cfg.vStartTaper) ? (cfg.vMaxCharge - v) / (cfg.vMaxCharge - cfg.vStartTaper) : 1.0;
@@ -81,6 +87,7 @@ uint16_t calculateCCL(float v, int soc) {
 }
 
 uint16_t calculateDCL(float v, int soc) {
+    if (millis() - lastBmsRx > (cfg.bmsTimeout * 1000)) return 0; // Emergency Zero
     if (v <= cfg.vMinDischarge || soc <= 0) return 0;
     if (cellLowAlarm && v < cfg.vLowAlarmGate) return (uint16_t)(cfg.limpDischargeA * 10);
     float vRatio = (v < cfg.vStartDTaper) ? (v - cfg.vMinDischarge) / (cfg.vStartDTaper - cfg.vMinDischarge) : 1.0;
@@ -98,7 +105,7 @@ const char index_html[] PROGMEM = R"rawliteral(
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; padding: 15px; }
   .card { background: #1e1e1e; padding: 15px; border-radius: 10px; border: 1px solid #333; }
   .value { font-size: 2em; font-weight: bold; color: #4caf50; }
-  #console { width: 95%; max-width: 1000px; height: 400px; margin: 15px auto; background: #000; color: #00ff00; font-family: monospace; text-align: left; padding: 15px; overflow-y: scroll; border-radius: 8px; font-size: 0.85em; border: 1px solid #444; }
+  #console { width: 95%; max-width: 1000px; height: 350px; margin: 15px auto; background: #000; color: #00ff00; font-family: monospace; text-align: left; padding: 15px; overflow-y: scroll; border-radius: 8px; font-size: 0.85em; border: 1px solid #444; }
 </style></head><body>
 <div class="nav"><a href="/">DASHBOARD</a> | <a href="/config">CONFIGURATION</a></div>
 <div class="grid">
@@ -120,7 +127,7 @@ const char index_html[] PROGMEM = R"rawliteral(
   source.addEventListener('log', function(e) {
     const con = document.getElementById('console');
     con.innerHTML += e.data + "<br>";
-    if(con.childNodes.length > 150) con.removeChild(con.firstChild);
+    if(con.childNodes.length > 100) con.removeChild(con.firstChild);
     con.scrollTop = con.scrollHeight;
   }, false);
 </script></body></html>)rawliteral";
@@ -156,7 +163,7 @@ const char config_html[] PROGMEM = R"rawliteral(
     <div class="row"><div class="text-group"><strong>Discharge Cutoff (V)</strong><span class="desc">Absolute minimum battery voltage.</span></div>
       <input type="number" name="mdv" step="0.1" value="!!VAL_MDV!!"></div>
     <div class="row"><div class="text-group"><strong>Limp Discharge (A)</strong><span class="desc">Fixed limit when a low cell is detected.</span></div>
-      <input type="number" name="la" step="1" value="!!VAL_LA!!"></div>
+      <input type="number" name="la" step="1" value="!!VAL_LIMP!!"></div>
     <div class="row"><div class="text-group"><strong>High Cell Gate (V)</strong><span class="desc">Enable Trickle logic above this voltage.</span></div>
       <input type="number" name="ag" step="0.1" value="!!VAL_AG!!"></div>
     <div class="row"><div class="text-group"><strong>Low Cell Gate (V)</strong><span class="desc">Enable Limp logic below this voltage.</span></div>
@@ -176,13 +183,20 @@ void sendToSma() {
 }
 
 void setup() {
-    Serial.begin(115200); WiFi.config(local_IP, gateway, subnet); WiFi.begin(ssid, password);
-    while (WiFi.status() != WL_CONNECTED) delay(100);
-    WiFi.setSleep(false); loadConfig(); ArduinoOTA.begin(); logServer.begin(); 
+    Serial.begin(115200);
+    loadConfig(); 
+
+    // Layer 1: Watchdog Setup
+    esp_task_wdt_init(WDT_TIMEOUT_SECONDS, true);
+    esp_task_wdt_add(NULL);
+
+    WiFi.config(local_IP, gateway, subnet); WiFi.begin(ssid, password);
+    while (WiFi.status() != WL_CONNECTED && millis() < 10000) delay(100);
+    
+    ArduinoOTA.begin(); logServer.begin(); 
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){ request->send_P(200, "text/html", index_html); });
     server.on("/config", HTTP_GET, [](AsyncWebServerRequest *request){
         String h = String(config_html);
-        // Important: Replace longer tags first or use completely unique tags to avoid substring collision
         h.replace("!!VAL_LAG!!", String(cfg.vLowAlarmGate, 1));
         h.replace("!!VAL_AG!!", String(cfg.vHighAlarmGate, 1));
         h.replace("!!VAL_SDT!!", String(cfg.socStartDTaper));
@@ -192,7 +206,7 @@ void setup() {
         h.replace("!!VAL_DA!!", String(cfg.maxDischargeA, 0));
         h.replace("!!VAL_MV!!", String(cfg.vMaxCharge, 1));
         h.replace("!!VAL_MDV!!", String(cfg.vMinDischarge, 1));
-        h.replace("!!VAL_LA!!", String(cfg.limpDischargeA, 0));
+        h.replace("!!VAL_LIMP!!", String(cfg.limpDischargeA, 0)); 
         h.replace("!!VAL_VS!!", String(cfg.vSamples));
         request->send(200, "text/html", h);
     });
@@ -220,18 +234,34 @@ void setup() {
         request->redirect("/");
     });
     server.addHandler(&events); server.begin();
+
+    // CAN Setup
     twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)CAN_TX, (gpio_num_t)CAN_RX, TWAI_MODE_NORMAL);
     twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS();
     twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
     twai_driver_install(&g_config, &t_config, &f_config); twai_start();
+    
     pinMode(MCP2515_RST, OUTPUT); digitalWrite(MCP2515_RST, HIGH); delay(50); digitalWrite(MCP2515_RST, LOW); delay(50); digitalWrite(MCP2515_RST, HIGH);
     SPI.begin(MCP2515_SCLK, MCP2515_MISO, MCP2515_MOSI, MCP2515_CS);
     Can_SMA.reset(); Can_SMA.setBitrate(CAN_500KBPS); Can_SMA.setNormalMode();
+
+    netLog("[SYSTEM] Started. Boot Count: %d, Free Heap: %d bytes\n", bootCount, ESP.getFreeHeap());
 }
 
 void loop() {
+    esp_task_wdt_reset(); // Layer 1: Feed the Watchdog
     ArduinoOTA.handle();
+
     if (logServer.hasClient()) { if (logClient) logClient.stop(); logClient = logServer.available(); }
+
+    // Layer 3: CAN Driver Health Check
+    twai_status_info_t twai_stat;
+    twai_get_status_info(&twai_stat);
+    if (twai_stat.state == TWAI_STATE_BUS_OFF) {
+        netLog("[CRITICAL] CAN BUS OFF - Restarting Driver...\n");
+        twai_initiate_recovery();
+    }
+
     twai_message_t b_msg;
     if (twai_receive(&b_msg, 0) == ESP_OK) {
         lastBmsRx = millis();
@@ -247,27 +277,35 @@ void loop() {
             cellLowAlarm  = (b_msg.data[0] & 0x08) || (b_msg.data[2] & 0x08);
         }
     }
+
     struct can_frame in_frame;
     if (Can_SMA.readMessage(&in_frame) == MCP2515::ERROR_OK) {
         if (in_frame.can_id == 0x305) { uint8_t m = in_frame.data[0]; smaChargeMode = (m==1)?"Bulk":(m==2)?"Absorption":(m==3)?"Float":"Equalize"; }
         if (in_frame.can_id == 0x300) gridPresent = (in_frame.data[0] & 0x01);
         twai_message_t back_msg; back_msg.identifier = in_frame.can_id; back_msg.data_length_code = in_frame.can_dlc; memcpy(back_msg.data, in_frame.data, 8); twai_transmit(&back_msg, 0);
     }
+
     if (millis() - lastSmaTx > 250) {
         sendToSma(); lastSmaTx = millis();
         static unsigned long lastPush = 0;
         if (millis() - lastPush > 2000) {
             char json[256]; snprintf(json, sizeof(json), "{\"v\":%.2f,\"i\":%.1f,\"soc\":%d,\"smam\":\"%s\",\"smag\":%d}", packVoltage, packCurrent, packSOC, smaChargeMode.c_str(), gridPresent);
             events.send(json, "data", millis());
+            
             String mode = "NORMAL";
-            if (cellHighAlarm && packVoltage > cfg.vHighAlarmGate) mode = "BALANCING";
+            if (millis() - lastBmsRx > (cfg.bmsTimeout * 1000) && lastBmsRx != 0) mode = "BMS_OFFLINE";
+            else if (cellHighAlarm && packVoltage > cfg.vHighAlarmGate) mode = "BALANCING";
             else if (cellLowAlarm && packVoltage < cfg.vLowAlarmGate) mode = "LOW_CELL_LIMP";
             else if (packVoltage >= cfg.vMaxCharge || packSOC >= 100) mode = "FULL/TRICKLE";
             else if (packVoltage > cfg.vStartTaper || packSOC > cfg.socStartTaper) mode = "TAPER_C";
             else if (packVoltage < cfg.vStartDTaper || packSOC < cfg.socStartDTaper) mode = "TAPER_D";
-            netLog("[STATUS] Mode:%s V:%.2f I:%.1f SOC:%d%% CCL:%.1f DCL:%.1f SMA:%s\n", mode.c_str(), packVoltage, packCurrent, packSOC, calculateCCL(packVoltage, packSOC)/10.0, calculateDCL(packVoltage, packSOC)/10.0, smaChargeMode.c_str());
+            
+            netLog("[STATUS] Mode:%s V:%.2f I:%.1f SOC:%d%% CCL:%.1f DCL:%.1f SMA:%s RAM:%d\n", mode.c_str(), packVoltage, packCurrent, packSOC, calculateCCL(packVoltage, packSOC)/10.0, calculateDCL(packVoltage, packSOC)/10.0, smaChargeMode.c_str(), ESP.getFreeHeap());
             lastPush = millis();
         }
     }
-    if (millis() - lastBmsRx > (cfg.bmsTimeout * 1000) && lastBmsRx != 0) { packVoltage = cfg.vMaxCharge; netLog("[CRITICAL] BMS TIMEOUT!\n"); }
+
+    // Layer 2: Safety Restart on WiFi or Heap Failure
+    if (ESP.getFreeHeap() < 20000) { netLog("[ERROR] Low Memory! Rebooting...\n"); delay(1000); ESP.restart(); }
+    if (WiFi.status() != WL_CONNECTED && millis() > 60000) { Serial.println("WiFi Lost. Rebooting..."); delay(1000); ESP.restart(); }
 }

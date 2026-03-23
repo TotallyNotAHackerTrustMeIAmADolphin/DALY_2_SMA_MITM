@@ -1,74 +1,93 @@
-# SMA Sunny Island & Daly BMS: Active CAN Bridge (Pro-Edition v3.5)
-
-An ESP32-S3 based "Man-in-the-Middle" CAN gateway designed to integrate a **Daly Smart BMS** (500A Discharge / 250A Charge) with an **SMA Sunny Island 3-Phase Cluster**. 
-
-This appliance transforms raw, aggressive BMS data into a stabilized, professional-grade control signal, enabling smooth operation of high-capacity DIY LiFePO4 banks (e.g., 840Ah / 45kWh+).
+This is the comprehensive documentation for the **Pro-Edition v4.0** of the SMA-Daly CAN Bridge. It reflects the finalized transition from ambiguous SOC-based logic to **Pure Voltage Glideslope Management**, providing industrial-grade stability and precision for large-scale DIY LiFePO4 storage.
 
 ---
 
-## 1. The Core Logic: Cross-Computed Linear Tapering
+# SMA Sunny Island & Daly BMS: Active CAN Bridge (Pro-Edition v4.0)
 
-Unlike standard gateways that simply pass data through, this bridge uses **Asymmetric Cross-Computation**. It calculates two independent current limits—one based on **Battery Voltage** and one based on **State of Charge (SOC)**—and selects the most restrictive value (the minimum).
+An ESP32-S3 based "Man-in-the-Middle" appliance designed to sit between a **Daly Smart BMS** and an **SMA Sunny Island Cluster** (L1 Master). It intercepts raw BMS data and calculates stabilized, high-resolution control signals to ensure professional-grade battery management.
 
-### The Mathematical Intersection
-The bridge calculates a "Slope" for both metrics:
-1.  **Voltage Slope:** Scales `Max Amps` $\rightarrow$ `Trickle Amps` between `vStartTaper` and `vHighAlarmGate`.
-2.  **SOC Slope:** Scales `Max Amps` $\rightarrow$ `Trickle Amps` between `socStartTaper` and `100%`.
+## 1. The Core Philosophy: "Voltage is Truth"
+State of Charge (SOC) reported by many BMS units is a calculation prone to drift, "integer jumping," and calibration errors. This bridge ignores SOC for logic purposes and uses high-resolution (0.01V) battery voltage to drive a **Dual-Sloped Glideslope**.
 
-**The Result:** If a single cell "runs" early (Voltage spikes while SOC is only 90%), the Voltage-based taper will take control and slow the charger down automatically. If the cells are perfectly balanced, the SOC-based taper will ensure a smooth arrival at 100%.
+### **Charging Glideslope**
+1.  **Bulk Phase:** Full speed charging (`Max Charge Amps`) until the battery hits the **Start Taper Volts**.
+2.  **Taper Phase:** As voltage rises, the bridge linearly reduces the current limit.
+3.  **Trickle Phase:** Once **Target Trickle Volts** is reached, the bridge locks the current to exactly **Trickle Amps**. This provides a steady floor for passive balancers to work effectively.
+4.  **Brick Wall:** At **Max Charge Volts**, the bridge requests 0A to protect against overvoltage.
+
+### **Discharging Glideslope**
+1.  **Normal Phase:** Full discharge capacity available until **Start Taper Volts (D)**.
+2.  **Taper Phase:** Limits current as the battery enters the "lower knee" to prevent cell brownouts under heavy loads.
+3.  **Limp Phase:** At **Target Limp Volts**, the bridge restricts the SMA to **Limp Amps**. This keeps the inverter alive and synchronized without tripping the BMS.
+4.  **Hard Floor:** At **Min Discharge Volts**, the bridge requests 0A to prevent cell reversal.
 
 ---
 
-## 2. Detailed Charging Cycle (Step-by-Step)
+## 2. Management UI (`/config`)
 
-| Phase | State | Behavior | Parameter Roles |
+The configuration suite is logically grouped into directional profiles:
+
+### **Charging Profile**
+*   **Max Charge Amps:** The global limit during Bulk charging.
+*   **Start Taper Volts:** The "Entry Point." When voltage hits this, current starts slowing down.
+*   **Target Trickle Volts:** The "Finish Line." Current reaches the Trickle floor here.
+*   **Trickle Amps:** The exact current maintained for top-end balancing.
+*   **Max Charge Volts:** The absolute safety cutoff (0A).
+
+### **Discharging Profile**
+*   **Max Discharge Amps:** Peak household load limit.
+*   **Start Taper Volts (D):** Entry point for discharge restriction.
+*   **Target Limp Volts:** Voltage where the system settles into Limp Mode.
+*   **Limp Amps:** The exact current maintained to keep the SMA Master online.
+*   **Min Discharge Volts:** The absolute floor (0A).
+
+### **System Tuning**
+*   **Voltage Samples:** Moving average window (Recommended: 10-15). Smooths out inverter ripple.
+*   **Restore Defaults:** A orange "Factory Reset" button that wipes NVS and reloads safe engineering fallbacks.
+
+---
+
+## 3. Industrial Stability & Safety
+
+*   **Task Watchdog Timer (WDT):** A hardware-level heartbeat monitors the main loop. If the software hangs for more than 15 seconds, the MCU forces a hard reboot.
+*   **CAN Bus-Off Recovery:** High-power environments generate EMI. If the internal CAN controller hits a "Bus-Off" state, the bridge detects it and hot-resets the driver automatically.
+*   **BMS Watchdog:** If communication with the Daly BMS is lost for >15s, the bridge forces the SMA to 0A Charge/Discharge to prevent "blind" operation.
+*   **Memory Guard:** Continuous monitoring of the Free Heap. If memory fragmentation occurs, the bridge reboots to maintain 100% uptime.
+*   **Isolated Design:** The LilyGO T-2CAN provides isolation between the noisy DC bus environment and the inverter's control logic.
+
+---
+
+## 4. Hardware & Wiring
+
+### **Interface A (To SMA Master L1)** & **Interface B (To Daly WNT)**
+| RJ45 Pin | Wire Color (Typical) | Signal | LilyGO Terminal |
 | :--- | :--- | :--- | :--- |
-| **1. Bulk** | < `vStartTaper` & < `socStartTaper` | Full speed charging. | Uses `maxChargeA`. |
-| **2. Taper** | > `vStartTaper` OR > `socStartTaper` | The bridge begins lowering the current limit (CCL) linearly. Every 0.01V increase results in a proportional decrease in Amps. | Slopes toward `trickleA`. |
-| **3. Trickle** | $\ge$ `vHighAlarmGate` OR 100% SOC | The math stops. The bridge forces the SMA to maintain an exact, constant current to allow passive balancers to work. | Locks to `trickleA`. |
-| **4. Stop** | $\ge$ `vMaxCharge` | Absolute safety cutoff. The bridge tells the SMA to stop all charging immediately. | Hard stop at `vMaxCharge`. |
-
----
-
-## 3. Detailed Discharge Cycle (Step-by-Step)
-
-| Phase | State | Behavior | Parameter Roles |
-| :--- | :--- | :--- | :--- |
-| **1. Normal** | > `vStartDTaper` & > `socStartDTaper` | Full discharge capacity available for house loads. | Uses `maxDischargeA`. |
-| **2. Taper** | < `vStartDTaper` OR < `socStartDTaper` | The bridge restricts discharge current to prevent high-load "brownouts" as cells weaken. | Slopes toward `limpDischargeA`. |
-| **3. Limp** | $\le$ `vLowAlarmGate` OR BMS Low Cell Alarm | The bridge forces a low constant discharge limit. This keeps the SMA cluster alive and synchronized but stops high-power loads from tripping the BMS. | Locks to `limpDischargeA`. |
-| **4. Cutoff** | $\le$ `vMinDischarge` | Absolute floor. Bridge requests 0A discharge to prevent cell reversal. | Hard stop at `mdv`. |
-
----
-
-## 4. Parameter Reference (The Management UI)
-
-Adjust these live via `http://192.168.178.55/config`:
-
-*   **vStartTaper (C/D):** The "Entry Point." The voltage where the bridge stops being a "transparent pipe" and starts actively restricting current.
-*   **High/Low Cell Gate:** The "Target Finish." In charging, this is where the current should reach the Trickle level. In discharging, this is where the current should reach Limp level.
-*   **Trickle Charge (A):** Ideally **2.0A to 5.0A**. Enough to satisfy the SMA control loop and allow Daly passive balancers (30mA - 200mA) to bleed off high cells.
-*   **Limp Discharge (A):** Ideally **5.0A to 10.0A**. Just enough to keep the SMA Master L1 from shutting down entirely, allowing it to stay on until grid/solar power returns.
-*   **Voltage Samples:** Sets the Moving Average window. Higher values (e.g., 15) stop the "hunting" caused by 3-phase inverter ripple but add slight latency.
-
----
-
-## 5. Hardware Requirements & Wiring
-
-*   **LilyGO T-2CAN** (Isolated dual CAN).
-*   **Interface A:** SMA Sunny Island (Pin 4: CANH, Pin 5: CANL, Pin 3: GND).
-*   **Interface B:** Daly WNT/CAN Board (Standard Pinout).
+| **3** | **White/Green** | **GND** | **SGNDA / SGNDB** |
+| **4** | **Blue** | **CAN High** | **CANHA / CANHB** |
+| **5** | **White/Blue** | **CAN Low** | **CANLA / CANLB** |
 
 > [!IMPORTANT]  
-> The LilyGO T-2CAN uses isolated transceivers. You **must** connect the **SGNDA** and **SGNDB** terminals to the respective CAN grounds or the communication will be unstable.
+> You **must** connect the Signal Ground (SGND) terminals. Without a common ground reference, the isolated transceivers will experience common-mode errors.
 
 ---
 
-## 6. Safety Features
-*   **BMS Watchdog:** If the bridge loses BMS data for >15s, it forces the SMA to 0A for safety.
-*   **Factory Reset:** A one-click "Restore Defaults" button in the UI wipes NVS flash and reloads safe engineering fallbacks.
-*   **Task Watchdog (WDT):** Hardware-level MCU monitor that reboots the ESP32 if the main loop hangs for more than 15 seconds.
-*   **Isolated Design:** Prevents ground loops between the 48V DC bus logic and the Inverter control logic.
+## 5. Remote Logging (Python)
+
+The bridge streams high-resolution telemetry to Port 2323. Use the provided `log_bms.py` for long-term health monitoring.
+
+**Logger Features:**
+*   **Connection Events:** Logs exact timestamps of established or lost connections.
+*   **Black-Box Recording:** Saves real-time Current (CCL/DCL), Voltage, and SMA Mode.
+*   **Automatic Reconnect:** Retries every 5 seconds if the network drops.
+
+**Example Log:**
+`[2024-05-20 14:00:01] [STATUS] Mode:RUN V:54.45 I:2.0 SOC:99% CCL:2.0 DCL:500.0 SMA:Float`
 
 ---
-*Disclaimer: Operating high-capacity battery systems (840Ah) carries significant risk. Ensure all 13mm DC terminals on the SMA units are torqued correctly and your fuses are rated for the loads described.*
+
+## 6. Operation Warnings
+*   **Phase Sync:** SMA Sunny Island clusters use specific pins for phase synchronization. Never ground Pins 1, 2, or 6 on the SMA RJ45 port.
+*   **Torque:** Ensure all 13mm DC battery terminals are torqued to 12Nm. Loose connections cause voltage ripples that can confuse any BMS gateway.
+
+---
+*Disclaimer: This software manages high-energy battery systems (840Ah+). The authors are not responsible for hardware damage. Use conservative voltage setpoints for initial commissioning.*

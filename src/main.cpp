@@ -28,7 +28,6 @@ struct Config {
 
 // --- STATE STORAGE ---
 float packVoltage = 52.6; float packCurrent = 0.0; uint16_t packSOC = 50;
-bool cellHighAlarm = false; bool cellLowAlarm = false;
 unsigned long lastSmaTx = 0; unsigned long lastBmsRx = 0;
 std::deque<float> vHistory;
 String smaChargeMode = "Unknown"; bool gridPresent = false;
@@ -61,13 +60,13 @@ void loadConfig() {
     cfg.vHighAlarmGate = prefs.getFloat("ag", 54.80);   
     cfg.vLowAlarmGate = prefs.getFloat("lag", 49.00);    
     cfg.trickleA = prefs.getFloat("ta", 2.0); 
-    cfg.limpDischargeA = prefs.getFloat("ld_v2", 5.0); 
-    cfg.vSamples = prefs.getInt("vs", 10);
+    cfg.limpDischargeA = prefs.getFloat("ld_v2", 15.0); 
+    cfg.vSamples = prefs.getInt("vs", 12);
     cfg.bmsTimeout = prefs.getInt("to", 15);
     prefs.end();
 }
 
-// --- VOLTAGE LOGIC ---
+// --- VOLTAGE LOGIC (Purely mathematical, no BMS alarm dependency) ---
 float getFilteredVoltage(float newV) {
     if (newV < 30.0 || newV > 70.0) return packVoltage;
     vHistory.push_back(newV); while (vHistory.size() > (size_t)cfg.vSamples) vHistory.pop_front();
@@ -78,7 +77,7 @@ uint16_t calculateCCL(float v, int soc) {
     if (millis() - lastBmsRx > (unsigned long)(cfg.bmsTimeout * 1000)) return 0;
     if (v >= cfg.vMaxCharge) return 0; 
     
-    if (cellHighAlarm || v >= cfg.vHighAlarmGate) return (uint16_t)(cfg.trickleA * 10);
+    if (v >= cfg.vHighAlarmGate) return (uint16_t)(cfg.trickleA * 10);
 
     if (v > cfg.vStartTaper) {
         float slope = (cfg.vHighAlarmGate - v) / (cfg.vHighAlarmGate - cfg.vStartTaper);
@@ -92,7 +91,7 @@ uint16_t calculateDCL(float v, int soc) {
     if (millis() - lastBmsRx > (unsigned long)(cfg.bmsTimeout * 1000)) return 0;
     if (v <= cfg.vMinDischarge) return 0;
 
-    if (cellLowAlarm || v <= cfg.vLowAlarmGate) return (uint16_t)(cfg.limpDischargeA * 10);
+    if (v <= cfg.vLowAlarmGate) return (uint16_t)(cfg.limpDischargeA * 10);
 
     if (v < cfg.vStartDTaper) {
         float slope = (v - cfg.vLowAlarmGate) / (cfg.vStartDTaper - cfg.vLowAlarmGate);
@@ -155,28 +154,27 @@ const char config_html[] PROGMEM = R"rawliteral(
 </style></head><body>
 <div class="container">
   <a href="/" style="color:#4caf50;text-decoration:none;">&larr; Back to Dashboard</a>
-  
   <form action="/save" method="GET">
     <h2>Charging Profile</h2>
     <div class="row"><div class="text-group"><strong>Max Charge Amps (A)</strong><span class="desc">Global bulk charging limit.</span></div>
       <input type="number" name="ca" step="5" value="!!VAL_CA!!"></div>
     <div class="row"><div class="text-group"><strong>Start Taper Volts</strong><span class="desc">Voltage where charging begins to slow.</span></div>
       <input type="number" name="vt" step="0.1" value="!!VAL_VT!!"></div>
-    <div class="row"><div class="text-group"><strong>Target Trickle Volts</strong><span class="desc">Voltage where current reaches Trickle level.</span></div>
+    <div class="row"><div class="text-group"><strong>Target Trickle Volts</strong><span class="desc">Voltage where current reaches Trickle floor.</span></div>
       <input type="number" name="ag" step="0.1" value="!!VAL_AG!!"></div>
-    <div class="row"><div class="text-group"><strong>Trickle Amps (A)</strong><span class="desc">Constant floor current for balancing.</span></div>
+    <div class="row"><div class="text-group"><strong>Trickle Amps (A)</strong><span class="desc">Constant current for balancing.</span></div>
       <input type="number" name="ta" step="0.5" value="!!VAL_TA!!"></div>
     <div class="row"><div class="text-group"><strong>Max Charge Volts</strong><span class="desc">Absolute stop voltage (Hard Cutoff).</span></div>
       <input type="number" name="mv" step="0.1" value="!!VAL_MV!!"></div>
 
     <h2>Discharging Profile</h2>
-    <div class="row"><div class="text-group"><strong>Max Discharge Amps (A)</strong><span class="desc">Global peak load limit.</span></div>
+    <div class="row"><div class="text-group"><strong>Max Discharge Amps (A)</strong><span class="desc">Bulk discharge limit.</span></div>
       <input type="number" name="da" step="10" value="!!VAL_DA!!"></div>
     <div class="row"><div class="text-group"><strong>Start Taper Volts</strong><span class="desc">Voltage where discharging begins to slow.</span></div>
       <input type="number" name="dvt" step="0.1" value="!!VAL_DVT!!"></div>
-    <div class="row"><div class="text-group"><strong>Target Limp Volts</strong><span class="desc">Voltage where current reaches Limp level.</span></div>
+    <div class="row"><div class="text-group"><strong>Target Limp Volts</strong><span class="desc">Voltage where current reaches Limp floor.</span></div>
       <input type="number" name="lag" step="0.1" value="!!VAL_LAG!!"></div>
-    <div class="row"><div class="text-group"><strong>Limp Amps (A)</strong><span class="desc">Constant floor current to keep SMA alive.</span></div>
+    <div class="row"><div class="text-group"><strong>Limp Amps (A)</strong><span class="desc">Constant current to keep SMA alive.</span></div>
       <input type="number" name="ld" step="1" value="!!VAL_LIMP!!"></div>
     <div class="row"><div class="text-group"><strong>Min Discharge Volts</strong><span class="desc">Absolute floor voltage (Hard Cutoff).</span></div>
       <input type="number" name="mdv" step="0.1" value="!!VAL_MDV!!"></div>
@@ -204,7 +202,10 @@ void setup() {
     while (WiFi.status() != WL_CONNECTED && millis() < 10000) delay(100);
     ArduinoOTA.begin(); logServer.begin(); 
     
-    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){ request->send(200, "text/html", index_html); });
+    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){ 
+        request->send(200, "text/html", index_html); 
+    });
+
     server.on("/config", HTTP_GET, [](AsyncWebServerRequest *request){
         String h = String(config_html);
         h.replace("!!VAL_VT!!", String(cfg.vStartTaper, 1));
@@ -220,26 +221,43 @@ void setup() {
         h.replace("!!VAL_VS!!", String(cfg.vSamples));
         request->send(200, "text/html", h);
     });
+
     server.on("/save", HTTP_GET, [](AsyncWebServerRequest *request){
         prefs.begin("bms-bridge", false);
-        if(request->hasParam("vt")) { cfg.vStartTaper = request->getParam("vt")->value().toFloat(); prefs.putFloat("vt", cfg.vStartTaper); }
-        if(request->hasParam("dvt")) { cfg.vStartDTaper = request->getParam("dvt")->value().toFloat(); prefs.putFloat("dvt", cfg.vStartDTaper); }
-        if(request->hasParam("ta")) { cfg.trickleA = request->getParam("ta")->value().toFloat(); prefs.putFloat("ta", cfg.trickleA); }
-        if(request->hasParam("ca")) { cfg.maxChargeA = request->getParam("ca")->value().toFloat(); prefs.putFloat("ca", cfg.maxChargeA); }
-        if(request->hasParam("da")) { cfg.maxDischargeA = request->getParam("da")->value().toFloat(); prefs.putFloat("da", cfg.maxDischargeA); }
-        if(request->hasParam("mv")) { cfg.vMaxCharge = request->getParam("mv")->value().toFloat(); prefs.putFloat("mv", cfg.vMaxCharge); }
-        if(request->hasParam("mdv")) { cfg.vMinDischarge = request->getParam("mdv")->value().toFloat(); prefs.putFloat("mdv", cfg.vMinDischarge); }
-        if(request->hasParam("ld")) { cfg.limpDischargeA = request->getParam("ld")->value().toFloat(); prefs.putFloat("ld_v2", cfg.limpDischargeA); }
-        if(request->hasParam("ag")) { cfg.vHighAlarmGate = request->getParam("ag")->value().toFloat(); prefs.putFloat("ag", cfg.vHighAlarmGate); }
-        if(request->hasParam("lag")) { cfg.vLowAlarmGate = request->getParam("lag")->value().toFloat(); prefs.putFloat("lag", cfg.vLowAlarmGate); }
-        if(request->hasParam("vs")) { cfg.vSamples = request->getParam("vs")->value().toInt(); prefs.putInt("vs", cfg.vSamples); }
+        String audit = "[AUDIT] "; bool changed = false;
+        auto checkF = [&](String p, float &v, String k, String label) {
+            if(request->hasParam(p)) {
+                float val = request->getParam(p)->value().toFloat();
+                if (abs(val - v) > 0.01) {
+                    audit += label + ":" + String(v,1) + "->" + String(val,1) + " ";
+                    v = val; prefs.putFloat(k.c_str(), v); changed = true;
+                }
+            }
+        };
+        checkF("ca", cfg.maxChargeA, "ca", "MaxChgA");
+        checkF("vt", cfg.vStartTaper, "vt", "StartTapV");
+        checkF("ag", cfg.vHighAlarmGate, "ag", "TrkGateV");
+        checkF("ta", cfg.trickleA, "ta", "TrickleA");
+        checkF("mv", cfg.vMaxCharge, "mv", "HardStopV");
+        checkF("da", cfg.maxDischargeA, "da", "MaxDchgA");
+        checkF("dvt", cfg.vStartDTaper, "dvt", "StartDTapV");
+        checkF("lag", cfg.vLowAlarmGate, "lag", "LimpGateV");
+        checkF("ld", cfg.limpDischargeA, "ld_v2", "LimpA");
+        checkF("mdv", cfg.vMinDischarge, "mdv", "HardFloorV");
+        if(request->hasParam("vs")) {
+            int val = request->getParam("vs")->value().toInt();
+            if(val != cfg.vSamples) { audit += "Samples:" + String(cfg.vSamples) + "->" + String(val) + " "; cfg.vSamples = val; prefs.putInt("vs", cfg.vSamples); changed = true; }
+        }
         prefs.end();
+        if (changed) netLog("%s\n", audit.c_str());
         request->redirect("/");
     });
+
     server.on("/reset", HTTP_GET, [](AsyncWebServerRequest *request){
         prefs.begin("bms-bridge", false); prefs.clear(); prefs.end();
         loadConfig(); request->redirect("/config");
     });
+
     server.addHandler(&events); server.begin();
     twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)CAN_TX, (gpio_num_t)CAN_RX, TWAI_MODE_NORMAL);
     twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS();
@@ -266,9 +284,17 @@ void loop() {
             packCurrent = i_raw / 10.0;
         }
         if (b_msg.identifier == 0x355) packSOC = (b_msg.data[1] << 8) | b_msg.data[0];
+        
+        // Passive Debug: Sniff Daly Alarm Frames (0x359/0x35A)
+        // Checks Byte 0 and Byte 2 for Level 1 or Level 2 warnings (Mask 0x0C)
         if (b_msg.identifier == 0x35A || b_msg.identifier == 0x359) {
-            cellHighAlarm = (b_msg.data[0] & 0x04) || (b_msg.data[2] & 0x04);
-            cellLowAlarm  = (b_msg.data[0] & 0x08) || (b_msg.data[2] & 0x08);
+            if ((b_msg.data[0] & 0x0C) || (b_msg.data[2] & 0x0C)) {
+                static unsigned long lastHexLog = 0;
+                if (millis() - lastHexLog > 15000) {
+                    netLog("[BMS-HEX] ID:%X DATA: %02X %02X %02X %02X %02X %02X %02X %02X\n", b_msg.identifier, b_msg.data[0], b_msg.data[1], b_msg.data[2], b_msg.data[3], b_msg.data[4], b_msg.data[5], b_msg.data[6], b_msg.data[7]);
+                    lastHexLog = millis();
+                }
+            }
         }
     }
     struct can_frame in_frame;
@@ -283,15 +309,18 @@ void loop() {
         if (millis() - lastPush > 2000) {
             char json[256]; snprintf(json, sizeof(json), "{\"v\":%.2f,\"i\":%.1f,\"soc\":%d,\"smam\":\"%s\",\"smag\":%d}", packVoltage, packCurrent, packSOC, smaChargeMode.c_str(), gridPresent);
             events.send(json, "data", millis());
+            
+            // Clean Status Mode (Purely voltage-math triggers)
             String mode = "RUN";
             if (millis() - lastBmsRx > (unsigned long)(cfg.bmsTimeout * 1000) && lastBmsRx != 0) mode = "BMS_OFFLINE";
-            else if (cellHighAlarm || packVoltage >= cfg.vHighAlarmGate) mode = "TRICKLE";
-            else if (cellLowAlarm || packVoltage <= cfg.vLowAlarmGate) mode = "LIMP";
+            else if (packVoltage >= cfg.vHighAlarmGate) mode = "TRICKLE";
+            else if (packVoltage <= cfg.vLowAlarmGate) mode = "LIMP";
             else if (packVoltage > cfg.vStartTaper) mode = "TAPER_C";
             else if (packVoltage < cfg.vStartDTaper) mode = "TAPER_D";
+            
             netLog("[STATUS] Mode:%s V:%.2f I:%.1f SOC:%d%% CCL:%.1f DCL:%.1f SMA:%s\n", mode.c_str(), packVoltage, packCurrent, packSOC, calculateCCL(packVoltage, packSOC)/10.0, calculateDCL(packVoltage, packSOC)/10.0, smaChargeMode.c_str());
             lastPush = millis();
         }
     }
-    if (ESP.getFreeHeap() < 20000) ESP.restart();
+    if (ESP.getFreeHeap() < 18000) ESP.restart();
 }

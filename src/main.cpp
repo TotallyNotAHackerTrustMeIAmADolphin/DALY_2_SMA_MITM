@@ -8,7 +8,7 @@
 #include "mcp2515.h"
 #include <SPI.h>
 #include <deque>
-#include <esp_task_wdt.h> // Watchdog Library
+#include <esp_task_wdt.h>
 
 // --- SETTINGS & NETWORK ---
 const char* ssid = "wlesswg";
@@ -52,7 +52,7 @@ void netLog(const char* format, ...) {
 void loadConfig() {
     prefs.begin("bms-bridge", false);
     bootCount = prefs.getUInt("boots", 0);
-    prefs.putUInt("boots", ++bootCount); // Track reboots for stability audit
+    prefs.putUInt("boots", ++bootCount); 
     cfg.maxChargeA = prefs.getFloat("ca", 250.0);
     cfg.maxDischargeA = prefs.getFloat("da", 500.0);
     cfg.vStartTaper = prefs.getFloat("vt", 54.00);
@@ -62,7 +62,7 @@ void loadConfig() {
     cfg.vHighAlarmGate = prefs.getFloat("ag", 53.50);
     cfg.vLowAlarmGate = prefs.getFloat("lag", 50.00);
     cfg.trickleA = prefs.getFloat("ta", 2.0); 
-    cfg.limpDischargeA = prefs.getFloat("la", 5.0);
+    cfg.limpDischargeA = prefs.getFloat("ld_v2", 5.0); // Renamed Key to fix visibility
     cfg.vSamples = prefs.getInt("vs", 10);
     cfg.bmsTimeout = prefs.getInt("to", 15);
     cfg.socStartTaper = prefs.getInt("st", 95); 
@@ -72,13 +72,13 @@ void loadConfig() {
 
 // --- LOGIC ---
 float getFilteredVoltage(float newV) {
-    if (newV < 30.0 || newV > 70.0) return packVoltage; // Sanity check
+    if (newV < 30.0 || newV > 70.0) return packVoltage;
     vHistory.push_back(newV); while (vHistory.size() > cfg.vSamples) vHistory.pop_front();
     float sum = 0; for (float v : vHistory) sum += v; return sum / (float)vHistory.size();
 }
 
 uint16_t calculateCCL(float v, int soc) {
-    if (millis() - lastBmsRx > (cfg.bmsTimeout * 1000)) return 0; // Emergency Zero
+    if (millis() - lastBmsRx > (cfg.bmsTimeout * 1000)) return 0;
     if (v >= cfg.vMaxCharge) return 0;
     if ((cellHighAlarm && v > cfg.vHighAlarmGate) || (soc >= 100)) return (uint16_t)(cfg.trickleA * 10);
     float vRatio = (v > cfg.vStartTaper) ? (cfg.vMaxCharge - v) / (cfg.vMaxCharge - cfg.vStartTaper) : 1.0;
@@ -87,7 +87,7 @@ uint16_t calculateCCL(float v, int soc) {
 }
 
 uint16_t calculateDCL(float v, int soc) {
-    if (millis() - lastBmsRx > (cfg.bmsTimeout * 1000)) return 0; // Emergency Zero
+    if (millis() - lastBmsRx > (cfg.bmsTimeout * 1000)) return 0;
     if (v <= cfg.vMinDischarge || soc <= 0) return 0;
     if (cellLowAlarm && v < cfg.vLowAlarmGate) return (uint16_t)(cfg.limpDischargeA * 10);
     float vRatio = (v < cfg.vStartDTaper) ? (v - cfg.vMinDischarge) / (cfg.vStartDTaper - cfg.vMinDischarge) : 1.0;
@@ -163,7 +163,7 @@ const char config_html[] PROGMEM = R"rawliteral(
     <div class="row"><div class="text-group"><strong>Discharge Cutoff (V)</strong><span class="desc">Absolute minimum battery voltage.</span></div>
       <input type="number" name="mdv" step="0.1" value="!!VAL_MDV!!"></div>
     <div class="row"><div class="text-group"><strong>Limp Discharge (A)</strong><span class="desc">Fixed limit when a low cell is detected.</span></div>
-      <input type="number" name="la" step="1" value="!!VAL_LIMP!!"></div>
+      <input type="number" name="ld" step="1" value="!!VAL_LIMP!!"></div>
     <div class="row"><div class="text-group"><strong>High Cell Gate (V)</strong><span class="desc">Enable Trickle logic above this voltage.</span></div>
       <input type="number" name="ag" step="0.1" value="!!VAL_AG!!"></div>
     <div class="row"><div class="text-group"><strong>Low Cell Gate (V)</strong><span class="desc">Enable Limp logic below this voltage.</span></div>
@@ -186,7 +186,7 @@ void setup() {
     Serial.begin(115200);
     loadConfig(); 
 
-    // Layer 1: Watchdog Setup
+    // Watchdog
     esp_task_wdt_init(WDT_TIMEOUT_SECONDS, true);
     esp_task_wdt_add(NULL);
 
@@ -197,6 +197,8 @@ void setup() {
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){ request->send_P(200, "text/html", index_html); });
     server.on("/config", HTTP_GET, [](AsyncWebServerRequest *request){
         String h = String(config_html);
+        // Important: Replace LIMP first and use explicit integer conversion
+        h.replace("!!VAL_LIMP!!", String((int)cfg.limpDischargeA));
         h.replace("!!VAL_LAG!!", String(cfg.vLowAlarmGate, 1));
         h.replace("!!VAL_AG!!", String(cfg.vHighAlarmGate, 1));
         h.replace("!!VAL_SDT!!", String(cfg.socStartDTaper));
@@ -206,7 +208,6 @@ void setup() {
         h.replace("!!VAL_DA!!", String(cfg.maxDischargeA, 0));
         h.replace("!!VAL_MV!!", String(cfg.vMaxCharge, 1));
         h.replace("!!VAL_MDV!!", String(cfg.vMinDischarge, 1));
-        h.replace("!!VAL_LIMP!!", String(cfg.limpDischargeA, 0)); 
         h.replace("!!VAL_VS!!", String(cfg.vSamples));
         request->send(200, "text/html", h);
     });
@@ -227,7 +228,7 @@ void setup() {
         checkI("st", cfg.socStartTaper, "st", "SOC_C_Tap"); checkI("sdt", cfg.socStartDTaper, "sdt", "SOC_D_Tap");
         checkF("ta", cfg.trickleA, "ta", "Trickle"); checkF("ca", cfg.maxChargeA, "ca", "Max_C");
         checkF("da", cfg.maxDischargeA, "da", "Max_D"); checkF("mv", cfg.vMaxCharge, "mv", "Stop_V");
-        checkF("mdv", cfg.vMinDischarge, "mdv", "Cutoff_V"); checkF("la", cfg.limpDischargeA, "la", "Limp_A");
+        checkF("mdv", cfg.vMinDischarge, "mdv", "Cutoff_V"); checkF("ld", cfg.limpDischargeA, "ld_v2", "Limp_A");
         checkF("ag", cfg.vHighAlarmGate, "ag", "Hi_Gate"); checkF("lag", cfg.vLowAlarmGate, "lag", "Lo_Gate");
         checkI("vs", cfg.vSamples, "vs", "Samples");
         prefs.end(); if (changed) netLog("%s\n", audit.c_str());
@@ -235,7 +236,7 @@ void setup() {
     });
     server.addHandler(&events); server.begin();
 
-    // CAN Setup
+    // CAN
     twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)CAN_TX, (gpio_num_t)CAN_RX, TWAI_MODE_NORMAL);
     twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS();
     twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
@@ -245,20 +246,19 @@ void setup() {
     SPI.begin(MCP2515_SCLK, MCP2515_MISO, MCP2515_MOSI, MCP2515_CS);
     Can_SMA.reset(); Can_SMA.setBitrate(CAN_500KBPS); Can_SMA.setNormalMode();
 
-    netLog("[SYSTEM] Started. Boot Count: %d, Free Heap: %d bytes\n", bootCount, ESP.getFreeHeap());
+    netLog("[SYSTEM] Fixed-Limp Started. Boot: %d, RAM: %d\n", bootCount, ESP.getFreeHeap());
 }
 
 void loop() {
-    esp_task_wdt_reset(); // Layer 1: Feed the Watchdog
+    esp_task_wdt_reset(); 
     ArduinoOTA.handle();
 
     if (logServer.hasClient()) { if (logClient) logClient.stop(); logClient = logServer.available(); }
 
-    // Layer 3: CAN Driver Health Check
     twai_status_info_t twai_stat;
     twai_get_status_info(&twai_stat);
     if (twai_stat.state == TWAI_STATE_BUS_OFF) {
-        netLog("[CRITICAL] CAN BUS OFF - Restarting Driver...\n");
+        netLog("[CRITICAL] CAN BUS OFF - Restarting...\n");
         twai_initiate_recovery();
     }
 
@@ -300,12 +300,11 @@ void loop() {
             else if (packVoltage > cfg.vStartTaper || packSOC > cfg.socStartTaper) mode = "TAPER_C";
             else if (packVoltage < cfg.vStartDTaper || packSOC < cfg.socStartDTaper) mode = "TAPER_D";
             
-            netLog("[STATUS] Mode:%s V:%.2f I:%.1f SOC:%d%% CCL:%.1f DCL:%.1f SMA:%s RAM:%d\n", mode.c_str(), packVoltage, packCurrent, packSOC, calculateCCL(packVoltage, packSOC)/10.0, calculateDCL(packVoltage, packSOC)/10.0, smaChargeMode.c_str(), ESP.getFreeHeap());
+            netLog("[STATUS] Mode:%s V:%.2f I:%.1f SOC:%d%% CCL:%.1f DCL:%.1f RAM:%d\n", mode.c_str(), packVoltage, packCurrent, packSOC, calculateCCL(packVoltage, packSOC)/10.0, calculateDCL(packVoltage, packSOC)/10.0, smaChargeMode.c_str(), ESP.getFreeHeap());
             lastPush = millis();
         }
     }
 
-    // Layer 2: Safety Restart on WiFi or Heap Failure
-    if (ESP.getFreeHeap() < 20000) { netLog("[ERROR] Low Memory! Rebooting...\n"); delay(1000); ESP.restart(); }
-    if (WiFi.status() != WL_CONNECTED && millis() > 60000) { Serial.println("WiFi Lost. Rebooting..."); delay(1000); ESP.restart(); }
+    if (ESP.getFreeHeap() < 20000) { delay(1000); ESP.restart(); }
+    // if (WiFi.status() != WL_CONNECTED && millis() > 60000) { delay(1000); ESP.restart(); }
 }

@@ -18,23 +18,24 @@ IPAddress gateway(192, 168, 178, 1);
 IPAddress subnet(255, 255, 255, 0);
 
 #define WDT_TIMEOUT_SECONDS 15
+#define CELL_COUNT 16.0f
 
 struct Config
 {
   float maxChargeA;
   float maxDischargeA;
-  float vStartTaper;
-  float vMaxCharge;
-  float vStartDTaper;
-  float vMinDischarge;
-  float vHighAlarmGate;
-  float vLowAlarmGate;
+  float cvStartTaper;
+  float cvMaxCharge; // Cell-based voltages
+  float cvStartDTaper;
+  float cvMinDischarge;
+  float cvHighAlarmGate;
+  float cvLowAlarmGate;
   float trickleA;
   float limpDischargeA;
   int vSamples;
   int bmsTimeout;
-  float vMaintStart;
-  float vMaintStop;
+  float cvMaintStart;
+  float cvMaintStop;
   float maintAmps;
 } cfg;
 
@@ -49,6 +50,7 @@ unsigned long lastSmaTx = 0;
 unsigned long lastBmsRx = 0;
 bool isResetting = false;
 unsigned long resetHoldStartTime = 0;
+bool manualMaintForce = false;
 uint32_t bmsAlarmRaw = 0;
 std::deque<float> vHistory;
 String smaChargeMode = "Unknown";
@@ -84,18 +86,18 @@ void loadConfig()
   prefs.putUInt("boots", ++bootCount);
   cfg.maxChargeA = prefs.getFloat("ca", 250.0);
   cfg.maxDischargeA = prefs.getFloat("da", 500.0);
-  cfg.vStartTaper = prefs.getFloat("vt", 54.00);
-  cfg.vMaxCharge = prefs.getFloat("mv", 55.20);
-  cfg.vStartDTaper = prefs.getFloat("dvt", 49.60);
-  cfg.vMinDischarge = prefs.getFloat("mdv", 48.00);
-  cfg.vHighAlarmGate = prefs.getFloat("ag", 54.80);
-  cfg.vLowAlarmGate = prefs.getFloat("lag", 49.00);
+  cfg.cvStartTaper = prefs.getFloat("cvt", 3.375);
+  cfg.cvMaxCharge = prefs.getFloat("cmv", 3.450);
+  cfg.cvStartDTaper = prefs.getFloat("cdvt", 3.100);
+  cfg.cvMinDischarge = prefs.getFloat("cmdv", 3.000);
+  cfg.cvHighAlarmGate = prefs.getFloat("cag", 3.425);
+  cfg.cvLowAlarmGate = prefs.getFloat("clag", 3.065);
   cfg.trickleA = prefs.getFloat("ta", 2.0);
   cfg.limpDischargeA = prefs.getFloat("ld_v2", 15.0);
   cfg.vSamples = prefs.getInt("vs", 12);
   cfg.bmsTimeout = prefs.getInt("to", 15);
-  cfg.vMaintStart = prefs.getFloat("msv", 48.50);
-  cfg.vMaintStop = prefs.getFloat("mpp", 51.50);
+  cfg.cvMaintStart = prefs.getFloat("cmsv", 3.030);
+  cfg.cvMaintStop = prefs.getFloat("cmpp", 3.220);
   cfg.maintAmps = prefs.getFloat("mam", 20.0);
   prefs.end();
 }
@@ -119,13 +121,15 @@ uint16_t calculateCCL(float v, int soc)
     return (uint16_t)(cfg.maintAmps * 10);
   if (millis() - lastBmsRx > (unsigned long)(cfg.bmsTimeout * 1000))
     return 0;
-  if (v >= cfg.vMaxCharge)
+  if (v >= (cfg.cvMaxCharge * CELL_COUNT))
     return 0;
-  if (v >= cfg.vHighAlarmGate)
+  if (v >= (cfg.cvHighAlarmGate * CELL_COUNT))
     return (uint16_t)(cfg.trickleA * 10);
-  if (v > cfg.vStartTaper)
+  if (v > (cfg.cvStartTaper * CELL_COUNT))
   {
-    float slope = (cfg.vHighAlarmGate - v) / (cfg.vHighAlarmGate - cfg.vStartTaper);
+    float vStart = cfg.cvStartTaper * CELL_COUNT;
+    float vGate = cfg.cvHighAlarmGate * CELL_COUNT;
+    float slope = (vGate - v) / (vGate - vStart);
     float target = cfg.trickleA + (slope * (cfg.maxChargeA - cfg.trickleA));
     return (uint16_t)(max(target, cfg.trickleA) * 10);
   }
@@ -138,13 +142,15 @@ uint16_t calculateDCL(float v, int soc)
     return 0;
   if (millis() - lastBmsRx > (unsigned long)(cfg.bmsTimeout * 1000))
     return 0;
-  if (v <= cfg.vMinDischarge)
+  if (v <= (cfg.cvMinDischarge * CELL_COUNT))
     return 0;
-  if (v <= cfg.vLowAlarmGate)
+  if (v <= (cfg.cvLowAlarmGate * CELL_COUNT))
     return (uint16_t)(cfg.limpDischargeA * 10);
-  if (v < cfg.vStartDTaper)
+  if (v < (cfg.cvStartDTaper * CELL_COUNT))
   {
-    float slope = (v - cfg.vLowAlarmGate) / (cfg.vStartDTaper - cfg.vLowAlarmGate);
+    float vGate = cfg.cvLowAlarmGate * CELL_COUNT;
+    float vStart = cfg.cvStartDTaper * CELL_COUNT;
+    float slope = (v - vGate) / (vStart - vGate);
     float target = cfg.limpDischargeA + (slope * (cfg.maxDischargeA - cfg.limpDischargeA));
     return (uint16_t)(max(target, cfg.limpDischargeA) * 10);
   }
@@ -156,8 +162,8 @@ void sendToSma()
   struct can_frame f;
   uint16_t ccl = calculateCCL(packVoltage, packSOC);
   uint16_t dcl = calculateDCL(packVoltage, packSOC);
-  uint16_t cvl = (uint16_t)(cfg.vMaxCharge * 10);
-  uint16_t dvl = (uint16_t)(cfg.vMinDischarge * 10);
+  uint16_t cvl = maintenanceActive ? 560 : (uint16_t)(cfg.cvMaxCharge * CELL_COUNT * 10);
+  uint16_t dvl = (uint16_t)(cfg.cvMinDischarge * CELL_COUNT * 10);
 
   f.can_id = 0x351;
   f.can_dlc = 8;
@@ -167,17 +173,17 @@ void sendToSma()
   f.data[3] = highByte(ccl);
   f.data[4] = lowByte(dcl);
   f.data[5] = highByte(dcl);
-  f.data[6] = (isResetting) ? 0x00 : (maintenanceActive ? 0x60 : 0xC0);
-  f.data[7] = lowByte(dvl);
+  f.data[6] = (isResetting) ? 0x00 : (maintenanceActive ? 0x70 : 0xC0);
+  f.data[7] = 0x00;
   Can_SMA.sendMessage(&f);
 
   f.can_id = 0x355;
   f.can_dlc = 4;
-  uint16_t outSOC = maintenanceActive ? 7 : packSOC;
+  uint16_t outSOC = maintenanceActive ? 2 : packSOC;
   f.data[0] = lowByte(outSOC);
   f.data[1] = highByte(outSOC);
-  f.data[2] = lowByte(packSOH);
-  f.data[3] = highByte(packSOH);
+  f.data[2] = 100;
+  f.data[3] = 0;
   Can_SMA.sendMessage(&f);
 
   f.can_id = 0x356;
@@ -195,9 +201,7 @@ void sendToSma()
   f.can_id = 0x359;
   f.can_dlc = 8;
   memset(f.data, 0, 8);
-  if (bmsAlarmRaw & 0x01)
-    f.data[0] |= 0x04;
-  if (bmsAlarmRaw & 0x02)
+  if (maintenanceActive)
     f.data[0] |= 0x10;
   Can_SMA.sendMessage(&f);
 
@@ -237,24 +241,26 @@ const char index_html[] PROGMEM = R"rawliteral(
   body { font-family: sans-serif; text-align: center; background: #121212; color: #e0e0e0; margin: 0; }
   .nav { background: #1e1e1e; padding: 10px; border-bottom: 2px solid #333; margin-bottom: 10px; }
   .nav a { color: #4caf50; text-decoration: none; margin: 0 15px; font-weight: bold; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; padding: 15px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; padding: 15px; }
   .card { background: #1e1e1e; padding: 15px; border-radius: 10px; border: 1px solid #333; }
   .value { font-size: 2em; font-weight: bold; color: #4caf50; }
   .m-active { color: #ff9800 !important; }
   .err-active { color: #f44336 !important; }
-  .btn-reset { background: #d32f2f; color: white; border: none; padding: 12px 25px; border-radius: 5px; cursor: pointer; font-weight: bold; margin-top: 10px; }
+  .btn { border: none; padding: 12px 20px; border-radius: 5px; cursor: pointer; font-weight: bold; margin: 10px; font-size: 1em; display: inline-block; text-decoration: none; color: white; }
+  .btn-blue { background: #0277bd; } .btn-red { background: #d32f2f; }
   #console { width: 95%; max-width: 1000px; height: 300px; margin: 15px auto; background: #000; color: #00ff00; font-family: monospace; text-align: left; padding: 15px; overflow-y: scroll; border-radius: 8px; font-size: 0.85em; border: 1px solid #444; }
 </style></head><body>
 <div class="nav"><a href="/">DASHBOARD</a> | <a href="/config">CONFIGURATION</a></div>
 <div class="grid">
-  <div class="card"><div>Voltage</div><div id="v" class="value">--</div></div>
+  <div class="card"><div>Pack Voltage</div><div id="v" class="value">--</div></div>
+  <div class="card"><div>Avg Cell</div><div id="cv" class="value">--</div></div>
   <div class="card"><div>Current</div><div id="i" class="value">--</div></div>
   <div class="card"><div>SOC</div><div id="soc" class="value">--</div></div>
-  <div class="card"><div>SMA Error</div><div id="err" class="value">--</div></div>
+  <div class="card"><div>SMA Status</div><div id="smastat" class="value">--</div></div>
 </div>
 <div class="card" style="margin: 0 15px;">
-  <div style="font-size: 1.1em; margin-bottom: 8px;">System: <span id="mstat">OPERATIONAL</span></div>
-  <button class="btn-reset" onclick="fetch('/resetSMA')">CLEAR CLUSTER ERROR (Virtual Reseat)</button>
+  <a href="/toggleMaint" class="btn btn-blue" id="mbtn">TRIGGER FORCE CHARGE</a>
+  <button class="btn btn-red" onclick="if(confirm('Simulate battery disconnect?')) fetch('/resetSMA')">CLEAR SMA ERROR (Reset)</button>
 </div>
 <div id="console">Log Active...<br></div>
 <script>
@@ -262,13 +268,15 @@ const char index_html[] PROGMEM = R"rawliteral(
   source.addEventListener('data', function(e) {
     var obj = JSON.parse(e.data);
     document.getElementById('v').innerHTML = obj.v.toFixed(2) + " V";
+    document.getElementById('cv').innerHTML = (obj.v / 16.0).toFixed(3) + " V";
     document.getElementById('i').innerHTML = obj.i.toFixed(1) + " A";
     document.getElementById('soc').innerHTML = obj.soc + "%";
-    document.getElementById('err').innerHTML = (obj.err > 100) ? "ID " + obj.err : "NONE";
-    if(obj.err > 100) document.getElementById('err').className = "value err-active";
-    else document.getElementById('err').className = "value";
-    document.getElementById('mstat').innerHTML = obj.isR ? "RESETTING CLUSTER..." : (obj.maint ? "WINTER MAINTENANCE" : "OPERATIONAL");
-    if(obj.maint) document.getElementById('mstat').className = "m-active"; else document.getElementById('mstat').className = "";
+    document.getElementById('smastat').innerHTML = (obj.err > 0 && obj.err < 60000) ? "ERROR "+obj.err : "OK";
+    if(obj.err > 0 && obj.err < 60000) document.getElementById('smastat').className = "value err-active";
+    else document.getElementById('smastat').className = "value";
+    const mb = document.getElementById('mbtn');
+    if(obj.force) { mb.innerHTML = "STOP FORCE CHARGE"; mb.style.background = "#ff9800"; }
+    else { mb.innerHTML = "TRIGGER FORCE CHARGE"; mb.style.background = "#0277bd"; }
   }, false);
   source.addEventListener('log', function(e) {
     const con = document.getElementById('console'); con.innerHTML += e.data + "<br>";
@@ -277,7 +285,7 @@ const char index_html[] PROGMEM = R"rawliteral(
   }, false);
 </script></body></html>)rawliteral";
 
-// --- UI CONFIG ---
+// --- UI CONFIG (Updated for V/Cell) ---
 const char config_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML><html><head><title>Settings</title><meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
@@ -288,46 +296,50 @@ const char config_html[] PROGMEM = R"rawliteral(
   .desc { font-size: 0.8em; color: #888; display: block; margin-top: 2px; }
   h2 { color: #4caf50; border-bottom: 2px solid #4caf50; padding-bottom: 5px; margin-top: 25px; }
   .winter-h { color: #ff9800 !important; border-bottom: 2px solid #ff9800 !important; }
-  input { font-size: 1.1em; padding: 5px; width: 100px; text-align: center; background: #000; color: #0f0; border: 1px solid #444; border-radius: 4px; }
+  input { font-size: 1.1em; padding: 5px; width: 110px; text-align: center; background: #000; color: #0f0; border: 1px solid #444; border-radius: 4px; }
   .save { background: #2e7d32; color: white; border: none; padding: 15px; width: 100%; border-radius: 5px; font-weight: bold; cursor: pointer; font-size: 1.1em; margin-top: 20px; }
   .reset { background: #d32f2f; color: white; border: none; padding: 10px; width: 100%; border-radius: 5px; font-weight: bold; cursor: pointer; font-size: 0.9em; text-decoration: none; display: block; text-align: center; margin-top: 15px; }
 </style></head><body>
 <div class="container">
   <a href="/" style="color:#4caf50;text-decoration:none;">&larr; Back to Dashboard</a>
   <form action="/save" method="GET">
-    <h2>Charging Profile</h2>
-    <div class="row"><div class="text-group"><strong>Max Charge Amps</strong><span class="desc">Bulk current limit.</span></div>
+    <h2>Charging Profile (16S)</h2>
+    <div class="row"><div class="text-group"><strong>Max Charge Amps</strong><span class="desc">Global bulk charging limit.</span></div>
       <input type="number" name="ca" step="5" value="!!VAL_CA!!"></div>
-    <div class="row"><div class="text-group"><strong>Start Taper Volts</strong><span class="desc">Voltage where charging slows.</span></div>
-      <input type="number" name="vt" step="0.1" value="!!VAL_VT!!"></div>
-    <div class="row"><div class="text-group"><strong>Target Trickle Volts</strong><span class="desc">Voltage for balancing floor.</span></div>
-      <input type="number" name="ag" step="0.1" value="!!VAL_AG!!"></div>
-    <div class="row"><div class="text-group"><strong>Trickle Amps</strong><span class="desc">Balancing current floor.</span></div>
+    <div class="row"><div class="text-group"><strong>Start Taper Vpc</strong><span class="desc">Current begins to slow at this cell voltage.</span></div>
+      <input type="number" name="cvt" step="0.001" value="!!VAL_VT!!"></div>
+    <div class="row"><div class="text-group"><strong>Target Trickle Vpc</strong><span class="desc">Voltage where balancing floor is reached.</span></div>
+      <input type="number" name="cag" step="0.001" value="!!VAL_AG!!"></div>
+    <div class="row"><div class="text-group"><strong>Trickle Amps</strong><span class="desc">Constant current floor for balancing.</span></div>
       <input type="number" name="ta" step="0.5" value="!!VAL_TA!!"></div>
-    <div class="row"><div class="text-group"><strong>Max Charge Volts</strong><span class="desc">Absolute safety stop.</span></div>
-      <input type="number" name="mv" step="0.1" value="!!VAL_MV!!"></div>
+    <div class="row"><div class="text-group"><strong>Max Charge Vpc</strong><span class="desc">Absolute cell safety cutoff (Hard Floor).</span></div>
+      <input type="number" name="cmv" step="0.001" value="!!VAL_MV!!"></div>
 
     <h2 class="winter-h">Winter Force Charge</h2>
-    <div class="row"><div class="text-group"><strong>Maint. Start Volts</strong><span class="desc">Trigger grid charge below this.</span></div>
-      <input type="number" name="msv" step="0.1" value="!!VAL_MSV!!"></div>
-    <div class="row"><div class="text-group"><strong>Maint. Stop Volts</strong><span class="desc">Release grid charge above this.</span></div>
-      <input type="number" name="mpp" step="0.1" value="!!VAL_MPP!!"></div>
-    <div class="row"><div class="text-group"><strong>Maintenance Amps</strong><span class="desc">Current drawn from grid.</span></div>
+    <div class="row"><div class="text-group"><strong>Maint. Start Vpc</strong><span class="desc">Trigger grid charge if any cell falls below this.</span></div>
+      <input type="number" name="cmsv" step="0.001" value="!!VAL_MSV!!"></div>
+    <div class="row"><div class="text-group"><strong>Maint. Stop Vpc</strong><span class="desc">Stop grid charge when cells reach this.</span></div>
+      <input type="number" name="cmpp" step="0.001" value="!!VAL_MPP!!"></div>
+    <div class="row"><div class="text-group"><strong>Maintenance Amps</strong><span class="desc">Constant current drawn from grid.</span></div>
       <input type="number" name="mam" step="1" value="!!VAL_MAM!!"></div>
 
     <h2>Discharging Profile</h2>
-    <div class="row"><div class="text-group"><strong>Max Discharge Amps</strong><span class="desc">Bulk load limit.</span></div>
+    <div class="row"><div class="text-group"><strong>Max Discharge Amps</strong><span class="desc">Peak household load limit.</span></div>
       <input type="number" name="da" step="10" value="!!VAL_DA!!"></div>
-    <div class="row"><div class="text-group"><strong>Start Taper Volts (D)</strong><span class="desc">Voltage where discharge slows.</span></div>
-      <input type="number" name="dvt" step="0.1" value="!!VAL_DVT!!"></div>
-    <div class="row"><div class="text-group"><strong>Target Limp Volts</strong><span class="desc">Voltage for Limp Mode.</span></div>
-      <input type="number" name="lag" step="0.1" value="!!VAL_LAG!!"></div>
-    <div class="row"><div class="text-group"><strong>Limp Amps</strong><span class="desc">Minimum keeping-alive current.</span></div>
+    <div class="row"><div class="text-group"><strong>Start Taper Vpc (D)</strong><span class="desc">Voltage where discharge current is restricted.</span></div>
+      <input type="number" name="cdvt" step="0.001" value="!!VAL_DVT!!"></div>
+    <div class="row"><div class="text-group"><strong>Target Limp Vpc</strong><span class="desc">Entry point for keeping-alive mode.</span></div>
+      <input type="number" name="clag" step="0.001" value="!!VAL_LAG!!"></div>
+    <div class="row"><div class="text-group"><strong>Limp Amps</strong><span class="desc">Minimum keeping-alive current floor.</span></div>
       <input type="number" name="ld" step="1" value="!!VAL_LIMP!!"></div>
-    <div class="row"><div class="text-group"><strong>Min Discharge Volts</strong><span class="desc">Absolute floor.</span></div>
-      <input type="number" name="mdv" step="0.1" value="!!VAL_MDV!!"></div>
+    <div class="row"><div class="text-group"><strong>Min Discharge Vpc</strong><span class="desc">Absolute floor to prevent cell reversal.</span></div>
+      <input type="number" name="cmdv" step="0.001" value="!!VAL_MDV!!"></div>
 
-    <button type="submit" class="save">SAVE & APPLY CHANGES</button>
+    <h2>System Tuning</h2>
+    <div class="row"><div class="text-group"><strong>Voltage Window</strong><span class="desc">Number of moving average samples (1-20).</span></div>
+      <input type="number" name="vs" step="1" value="!!VAL_VS!!"></div>
+
+    <button type="submit" class="save">SAVE & APPLY ALL CHANGES</button>
   </form>
   <a href="/reset" class="reset" onclick="return confirm('Restore defaults?')">RESTORE FACTORY DEFAULTS</a>
 </div></body></html>)rawliteral";
@@ -347,29 +359,32 @@ void setup()
 
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
             { request->send(200, "text/html", index_html); });
+  server.on("/toggleMaint", HTTP_GET, [](AsyncWebServerRequest *request)
+            { manualMaintForce = !manualMaintForce; netLog("[USER] Manual Force Charge: %s\n", manualMaintForce?"ON":"OFF"); request->redirect("/"); });
   server.on("/resetSMA", HTTP_GET, [](AsyncWebServerRequest *request)
             { isResetting = true; resetHoldStartTime = millis(); netLog("[USER] Manual Cluster Reset.\n"); request->send(200, "text/plain", "OK"); });
 
   server.on("/config", HTTP_GET, [](AsyncWebServerRequest *request)
             {
-    String h = String(config_html);
-    h.replace("!!VAL_CA!!", String(cfg.maxChargeA, 0)); h.replace("!!VAL_VT!!", String(cfg.vStartTaper, 1)); h.replace("!!VAL_AG!!", String(cfg.vHighAlarmGate, 1));
-    h.replace("!!VAL_TA!!", String(cfg.trickleA, 1)); h.replace("!!VAL_MV!!", String(cfg.vMaxCharge, 1)); h.replace("!!VAL_MSV!!", String(cfg.vMaintStart, 1));
-    h.replace("!!VAL_MPP!!", String(cfg.vMaintStop, 1)); h.replace("!!VAL_MAM!!", String(cfg.maintAmps, 0)); h.replace("!!VAL_DA!!", String(cfg.maxDischargeA, 0));
-    h.replace("!!VAL_DVT!!", String(cfg.vStartDTaper, 1)); h.replace("!!VAL_LAG!!", String(cfg.vLowAlarmGate, 1)); h.replace("!!VAL_LIMP!!", String(cfg.limpDischargeA, 0));
-    h.replace("!!VAL_MDV!!", String(cfg.vMinDischarge, 1));
-    request->send(200, "text/html", h); });
+        String h = String(config_html);
+        h.replace("!!VAL_CA!!", String(cfg.maxChargeA, 0)); h.replace("!!VAL_VT!!", String(cfg.cvStartTaper, 3)); h.replace("!!VAL_AG!!", String(cfg.cvHighAlarmGate, 3));
+        h.replace("!!VAL_TA!!", String(cfg.trickleA, 1)); h.replace("!!VAL_MV!!", String(cfg.cvMaxCharge, 3)); h.replace("!!VAL_MSV!!", String(cfg.cvMaintStart, 3));
+        h.replace("!!VAL_MPP!!", String(cfg.cvMaintStop, 3)); h.replace("!!VAL_MAM!!", String(cfg.maintAmps, 0)); h.replace("!!VAL_DA!!", String(cfg.maxDischargeA, 0));
+        h.replace("!!VAL_DVT!!", String(cfg.cvStartDTaper, 3)); h.replace("!!VAL_LAG!!", String(cfg.cvLowAlarmGate, 3)); h.replace("!!VAL_LIMP!!", String(cfg.limpDischargeA, 0));
+        h.replace("!!VAL_MDV!!", String(cfg.cvMinDischarge, 3)); h.replace("!!VAL_VS!!", String(cfg.vSamples));
+        request->send(200, "text/html", h); });
 
   server.on("/save", HTTP_GET, [](AsyncWebServerRequest *request)
             {
-    prefs.begin("bms-bridge", false);
-    auto cF = [&](String p, float &v, String k) { if(request->hasParam(p)) { v = request->getParam(p)->value().toFloat(); prefs.putFloat(k.c_str(), v); } };
-    cF("ca", cfg.maxChargeA, "ca"); cF("vt", cfg.vStartTaper, "vt"); cF("ag", cfg.vHighAlarmGate, "ag");
-    cF("ta", cfg.trickleA, "ta"); cF("mv", cfg.vMaxCharge, "mv"); cF("msv", cfg.vMaintStart, "msv");
-    cF("mpp", cfg.vMaintStop, "mpp"); cF("mam", cfg.maintAmps, "mam"); cF("da", cfg.maxDischargeA, "da");
-    cF("dvt", cfg.vStartDTaper, "dvt"); cF("lag", cfg.vLowAlarmGate, "lag"); cF("ld", cfg.limpDischargeA, "ld_v2");
-    cF("mdv", cfg.vMinDischarge, "mdv");
-    prefs.end(); netLog("[CONFIG] Updated.\n"); request->redirect("/"); });
+        prefs.begin("bms-bridge", false);
+        auto cF = [&](String p, float &v, String k) { if(request->hasParam(p)) { v = request->getParam(p)->value().toFloat(); prefs.putFloat(k.c_str(), v); } };
+        cF("ca", cfg.maxChargeA, "ca"); cF("cvt", cfg.cvStartTaper, "cvt"); cF("cag", cfg.cvHighAlarmGate, "cag");
+        cF("ta", cfg.trickleA, "ta"); cF("cmv", cfg.cvMaxCharge, "cmv"); cF("cmsv", cfg.cvMaintStart, "cmsv");
+        cF("cmpp", cfg.cvMaintStop, "cmpp"); cF("mam", cfg.maintAmps, "mam"); cF("da", cfg.maxDischargeA, "da");
+        cF("cdvt", cfg.cvStartDTaper, "cdvt"); cF("clag", cfg.cvLowAlarmGate, "clag"); cF("ld", cfg.limpDischargeA, "ld_v2");
+        cF("cmdv", cfg.cvMinDischarge, "cmdv");
+        if(request->hasParam("vs")) { cfg.vSamples = request->getParam("vs")->value().toInt(); prefs.putInt("vs", cfg.vSamples); }
+        prefs.end(); netLog("[CONFIG] Cell-based settings updated.\n"); request->redirect("/"); });
 
   server.addHandler(&events);
   server.begin();
@@ -399,6 +414,7 @@ void loop()
     if (logClient)
       logClient.stop();
     logClient = logServer.available();
+    netLog("--- LOGGER ONLINE ---\n");
   }
   twai_status_info_t twai_stat;
   twai_get_status_info(&twai_stat);
@@ -436,50 +452,60 @@ void loop()
                                       : (m == 3)   ? "Float"
                                                    : "Equalize";
     }
+    if (in_frame.can_id == 0x300)
+      gridPresent = (in_frame.data[0] & 0x01);
     if (in_frame.can_id == 0x301)
     {
       uint16_t nE = (in_frame.data[1] << 8) | in_frame.data[0];
-      if (nE > 100 && nE != smaErrorCode)
+      if (nE > 0 && nE < 60000 && nE != smaErrorCode)
       {
         smaErrorCode = nE;
         netLog("[SMA-ALARM] Error %d detected!\n", smaErrorCode);
-        if (smaErrorCode == 9331 || smaErrorCode == 8609)
+        if (smaErrorCode == 9331 || smaErrorCode == 8609 || smaErrorCode == 9362)
         {
           isResetting = true;
           resetHoldStartTime = millis();
         }
       }
-      else if (nE == 0)
+      else if (nE == 0 || nE > 60000)
       {
-        smaErrorCode = 0;
+        smaErrorCode = nE;
       }
     }
   }
 
-  if (isResetting && (millis() - resetHoldStartTime > 4500))
+  if (isResetting && (millis() - resetHoldStartTime > 5500))
   {
     isResetting = false;
-    netLog("[SYS] Reset finished.\n");
+    netLog("[SYS] Recovery cycle finished.\n");
   }
 
   if (millis() - lastSmaTx > 250)
   {
-    if (!maintenanceActive && packVoltage < cfg.vMaintStart)
-      maintenanceActive = true;
-    else if (maintenanceActive && packVoltage > cfg.vMaintStop)
-      maintenanceActive = false;
+    static bool autoMaint = false;
+    if (!autoMaint && packVoltage < (cfg.cvMaintStart * CELL_COUNT))
+      autoMaint = true;
+    else if (autoMaint && packVoltage > (cfg.cvMaintStop * CELL_COUNT))
+      autoMaint = false;
+    maintenanceActive = manualMaintForce || autoMaint;
+
     sendToSma();
     lastSmaTx = millis();
     static unsigned long lastPush = 0;
     if (millis() - lastPush > 2000)
     {
-      char json[256];
-      snprintf(json, sizeof(json), "{\"v\":%.2f,\"i\":%.1f,\"soc\":%d,\"smam\":\"%s\",\"maint\":%d,\"err\":%d,\"isR\":%d}", packVoltage, packCurrent, (int)packSOC, smaChargeMode.c_str(), (int)maintenanceActive, (int)smaErrorCode, (int)isResetting);
+      char json[400];
+      snprintf(json, sizeof(json), "{\"v\":%.2f,\"i\":%.1f,\"soc\":%d,\"smam\":\"%s\",\"maint\":%d,\"force\":%d,\"err\":%d,\"isR\":%d}",
+               packVoltage, packCurrent, (int)packSOC, smaChargeMode.c_str(), (int)autoMaint, (int)manualMaintForce, (int)smaErrorCode, (int)isResetting);
       events.send(json, "data", millis());
-      netLog("[STATUS] Mode:%s V:%.2f I:%.1f SOC:%d%% CCL:%.1f DCL:%.1f\n", maintenanceActive ? "MAINT" : "RUN", packVoltage, packCurrent, (int)packSOC, calculateCCL(packVoltage, packSOC) / 10.0, calculateDCL(packVoltage, packSOC) / 10.0);
+      String modeStr = maintenanceActive ? "MAINT" : "RUN";
+      netLog("[STATUS] Mode:%s V:%.2f (Avg:%.3fV) I:%.1f SOC:%d%% CCL:%.1f DCL:%.1f SMA:%s\n", modeStr.c_str(), packVoltage, packVoltage / 16.0, packCurrent, (int)packSOC, calculateCCL(packVoltage, packSOC) / 10.0, calculateDCL(packVoltage, packSOC) / 10.0, smaChargeMode.c_str());
       lastPush = millis();
     }
   }
   if (ESP.getFreeHeap() < 18000)
+  {
+    netLog("[SYS] Heap Critical. Safe Restart.\n");
     ESP.restart();
+  }
 }

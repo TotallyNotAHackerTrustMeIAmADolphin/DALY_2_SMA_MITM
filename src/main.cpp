@@ -42,12 +42,18 @@ struct Config
 float packVoltage = 52.6;
 float packCurrent = 0.0;
 uint16_t packSOC = 50;
+uint16_t packSOH = 100;
+int16_t packTemp = 220;
+uint16_t smaErrorCode = 0;
 unsigned long lastSmaTx = 0;
 unsigned long lastBmsRx = 0;
+bool isResetting = false;
+unsigned long resetHoldStartTime = 0;
+uint32_t bmsAlarmRaw = 0;
 std::deque<float> vHistory;
 String smaChargeMode = "Unknown";
 bool gridPresent = false;
-bool maintenanceActive = false; // Purely automated state
+bool maintenanceActive = false;
 uint32_t bootCount = 0;
 
 MCP2515 Can_SMA(MCP2515_CS, 10000000, &SPI);
@@ -96,7 +102,7 @@ void loadConfig()
 
 float getFilteredVoltage(float newV)
 {
-  if (newV < 30.0 || newV > 70.0)
+  if (newV < 40.0 || newV > 62.0)
     return packVoltage;
   vHistory.push_back(newV);
   while (vHistory.size() > (size_t)cfg.vSamples)
@@ -145,6 +151,85 @@ uint16_t calculateDCL(float v, int soc)
   return (uint16_t)(cfg.maxDischargeA * 10);
 }
 
+void sendToSma()
+{
+  struct can_frame f;
+  uint16_t ccl = calculateCCL(packVoltage, packSOC);
+  uint16_t dcl = calculateDCL(packVoltage, packSOC);
+  uint16_t cvl = (uint16_t)(cfg.vMaxCharge * 10);
+  uint16_t dvl = (uint16_t)(cfg.vMinDischarge * 10);
+
+  f.can_id = 0x351;
+  f.can_dlc = 8;
+  f.data[0] = lowByte(cvl);
+  f.data[1] = highByte(cvl);
+  f.data[2] = lowByte(ccl);
+  f.data[3] = highByte(ccl);
+  f.data[4] = lowByte(dcl);
+  f.data[5] = highByte(dcl);
+  f.data[6] = (isResetting) ? 0x00 : (maintenanceActive ? 0x60 : 0xC0);
+  f.data[7] = lowByte(dvl);
+  Can_SMA.sendMessage(&f);
+
+  f.can_id = 0x355;
+  f.can_dlc = 4;
+  uint16_t outSOC = maintenanceActive ? 7 : packSOC;
+  f.data[0] = lowByte(outSOC);
+  f.data[1] = highByte(outSOC);
+  f.data[2] = lowByte(packSOH);
+  f.data[3] = highByte(packSOH);
+  Can_SMA.sendMessage(&f);
+
+  f.can_id = 0x356;
+  f.can_dlc = 6;
+  uint16_t v_out = (uint16_t)(packVoltage * 100);
+  int16_t i_out = (int16_t)(packCurrent * 10.0);
+  f.data[0] = lowByte(v_out);
+  f.data[1] = highByte(v_out);
+  f.data[2] = lowByte(i_out);
+  f.data[3] = highByte(i_out);
+  f.data[4] = lowByte(packTemp);
+  f.data[5] = highByte(packTemp);
+  Can_SMA.sendMessage(&f);
+
+  f.can_id = 0x359;
+  f.can_dlc = 8;
+  memset(f.data, 0, 8);
+  if (bmsAlarmRaw & 0x01)
+    f.data[0] |= 0x04;
+  if (bmsAlarmRaw & 0x02)
+    f.data[0] |= 0x10;
+  Can_SMA.sendMessage(&f);
+
+  static uint8_t ticker = 0;
+  if (++ticker > 10)
+  {
+    ticker = 0;
+    f.can_id = 0x35E;
+    f.can_dlc = 8;
+    f.data[0] = 'S';
+    f.data[1] = 0;
+    f.data[2] = 'M';
+    f.data[3] = 0;
+    f.data[4] = 'A';
+    f.data[5] = 0;
+    f.data[6] = 0;
+    f.data[7] = 0;
+    Can_SMA.sendMessage(&f);
+    f.can_id = 0x35F;
+    f.can_dlc = 8;
+    f.data[0] = 3;
+    f.data[1] = 0;
+    f.data[2] = 0;
+    f.data[3] = 0;
+    f.data[4] = 0x48;
+    f.data[5] = 0x03;
+    f.data[6] = 0;
+    f.data[7] = 0;
+    Can_SMA.sendMessage(&f);
+  }
+}
+
 // --- UI DASHBOARD ---
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML><html><head><title>BMS Bridge Pro</title><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -156,17 +241,20 @@ const char index_html[] PROGMEM = R"rawliteral(
   .card { background: #1e1e1e; padding: 15px; border-radius: 10px; border: 1px solid #333; }
   .value { font-size: 2em; font-weight: bold; color: #4caf50; }
   .m-active { color: #ff9800 !important; }
-  #console { width: 95%; max-width: 1000px; height: 350px; margin: 15px auto; background: #000; color: #00ff00; font-family: monospace; text-align: left; padding: 15px; overflow-y: scroll; border-radius: 8px; border: 1px solid #444; }
+  .err-active { color: #f44336 !important; }
+  .btn-reset { background: #d32f2f; color: white; border: none; padding: 12px 25px; border-radius: 5px; cursor: pointer; font-weight: bold; margin-top: 10px; }
+  #console { width: 95%; max-width: 1000px; height: 300px; margin: 15px auto; background: #000; color: #00ff00; font-family: monospace; text-align: left; padding: 15px; overflow-y: scroll; border-radius: 8px; font-size: 0.85em; border: 1px solid #444; }
 </style></head><body>
 <div class="nav"><a href="/">DASHBOARD</a> | <a href="/config">CONFIGURATION</a></div>
 <div class="grid">
   <div class="card"><div>Voltage</div><div id="v" class="value">--</div></div>
   <div class="card"><div>Current</div><div id="i" class="value">--</div></div>
-  <div class="card"><div>SOC (BMS)</div><div id="soc" class="value">--</div></div>
-  <div class="card"><div>SMA Mode</div><div id="smam" class="value">--</div></div>
+  <div class="card"><div>SOC</div><div id="soc" class="value">--</div></div>
+  <div class="card"><div>SMA Error</div><div id="err" class="value">--</div></div>
 </div>
-<div class="card" style="margin: 0 15px; border-color: #555;">
-  <div style="font-size: 1.2em;">System Status: <span id="mstat">NORMAL</span></div>
+<div class="card" style="margin: 0 15px;">
+  <div style="font-size: 1.1em; margin-bottom: 8px;">System: <span id="mstat">OPERATIONAL</span></div>
+  <button class="btn-reset" onclick="fetch('/resetSMA')">CLEAR CLUSTER ERROR (Virtual Reseat)</button>
 </div>
 <div id="console">Log Active...<br></div>
 <script>
@@ -176,20 +264,20 @@ const char index_html[] PROGMEM = R"rawliteral(
     document.getElementById('v').innerHTML = obj.v.toFixed(2) + " V";
     document.getElementById('i').innerHTML = obj.i.toFixed(1) + " A";
     document.getElementById('soc').innerHTML = obj.soc + "%";
-    document.getElementById('smam').innerHTML = obj.smam;
-    const ms = document.getElementById('mstat');
-    if(obj.maint) { ms.innerHTML = "WINTER MAINTENANCE (GRID CHARGE)"; ms.className = "m-active"; }
-    else { ms.innerHTML = "SOLAR / DISCHARGE"; ms.className = ""; }
+    document.getElementById('err').innerHTML = (obj.err > 100) ? "ID " + obj.err : "NONE";
+    if(obj.err > 100) document.getElementById('err').className = "value err-active";
+    else document.getElementById('err').className = "value";
+    document.getElementById('mstat').innerHTML = obj.isR ? "RESETTING CLUSTER..." : (obj.maint ? "WINTER MAINTENANCE" : "OPERATIONAL");
+    if(obj.maint) document.getElementById('mstat').className = "m-active"; else document.getElementById('mstat').className = "";
   }, false);
   source.addEventListener('log', function(e) {
-    const con = document.getElementById('console');
-    con.innerHTML += e.data + "<br>";
+    const con = document.getElementById('console'); con.innerHTML += e.data + "<br>";
     if(con.childNodes.length > 100) con.removeChild(con.firstChild);
     con.scrollTop = con.scrollHeight;
   }, false);
 </script></body></html>)rawliteral";
 
-// (config_html stays identical to the well-structured version)
+// --- UI CONFIG ---
 const char config_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML><html><head><title>Settings</title><meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
@@ -208,85 +296,41 @@ const char config_html[] PROGMEM = R"rawliteral(
   <a href="/" style="color:#4caf50;text-decoration:none;">&larr; Back to Dashboard</a>
   <form action="/save" method="GET">
     <h2>Charging Profile</h2>
-    <div class="row"><div class="text-group"><strong>Max Charge Amps (A)</strong><span class="desc">Global bulk charging limit.</span></div>
+    <div class="row"><div class="text-group"><strong>Max Charge Amps</strong><span class="desc">Bulk current limit.</span></div>
       <input type="number" name="ca" step="5" value="!!VAL_CA!!"></div>
-    <div class="row"><div class="text-group"><strong>Start Taper Volts</strong><span class="desc">Voltage where charging begins to slow.</span></div>
+    <div class="row"><div class="text-group"><strong>Start Taper Volts</strong><span class="desc">Voltage where charging slows.</span></div>
       <input type="number" name="vt" step="0.1" value="!!VAL_VT!!"></div>
-    <div class="row"><div class="text-group"><strong>Target Trickle Volts</strong><span class="desc">Voltage where current reaches Trickle floor.</span></div>
+    <div class="row"><div class="text-group"><strong>Target Trickle Volts</strong><span class="desc">Voltage for balancing floor.</span></div>
       <input type="number" name="ag" step="0.1" value="!!VAL_AG!!"></div>
-    <div class="row"><div class="text-group"><strong>Trickle Amps (A)</strong><span class="desc">Constant current for balancing.</span></div>
+    <div class="row"><div class="text-group"><strong>Trickle Amps</strong><span class="desc">Balancing current floor.</span></div>
       <input type="number" name="ta" step="0.5" value="!!VAL_TA!!"></div>
-    <div class="row"><div class="text-group"><strong>Max Charge Volts</strong><span class="desc">Absolute stop voltage (Hard Cutoff).</span></div>
+    <div class="row"><div class="text-group"><strong>Max Charge Volts</strong><span class="desc">Absolute safety stop.</span></div>
       <input type="number" name="mv" step="0.1" value="!!VAL_MV!!"></div>
 
-    <h2 class="winter-h">Winter Maintenance</h2>
-    <div class="row"><div class="text-group"><strong>Start Voltage (V)</strong><span class="desc">Auto-start grid charge if voltage falls below this.</span></div>
+    <h2 class="winter-h">Winter Force Charge</h2>
+    <div class="row"><div class="text-group"><strong>Maint. Start Volts</strong><span class="desc">Trigger grid charge below this.</span></div>
       <input type="number" name="msv" step="0.1" value="!!VAL_MSV!!"></div>
-    <div class="row"><div class="text-group"><strong>Stop Voltage (V)</strong><span class="desc">Auto-stop grid charge once this voltage is hit.</span></div>
+    <div class="row"><div class="text-group"><strong>Maint. Stop Volts</strong><span class="desc">Release grid charge above this.</span></div>
       <input type="number" name="mpp" step="0.1" value="!!VAL_MPP!!"></div>
-    <div class="row"><div class="text-group"><strong>Maintenance Amps (A)</strong><span class="desc">Current drawn from grid during maintenance.</span></div>
+    <div class="row"><div class="text-group"><strong>Maintenance Amps</strong><span class="desc">Current drawn from grid.</span></div>
       <input type="number" name="mam" step="1" value="!!VAL_MAM!!"></div>
 
     <h2>Discharging Profile</h2>
-    <div class="row"><div class="text-group"><strong>Max Discharge Amps (A)</strong><span class="desc">Bulk discharge limit.</span></div>
+    <div class="row"><div class="text-group"><strong>Max Discharge Amps</strong><span class="desc">Bulk load limit.</span></div>
       <input type="number" name="da" step="10" value="!!VAL_DA!!"></div>
-    <div class="row"><div class="text-group"><strong>Start Taper Volts</strong><span class="desc">Voltage where discharging begins to slow.</span></div>
+    <div class="row"><div class="text-group"><strong>Start Taper Volts (D)</strong><span class="desc">Voltage where discharge slows.</span></div>
       <input type="number" name="dvt" step="0.1" value="!!VAL_DVT!!"></div>
-    <div class="row"><div class="text-group"><strong>Target Limp Volts</strong><span class="desc">Voltage where current reaches Limp floor.</span></div>
+    <div class="row"><div class="text-group"><strong>Target Limp Volts</strong><span class="desc">Voltage for Limp Mode.</span></div>
       <input type="number" name="lag" step="0.1" value="!!VAL_LAG!!"></div>
-    <div class="row"><div class="text-group"><strong>Limp Amps (A)</strong><span class="desc">Constant current to keep SMA alive.</span></div>
+    <div class="row"><div class="text-group"><strong>Limp Amps</strong><span class="desc">Minimum keeping-alive current.</span></div>
       <input type="number" name="ld" step="1" value="!!VAL_LIMP!!"></div>
-    <div class="row"><div class="text-group"><strong>Min Discharge Volts</strong><span class="desc">Absolute floor voltage (Hard Cutoff).</span></div>
+    <div class="row"><div class="text-group"><strong>Min Discharge Volts</strong><span class="desc">Absolute floor.</span></div>
       <input type="number" name="mdv" step="0.1" value="!!VAL_MDV!!"></div>
 
-    <h2>System Tuning</h2>
-    <div class="row"><div class="text-group"><strong>Voltage Samples</strong><span class="desc">Smoothing window (1-20).</span></div>
-      <input type="number" name="vs" step="1" value="!!VAL_VS!!"></div>
-
-    <button type="submit" class="save">SAVE & APPLY ALL CHANGES</button>
+    <button type="submit" class="save">SAVE & APPLY CHANGES</button>
   </form>
   <a href="/reset" class="reset" onclick="return confirm('Restore defaults?')">RESTORE FACTORY DEFAULTS</a>
 </div></body></html>)rawliteral";
-
-void sendToSma()
-{
-  struct can_frame f;
-  uint16_t ccl = calculateCCL(packVoltage, packSOC);
-  uint16_t dcl = calculateDCL(packVoltage, packSOC);
-  uint16_t cvl = (uint16_t)(cfg.vMaxCharge * 10);
-  f.can_id = 0x351;
-  f.can_dlc = 8;
-  f.data[0] = lowByte(cvl);
-  f.data[1] = highByte(cvl);
-  f.data[2] = lowByte(ccl);
-  f.data[3] = highByte(ccl);
-  f.data[4] = lowByte(dcl);
-  f.data[5] = highByte(dcl);
-  f.data[6] = maintenanceActive ? 0x60 : 0xC0;
-  f.data[7] = 0x00;
-  Can_SMA.sendMessage(&f);
-
-  f.can_id = 0x355;
-  f.can_dlc = 4;
-  uint16_t outSOC = maintenanceActive ? 7 : packSOC;
-  f.data[0] = lowByte(outSOC);
-  f.data[1] = highByte(outSOC);
-  f.data[2] = 100;
-  f.data[3] = 0;
-  Can_SMA.sendMessage(&f);
-
-  f.can_id = 0x356;
-  f.can_dlc = 6;
-  uint16_t v = (uint16_t)(packVoltage * 100);
-  int16_t i = (int16_t)(packCurrent * 10.0);
-  f.data[0] = lowByte(v);
-  f.data[1] = highByte(v);
-  f.data[2] = lowByte(i);
-  f.data[3] = highByte(i);
-  f.data[4] = 0;
-  f.data[5] = 0;
-  Can_SMA.sendMessage(&f);
-}
 
 void setup()
 {
@@ -303,38 +347,30 @@ void setup()
 
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
             { request->send(200, "text/html", index_html); });
+  server.on("/resetSMA", HTTP_GET, [](AsyncWebServerRequest *request)
+            { isResetting = true; resetHoldStartTime = millis(); netLog("[USER] Manual Cluster Reset.\n"); request->send(200, "text/plain", "OK"); });
 
   server.on("/config", HTTP_GET, [](AsyncWebServerRequest *request)
             {
-        String h = String(config_html);
-        h.replace("!!VAL_VT!!", String(cfg.vStartTaper, 1));
-        h.replace("!!VAL_DVT!!", String(cfg.vStartDTaper, 1));
-        h.replace("!!VAL_LIMP!!", String((int)cfg.limpDischargeA));
-        h.replace("!!VAL_LAG!!", String(cfg.vLowAlarmGate, 1));
-        h.replace("!!VAL_AG!!", String(cfg.vHighAlarmGate, 1));
-        h.replace("!!VAL_TA!!", String(cfg.trickleA, 1));
-        h.replace("!!VAL_CA!!", String(cfg.maxChargeA, 0));
-        h.replace("!!VAL_DA!!", String(cfg.maxDischargeA, 0));
-        h.replace("!!VAL_MV!!", String(cfg.vMaxCharge, 1));
-        h.replace("!!VAL_MDV!!", String(cfg.vMinDischarge, 1));
-        h.replace("!!VAL_VS!!", String(cfg.vSamples));
-        h.replace("!!VAL_MSV!!", String(cfg.vMaintStart, 1));
-        h.replace("!!VAL_MPP!!", String(cfg.vMaintStop, 1));
-        h.replace("!!VAL_MAM!!", String(cfg.maintAmps, 0));
-        request->send(200, "text/html", h); });
+    String h = String(config_html);
+    h.replace("!!VAL_CA!!", String(cfg.maxChargeA, 0)); h.replace("!!VAL_VT!!", String(cfg.vStartTaper, 1)); h.replace("!!VAL_AG!!", String(cfg.vHighAlarmGate, 1));
+    h.replace("!!VAL_TA!!", String(cfg.trickleA, 1)); h.replace("!!VAL_MV!!", String(cfg.vMaxCharge, 1)); h.replace("!!VAL_MSV!!", String(cfg.vMaintStart, 1));
+    h.replace("!!VAL_MPP!!", String(cfg.vMaintStop, 1)); h.replace("!!VAL_MAM!!", String(cfg.maintAmps, 0)); h.replace("!!VAL_DA!!", String(cfg.maxDischargeA, 0));
+    h.replace("!!VAL_DVT!!", String(cfg.vStartDTaper, 1)); h.replace("!!VAL_LAG!!", String(cfg.vLowAlarmGate, 1)); h.replace("!!VAL_LIMP!!", String(cfg.limpDischargeA, 0));
+    h.replace("!!VAL_MDV!!", String(cfg.vMinDischarge, 1));
+    request->send(200, "text/html", h); });
 
   server.on("/save", HTTP_GET, [](AsyncWebServerRequest *request)
             {
-        prefs.begin("bms-bridge", false);
-        auto checkF = [&](String p, float &v, String k) { if(request->hasParam(p)) { v = request->getParam(p)->value().toFloat(); prefs.putFloat(k.c_str(), v); } };
-        checkF("ca", cfg.maxChargeA, "ca"); checkF("vt", cfg.vStartTaper, "vt"); checkF("ag", cfg.vHighAlarmGate, "ag"); checkF("ta", cfg.trickleA, "ta"); checkF("mv", cfg.vMaxCharge, "mv");
-        checkF("da", cfg.maxDischargeA, "da"); checkF("dvt", cfg.vStartDTaper, "dvt"); checkF("lag", cfg.vLowAlarmGate, "lag"); checkF("ld", cfg.limpDischargeA, "ld_v2"); checkF("mdv", cfg.vMinDischarge, "mdv");
-        checkF("msv", cfg.vMaintStart, "msv"); checkF("mpp", cfg.vMaintStop, "mpp"); checkF("mam", cfg.maintAmps, "mam");
-        if(request->hasParam("vs")) { cfg.vSamples = request->getParam("vs")->value().toInt(); prefs.putInt("vs", cfg.vSamples); }
-        prefs.end(); netLog("[CONFIG] Settings Updated and Applied.\n"); request->redirect("/"); });
+    prefs.begin("bms-bridge", false);
+    auto cF = [&](String p, float &v, String k) { if(request->hasParam(p)) { v = request->getParam(p)->value().toFloat(); prefs.putFloat(k.c_str(), v); } };
+    cF("ca", cfg.maxChargeA, "ca"); cF("vt", cfg.vStartTaper, "vt"); cF("ag", cfg.vHighAlarmGate, "ag");
+    cF("ta", cfg.trickleA, "ta"); cF("mv", cfg.vMaxCharge, "mv"); cF("msv", cfg.vMaintStart, "msv");
+    cF("mpp", cfg.vMaintStop, "mpp"); cF("mam", cfg.maintAmps, "mam"); cF("da", cfg.maxDischargeA, "da");
+    cF("dvt", cfg.vStartDTaper, "dvt"); cF("lag", cfg.vLowAlarmGate, "lag"); cF("ld", cfg.limpDischargeA, "ld_v2");
+    cF("mdv", cfg.vMinDischarge, "mdv");
+    prefs.end(); netLog("[CONFIG] Updated.\n"); request->redirect("/"); });
 
-  server.on("/reset", HTTP_GET, [](AsyncWebServerRequest *request)
-            { prefs.begin("bms-bridge", false); prefs.clear(); prefs.end(); loadConfig(); request->redirect("/config"); });
   server.addHandler(&events);
   server.begin();
   twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT((gpio_num_t)CAN_TX, (gpio_num_t)CAN_RX, TWAI_MODE_NORMAL);
@@ -363,7 +399,6 @@ void loop()
     if (logClient)
       logClient.stop();
     logClient = logServer.available();
-    netLog("--- NEW LOGGER SESSION ---\n");
   }
   twai_status_info_t twai_stat;
   twai_get_status_info(&twai_stat);
@@ -380,33 +415,20 @@ void loop()
       packVoltage = getFilteredVoltage(v_raw / 100.0);
       int16_t i_raw = (int16_t)((b_msg.data[3] << 8) | b_msg.data[2]);
       packCurrent = i_raw / 10.0;
+      packTemp = (int16_t)((b_msg.data[5] << 8) | b_msg.data[4]);
     }
     if (b_msg.identifier == 0x355)
-      packSOC = (b_msg.data[1] << 8) | b_msg.data[0];
-
-    // Daly BMS Alarm Sniffer (IDs 0x359 and 0x35A)
-    // Checking Byte 0 and Byte 2 for High/Low Level 1 or 2 warnings (Mask 0x0C)
-    if (b_msg.identifier == 0x35A || b_msg.identifier == 0x359)
     {
-      if ((b_msg.data[0] & 0x0C) || (b_msg.data[2] & 0x0C))
-      {
-        static unsigned long lastAlarmLog = 0;
-        if (millis() - lastAlarmLog > 30000)
-        { // Log every 30s during active alarm
-          netLog("[BMS-ALARM] ID:%03X DATA: %02X %02X %02X %02X %02X %02X %02X %02X\n", b_msg.identifier, b_msg.data[0], b_msg.data[1], b_msg.data[2], b_msg.data[3], b_msg.data[4], b_msg.data[5], b_msg.data[6], b_msg.data[7]);
-          lastAlarmLog = millis();
-        }
-      }
+      packSOC = (b_msg.data[1] << 8) | b_msg.data[0];
+      packSOH = (b_msg.data[3] << 8) | b_msg.data[2];
     }
+    if (b_msg.identifier == 0x359)
+      bmsAlarmRaw = (b_msg.data[3] << 24) | (b_msg.data[2] << 16) | (b_msg.data[1] << 8) | b_msg.data[0];
   }
+
   struct can_frame in_frame;
   if (Can_SMA.readMessage(&in_frame) == MCP2515::ERROR_OK)
   {
-    twai_message_t back_msg;
-    back_msg.identifier = in_frame.can_id;
-    back_msg.data_length_code = in_frame.can_dlc;
-    memcpy(back_msg.data, in_frame.data, 8);
-    twai_transmit(&back_msg, 0);
     if (in_frame.can_id == 0x305)
     {
       uint8_t m = in_frame.data[0];
@@ -414,32 +436,47 @@ void loop()
                                       : (m == 3)   ? "Float"
                                                    : "Equalize";
     }
-    if (in_frame.can_id == 0x300)
-      gridPresent = (in_frame.data[0] & 0x01);
+    if (in_frame.can_id == 0x301)
+    {
+      uint16_t nE = (in_frame.data[1] << 8) | in_frame.data[0];
+      if (nE > 100 && nE != smaErrorCode)
+      {
+        smaErrorCode = nE;
+        netLog("[SMA-ALARM] Error %d detected!\n", smaErrorCode);
+        if (smaErrorCode == 9331 || smaErrorCode == 8609)
+        {
+          isResetting = true;
+          resetHoldStartTime = millis();
+        }
+      }
+      else if (nE == 0)
+      {
+        smaErrorCode = 0;
+      }
+    }
   }
+
+  if (isResetting && (millis() - resetHoldStartTime > 4500))
+  {
+    isResetting = false;
+    netLog("[SYS] Reset finished.\n");
+  }
+
   if (millis() - lastSmaTx > 250)
   {
     if (!maintenanceActive && packVoltage < cfg.vMaintStart)
-    {
       maintenanceActive = true;
-      netLog("[AUTO] Winter Maintenance ACTIVE (V < %.2f)\n", cfg.vMaintStart);
-    }
     else if (maintenanceActive && packVoltage > cfg.vMaintStop)
-    {
       maintenanceActive = false;
-      netLog("[AUTO] Winter Maintenance STOP (V > %.2f)\n", cfg.vMaintStop);
-    }
-
     sendToSma();
     lastSmaTx = millis();
     static unsigned long lastPush = 0;
     if (millis() - lastPush > 2000)
     {
       char json[256];
-      snprintf(json, sizeof(json), "{\"v\":%.2f,\"i\":%.1f,\"soc\":%d,\"smam\":\"%s\",\"maint\":%d}", packVoltage, packCurrent, (int)packSOC, smaChargeMode.c_str(), (int)maintenanceActive);
+      snprintf(json, sizeof(json), "{\"v\":%.2f,\"i\":%.1f,\"soc\":%d,\"smam\":\"%s\",\"maint\":%d,\"err\":%d,\"isR\":%d}", packVoltage, packCurrent, (int)packSOC, smaChargeMode.c_str(), (int)maintenanceActive, (int)smaErrorCode, (int)isResetting);
       events.send(json, "data", millis());
-      String modeStr = maintenanceActive ? "WINTER_MAINT" : "NORMAL";
-      netLog("[STATUS] Mode:%s V:%.2f I:%.1f SOC:%d%% CCL:%.1f DCL:%.1f SMA:%s\n", modeStr.c_str(), packVoltage, packCurrent, (int)packSOC, calculateCCL(packVoltage, packSOC) / 10.0, calculateDCL(packVoltage, packSOC) / 10.0, smaChargeMode.c_str());
+      netLog("[STATUS] Mode:%s V:%.2f I:%.1f SOC:%d%% CCL:%.1f DCL:%.1f\n", maintenanceActive ? "MAINT" : "RUN", packVoltage, packCurrent, (int)packSOC, calculateCCL(packVoltage, packSOC) / 10.0, calculateDCL(packVoltage, packSOC) / 10.0);
       lastPush = millis();
     }
   }

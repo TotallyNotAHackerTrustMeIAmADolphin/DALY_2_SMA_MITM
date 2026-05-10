@@ -1,21 +1,12 @@
-/*
- * @Description: None
- * @Author: LILYGO_L
- * @Date: 2023-06-05 13:01:59
- * @LastEditTime: 2025-06-06 13:57:49
- */
 #pragma once
 
-// CAN
-#define CAN_TX 7
-#define CAN_RX 6
+// --- T-CAN485 RS485 PINS ---
+#define RS485_RX      21
+#define RS485_TX      22
+#define RS485_SE      19  // Transceiver Shutdown Enable
+#define RS485_EN      17  // Transceiver Auto-Direction / Callback Enable
+#define PIN_5V_EN     16  // CRITICAL: 5V Booster Power Enable
 
-// MCP2515
-#define MCP2515_CS 10
-#define MCP2515_SCLK 12
-#define MCP2515_MOSI 11
-#define MCP2515_MISO 13
-#define MCP2515_RST 9
-
-// ESPBOOT
-#define ESP_BOOT 0
+// --- T-CAN485 CAN PINS (For Phase 2) ---
+#define CAN_TX        27
+#define CAN_RX        26

@@ -1,0 +1,165 @@
+#include "SMA_CAN.h"
+#include <cstdarg>
+#include <cstdio>
+
+// Initialize the new boolean to false
+SMA_CAN::SMA_CAN() : _debugCb(nullptr), _ticker35E(0), _lastSmaErrorCode(0), _wasBusOff(false) {}
+
+void SMA_CAN::setDebugCallback(SMADebugCallback cb)
+{
+    _debugCb = cb;
+}
+
+void SMA_CAN::debugLog(const char *format, ...)
+{
+    if (!_debugCb)
+        return;
+    char loc_res[256];
+    va_list arg;
+    va_start(arg, format);
+    vsnprintf(loc_res, sizeof(loc_res), format, arg);
+    va_end(arg);
+    _debugCb(loc_res);
+}
+
+bool SMA_CAN::begin(gpio_num_t txPin, gpio_num_t rxPin)
+{
+    twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(txPin, rxPin, TWAI_MODE_NORMAL);
+    twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS();
+    twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+
+    if (twai_driver_install(&g_config, &t_config, &f_config) == ESP_OK)
+    {
+        if (twai_start() == ESP_OK)
+        {
+            debugLog("[CAN] TWAI Driver started at 500kbps.\n");
+            return true;
+        }
+    }
+    debugLog("[CAN] Failed to initialize TWAI Driver.\n");
+    return false;
+}
+
+void SMA_CAN::checkBusHealth()
+{
+    twai_status_info_t twai_stat;
+    twai_get_status_info(&twai_stat);
+
+    if (twai_stat.state == TWAI_STATE_BUS_OFF)
+    {
+        // Only log this ONCE to prevent Wi-Fi choking
+        if (!_wasBusOff)
+        {
+            debugLog("[CAN] Bus-Off detected! (Is Inverter connected?) Initiating recovery...\n");
+            _wasBusOff = true;
+        }
+        twai_initiate_recovery();
+    }
+    else if (twai_stat.state == TWAI_STATE_RUNNING)
+    {
+        // When you finally plug the cable in, it will log recovery once
+        if (_wasBusOff)
+        {
+            debugLog("[CAN] Bus recovered and running normally.\n");
+            _wasBusOff = false;
+        }
+    }
+}
+
+void SMA_CAN::sendFrame(uint32_t id, uint8_t dlc, uint8_t *data)
+{
+    twai_message_t msg;
+    msg.identifier = id;
+    msg.extd = 0;
+    msg.rtr = 0;
+    msg.data_length_code = dlc;
+    for (int i = 0; i < dlc; i++)
+    {
+        msg.data[i] = data[i];
+    }
+
+    // CRITICAL FIX: Changed from pdMS_TO_TICKS(10) to 0.
+    // This makes the transmission strictly NON-BLOCKING. If the buffer is full,
+    // it simply drops the frame and moves on instantly, keeping the web server fast.
+    twai_transmit(&msg, 0);
+}
+
+void SMA_CAN::sendStatus(const SMATxData &data)
+{
+    uint8_t frame[8];
+
+    // Frame 0x351: Limits & Flags
+    frame[0] = data.cvl & 0xFF;
+    frame[1] = (data.cvl >> 8) & 0xFF;
+    frame[2] = data.ccl & 0xFF;
+    frame[3] = (data.ccl >> 8) & 0xFF;
+    frame[4] = data.dcl & 0xFF;
+    frame[5] = (data.dcl >> 8) & 0xFF;
+    frame[6] = data.isResetting ? 0x00 : (data.maintenanceActive ? 0x70 : 0xC0);
+    frame[7] = 0x00;
+    sendFrame(0x351, 8, frame);
+
+    // Frame 0x355: SOC & SOH
+    uint16_t outSOC = data.maintenanceActive ? 2 : data.packSOC;
+    frame[0] = outSOC & 0xFF;
+    frame[1] = (outSOC >> 8) & 0xFF;
+    frame[2] = 100;
+    frame[3] = 0;
+    sendFrame(0x355, 4, frame);
+
+    // Frame 0x356: Voltage, Current, Temp
+    uint16_t v_out = (uint16_t)(data.packVoltage * 100.0f);
+    int16_t i_out = (int16_t)(data.packCurrent * 10.0f);
+    frame[0] = v_out & 0xFF;
+    frame[1] = (v_out >> 8) & 0xFF;
+    frame[2] = i_out & 0xFF;
+    frame[3] = (i_out >> 8) & 0xFF;
+    frame[4] = data.packTemp & 0xFF;
+    frame[5] = (data.packTemp >> 8) & 0xFF;
+    sendFrame(0x356, 6, frame);
+
+    // Frame 0x359: Protection Alarms
+    memset(frame, 0, 8);
+    if (data.maintenanceActive)
+        frame[0] |= 0x10;
+    sendFrame(0x359, 8, frame);
+
+    // SMA Keepalive
+    if (++_ticker35E > 10)
+    {
+        _ticker35E = 0;
+        uint8_t smaId[8] = {'S', 0, 'M', 0, 'A', 0, 0, 0};
+        sendFrame(0x35E, 8, smaId);
+        uint8_t mfg[8] = {3, 0, 0, 0, 0x48, 0x03, 0, 0};
+        sendFrame(0x35F, 8, mfg);
+    }
+}
+
+void SMA_CAN::readMessages(DashboardData &dashboardOut)
+{
+    twai_message_t in_msg;
+    while (twai_receive(&in_msg, 0) == ESP_OK)
+    {
+        if (in_msg.identifier == 0x305 && in_msg.data_length_code > 0)
+        {
+            uint8_t m = in_msg.data[0];
+            dashboardOut.smaChargeMode = (m == 1) ? "Bulk" : (m == 2) ? "Absorption"
+                                                         : (m == 3)   ? "Float"
+                                                                      : "Equalize";
+        }
+        if (in_msg.identifier == 0x300 && in_msg.data_length_code > 0)
+        {
+            dashboardOut.gridPresent = (in_msg.data[0] & 0x01);
+        }
+        if (in_msg.identifier == 0x301 && in_msg.data_length_code >= 2)
+        {
+            uint16_t nE = (in_msg.data[1] << 8) | in_msg.data[0];
+            if (nE > 0 && nE < 60000 && nE != _lastSmaErrorCode)
+            {
+                _lastSmaErrorCode = nE;
+                debugLog("[SMA-ALARM] Error %d detected!\n", _lastSmaErrorCode);
+            }
+            dashboardOut.smaErrorCode = nE;
+        }
+    }
+}

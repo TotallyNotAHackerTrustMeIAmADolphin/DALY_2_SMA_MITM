@@ -24,7 +24,9 @@ class SMA_CAN
 public:
     SMA_CAN();
 
-    bool begin(gpio_num_t txPin, gpio_num_t rxPin);
+    // --> ADDED sePin HERE <--
+    bool begin(gpio_num_t txPin, gpio_num_t rxPin, gpio_num_t sePin);
+
     void setDebugCallback(SMADebugCallback cb);
     void checkBusHealth();
     void readMessages(DashboardData &dashboardOut);
@@ -34,7 +36,12 @@ private:
     SMADebugCallback _debugCb;
     uint8_t _ticker35E;
     uint16_t _lastSmaErrorCode;
-    bool _wasBusOff; // <-- ADDED: Tracks error state to prevent log flooding
+
+    bool _wasBusOff;
+    unsigned long _recoveryTimer;
+    gpio_num_t _txPin;
+    gpio_num_t _rxPin;
+    gpio_num_t _sePin; // Added
 
     void debugLog(const char *format, ...);
     void sendFrame(uint32_t id, uint8_t dlc, uint8_t *data);

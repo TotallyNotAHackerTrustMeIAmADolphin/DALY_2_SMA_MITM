@@ -7,6 +7,7 @@
 #define RS485_EN      17  // Transceiver Auto-Direction / Callback Enable
 #define PIN_5V_EN     16  // CRITICAL: 5V Booster Power Enable
 
-// --- T-CAN485 CAN PINS (For Phase 2) ---
+// --- T-CAN485 CAN PINS ---
 #define CAN_TX        27
 #define CAN_RX        26
+#define CAN_SE        23  // ADD THIS LINE!

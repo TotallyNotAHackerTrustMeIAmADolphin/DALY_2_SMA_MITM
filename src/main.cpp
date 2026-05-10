@@ -177,7 +177,8 @@ void setup()
   bms.begin(RS485_RX, RS485_TX, RS485_SE, RS485_EN, PIN_5V_EN);
 
   inverter.setDebugCallback(libraryLogger);
-  inverter.begin((gpio_num_t)CAN_TX, (gpio_num_t)CAN_RX);
+  // UPDATE THIS LINE:
+  inverter.begin((gpio_num_t)CAN_TX, (gpio_num_t)CAN_RX, (gpio_num_t)CAN_SE);
 
   // Initial safe defaults (Prevents the SMA 0.0V Death-Flash on boot)
   currentData.packVoltage = 52.5f;

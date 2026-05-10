@@ -65,7 +65,7 @@ void netLog(const char *format, ...)
   else
   {
     // Falls NTP noch nicht bereit ist, nur die Nachricht ausgeben
-    snprintf(final_res, sizeof(final_res), "%s", loc_res);
+    snprintf(final_res, sizeof(final_res), "[WAITING FOR NTP...] %s", loc_res);
   }
 
   // 3. Ausgabe an alle Kanäle

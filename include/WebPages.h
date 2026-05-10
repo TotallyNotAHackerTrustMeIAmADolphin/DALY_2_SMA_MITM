@@ -53,8 +53,22 @@ const char index_html[] PROGMEM = R"rawliteral(
     document.getElementById('cv').innerHTML = ((obj.maxC - obj.minC) * 1000).toFixed(0) + " mV";
     document.getElementById('i').innerHTML = obj.i.toFixed(1) + " A";
     document.getElementById('soc').innerHTML = obj.soc + "%";
-    document.getElementById('smastat').innerHTML = (obj.err > 0 && obj.err < 60000) ? "ERROR "+obj.err : "OK";
-    if(obj.err > 0 && obj.err < 60000) document.getElementById('smastat').className = "value err-active";
+    
+    // --- SMA STATE PARSER ---
+    let stateStr = "UNKNOWN";
+    if (obj.err === 1) stateStr = "INIT";
+    else if (obj.err === 2) stateStr = "STARTUP";
+    else if (obj.err === 3) stateStr = "STANDBY";
+    else if (obj.err === 4) stateStr = "RUNNING";
+    else if (obj.err === 5) stateStr = "EMERGENCY";
+    else if (obj.err === 6) stateStr = "FAULT";
+    else if (obj.err === 0) stateStr = "WAITING";
+    else stateStr = "CODE " + obj.err;
+
+    document.getElementById('smastat').innerHTML = stateStr;
+    
+    // Only highlight in red if it's an actual Emergency or Fault (5 or 6)
+    if(obj.err >= 5 && obj.err < 60000) document.getElementById('smastat').className = "value err-active";
     else document.getElementById('smastat').className = "value";
     
     const mb = document.getElementById('mbtn');

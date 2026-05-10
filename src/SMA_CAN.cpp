@@ -188,13 +188,28 @@ void SMA_CAN::readMessages(DashboardData &dashboardOut)
         }
         if (in_msg.identifier == 0x301 && in_msg.data_length_code >= 2)
         {
-            uint16_t nE = (in_msg.data[1] << 8) | in_msg.data[0];
-            if (nE > 0 && nE < 60000 && nE != _lastSmaErrorCode)
+            uint16_t state = (in_msg.data[1] << 8) | in_msg.data[0];
+            if (state > 0 && state < 60000 && state != _lastSmaErrorCode)
             {
-                _lastSmaErrorCode = nE;
-                debugLog("[SMA-ALARM] Error %d detected!\n", _lastSmaErrorCode);
+                _lastSmaErrorCode = state;
+
+                const char *stateStr = "Unknown";
+                if (state == 1)
+                    stateStr = "Init";
+                else if (state == 2)
+                    stateStr = "Startup";
+                else if (state == 3)
+                    stateStr = "Standby";
+                else if (state == 4)
+                    stateStr = "Running";
+                else if (state == 5)
+                    stateStr = "Emergency / Derating";
+                else if (state == 6)
+                    stateStr = "Fault";
+
+                debugLog("[SMA-STATUS] Inverter shifted to State %d: %s\n", state, stateStr);
             }
-            dashboardOut.smaErrorCode = nE;
+            dashboardOut.smaErrorCode = state; // We still pass the raw number to the UI
         }
     }
 }

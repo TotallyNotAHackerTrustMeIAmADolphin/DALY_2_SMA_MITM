@@ -108,10 +108,8 @@ void handleUIAction(const char *action)
 }
 
 // --- CORE 0: BMS BACKGROUND TASK ---
-// This runs independently and never blocks the CAN or Web Server
 void bmsTask(void *pvParameters)
 {
-  // Give the system 2 seconds to boot before starting serial polling
   vTaskDelay(pdMS_TO_TICKS(2000));
 
   while (true)
@@ -123,6 +121,10 @@ void bmsTask(void *pvParameters)
       currentData.packCurrent = info.packCurrent;
       currentData.packSOC = (int)info.packSOC;
     }
+
+    // CRITICAL FIX: Give the Daly BMS 100 milliseconds to finish
+    // processing the 0x90 command and return to its idle listening state!
+    vTaskDelay(pdMS_TO_TICKS(100));
 
     std::vector<float> cellVolts;
     if (bms.readCellVoltages(CELL_COUNT, cellVolts))
@@ -145,11 +147,9 @@ void bmsTask(void *pvParameters)
       currentData.maxCellVoltage = localMax;
       currentData.cellVoltages = cellVolts;
 
-      // Push telemetry to Web UI (Safe to call across cores here)
       webUI.broadcastTelemetry(currentData);
     }
 
-    // Sleep for 2 seconds before polling again
     vTaskDelay(pdMS_TO_TICKS(2000));
   }
 }

@@ -52,20 +52,20 @@ void libraryLogger(const char *msg) { netLog("%s", msg); }
 uint16_t calculateCCL(float maxCellV)
 {
   if (currentData.maintenanceActive)
-    return (uint16_t)(cfg.maintAmps * 10);
+    return (uint16_t)round(cfg.maintAmps * 10.0f);
 
   if (maxCellV >= cfg.cvMaxCharge)
-    return 0; // Hard wall for the highest cell
+    return 0;
   if (maxCellV >= cfg.cvHighAlarmGate)
-    return (uint16_t)(cfg.trickleA * 10);
+    return (uint16_t)round(cfg.trickleA * 10.0f);
 
   if (maxCellV > cfg.cvStartTaper)
   {
     float slope = (cfg.cvHighAlarmGate - maxCellV) / (cfg.cvHighAlarmGate - cfg.cvStartTaper);
     float target = cfg.trickleA + (slope * (cfg.maxChargeA - cfg.trickleA));
-    return (uint16_t)(max(target, cfg.trickleA) * 10);
+    return (uint16_t)round(max(target, cfg.trickleA) * 10.0f);
   }
-  return (uint16_t)(cfg.maxChargeA * 10);
+  return (uint16_t)round(cfg.maxChargeA * 10.0f);
 }
 
 uint16_t calculateDCL(float minCellV)
@@ -74,17 +74,17 @@ uint16_t calculateDCL(float minCellV)
     return 0;
 
   if (minCellV <= cfg.cvMinDischarge)
-    return 0; // Hard wall for the lowest cell
+    return 0;
   if (minCellV <= cfg.cvLowAlarmGate)
-    return (uint16_t)(cfg.limpDischargeA * 10);
+    return (uint16_t)round(cfg.limpDischargeA * 10.0f);
 
   if (minCellV < cfg.cvStartDTaper)
   {
     float slope = (minCellV - cfg.cvLowAlarmGate) / (cfg.cvStartDTaper - cfg.cvLowAlarmGate);
     float target = cfg.limpDischargeA + (slope * (cfg.maxDischargeA - cfg.limpDischargeA));
-    return (uint16_t)(max(target, cfg.limpDischargeA) * 10);
+    return (uint16_t)round(max(target, cfg.limpDischargeA) * 10.0f);
   }
-  return (uint16_t)(cfg.maxDischargeA * 10);
+  return (uint16_t)round(cfg.maxDischargeA * 10.0f);
 }
 
 // --- UI EVENT HANDLER ---
@@ -119,7 +119,7 @@ void bmsTask(void *pvParameters)
     {
       currentData.packVoltage = info.packVoltage;
       currentData.packCurrent = info.packCurrent;
-      currentData.packSOC = (int)info.packSOC;
+      currentData.packSOC = info.packSOC;
     }
 
     // CRITICAL FIX: Give the Daly BMS 100 milliseconds to finish
@@ -183,7 +183,7 @@ void setup()
   // Initial safe defaults (Prevents the SMA 0.0V Death-Flash on boot)
   currentData.packVoltage = 52.5f;
   currentData.packCurrent = 0.0f;
-  currentData.packSOC = 50;
+  currentData.packSOC = 50.0f;
   currentData.packTemp = 220;
   currentData.minCellVoltage = 3.3f;
   currentData.maxCellVoltage = 3.3f;

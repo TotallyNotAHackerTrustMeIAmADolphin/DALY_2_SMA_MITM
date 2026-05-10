@@ -131,15 +131,15 @@ void SMA_CAN::sendStatus(const SMATxData &data)
     frame[7] = 0x00;
     sendFrame(0x351, 8, frame);
 
-    uint16_t outSOC = data.maintenanceActive ? 2 : data.packSOC;
+    uint16_t outSOC = data.maintenanceActive ? 2 : (uint16_t)round(data.packSOC);
     frame[0] = outSOC & 0xFF;
     frame[1] = (outSOC >> 8) & 0xFF;
     frame[2] = 100;
     frame[3] = 0;
     sendFrame(0x355, 4, frame);
 
-    uint16_t v_out = (uint16_t)(data.packVoltage * 100.0f);
-    int16_t i_out = (int16_t)(data.packCurrent * 10.0f);
+    uint16_t v_out = (uint16_t)round(data.packVoltage * 100.0f);
+    int16_t i_out = (int16_t)round(data.packCurrent * 10.0f);
     frame[0] = v_out & 0xFF;
     frame[1] = (v_out >> 8) & 0xFF;
     frame[2] = i_out & 0xFF;

@@ -52,7 +52,7 @@ const char index_html[] PROGMEM = R"rawliteral(
     document.getElementById('v').innerHTML = obj.v.toFixed(2) + " V";
     document.getElementById('cv').innerHTML = ((obj.maxC - obj.minC) * 1000).toFixed(0) + " mV";
     document.getElementById('i').innerHTML = obj.i.toFixed(1) + " A";
-    document.getElementById('soc').innerHTML = obj.soc + "%";
+    document.getElementById('soc').innerHTML = obj.soc.toFixed(1) + "%";
     
     // --- SMA STATE PARSER ---
     let stateStr = "UNKNOWN";

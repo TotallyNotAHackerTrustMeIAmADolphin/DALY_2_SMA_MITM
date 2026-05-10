@@ -10,7 +10,7 @@ struct SMATxData
     float packVoltage;
     float packCurrent;
     int16_t packTemp;
-    int packSOC;
+    float packSOC;
     uint16_t ccl;
     uint16_t dcl;
     uint16_t cvl;

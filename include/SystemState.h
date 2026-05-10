@@ -31,7 +31,7 @@ struct DashboardData {
     
     float packCurrent;
     int16_t packTemp;
-    int packSOC;
+    float packSOC;
     String smaChargeMode;
     int smaErrorCode;
     bool forceCharge;

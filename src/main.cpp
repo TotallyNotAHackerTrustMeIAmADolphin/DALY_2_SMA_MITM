@@ -17,6 +17,8 @@
 IPAddress local_IP(192, 168, 178, 56);
 IPAddress gateway(192, 168, 178, 1);
 IPAddress subnet(255, 255, 255, 0);
+IPAddress primaryDNS(8, 8, 8, 8);   // Google DNS
+IPAddress secondaryDNS(1, 1, 1, 1); // Cloudflare DNS
 
 #define CELL_COUNT 16.0f
 
@@ -184,7 +186,11 @@ void bmsTask(void *pvParameters)
 
 void setupNetwork()
 {
-  WiFi.config(local_IP, gateway, subnet);
+  // Hier werden die DNS-Server jetzt mit übergeben:
+  if (!WiFi.config(local_IP, gateway, subnet, primaryDNS, secondaryDNS))
+  {
+    Serial.println("STA Failed to configure");
+  }
   WiFi.begin(ssid, password);
 
   Serial.print("Connecting to WiFi");

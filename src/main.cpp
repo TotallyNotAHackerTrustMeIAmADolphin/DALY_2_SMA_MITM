@@ -2,6 +2,7 @@
 #include <WiFi.h>
 #include <ArduinoOTA.h>
 #include <TelnetStream.h>
+#include <time.h> // <-- ADD THIS
 
 #include "pin_config.h"
 #include "SystemState.h"
@@ -10,7 +11,12 @@
 #include "WebDashboard.h"
 
 // Bring in your Wi-Fi credentials securely
-#include "secrets.h" 
+#include "secrets.h"
+
+// --- CONFIG & NETWORK ---
+IPAddress local_IP(192, 168, 178, 56);
+IPAddress gateway(192, 168, 178, 1);
+IPAddress subnet(255, 255, 255, 0);
 
 #define CELL_COUNT 16.0f
 
@@ -30,16 +36,42 @@ bool isResetting = false;
 bool autoMaint = false;
 
 // --- CENTRAL LOGGING ---
+// --- CENTRAL LOGGING ---
 void netLog(const char *format, ...)
 {
+  // 1. Nachricht formatieren
   char loc_res[256];
   va_list arg;
   va_start(arg, format);
   vsnprintf(loc_res, sizeof(loc_res), format, arg);
   va_end(arg);
-  Serial.print(loc_res);
-  TelnetStream.print(loc_res);
-  webUI.broadcastLog(loc_res);
+
+  // 2. Zeit abrufen
+  time_t now;
+  struct tm timeinfo;
+  time(&now);
+  localtime_r(&now, &timeinfo);
+
+  char final_res[350];
+
+  // Prüfen, ob die Zeit bereits per NTP synchronisiert wurde (Jahr > 1970)
+  if (timeinfo.tm_year > 70)
+  {
+    char timeStr[64];
+    // Deutsches Format: TT.MM.JJJJ HH:MM:SS
+    strftime(timeStr, sizeof(timeStr), "[%d.%m.%Y %H:%M:%S] ", &timeinfo);
+    snprintf(final_res, sizeof(final_res), "%s%s", timeStr, loc_res);
+  }
+  else
+  {
+    // Falls NTP noch nicht bereit ist, nur die Nachricht ausgeben
+    snprintf(final_res, sizeof(final_res), "%s", loc_res);
+  }
+
+  // 3. Ausgabe an alle Kanäle
+  Serial.print(final_res);
+  TelnetStream.print(final_res);
+  webUI.broadcastLog(final_res);
 }
 
 void libraryLogger(const char *msg) { netLog("%s", msg); }
@@ -150,15 +182,38 @@ void bmsTask(void *pvParameters)
   }
 }
 
+void setupNetwork()
+{
+  WiFi.config(local_IP, gateway, subnet);
+  WiFi.begin(ssid, password);
+
+  Serial.print("Connecting to WiFi");
+  unsigned long startAttempt = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 10000)
+  {
+    delay(500);
+    Serial.print(".");
+  }
+
+  if (WiFi.status() == WL_CONNECTED)
+  {
+    Serial.println("\nWiFi Connected!");
+    // Zeitzone für Deutschland (Berlin) und NTP Server setzen
+    // CET-1CEST: Central European Time, 1 Std Versatz, Sommerzeitregel M3.5.0 bis M10.5.0
+    configTzTime("CET-1CEST,M3.5.0,M10.5.0/3", "pool.ntp.org", "ptbtime1.ptb.de");
+  }
+  else
+  {
+    Serial.println("\nWiFi Connection Failed. Continuing in Offline Mode...");
+  }
+}
+
 void setup()
 {
   Serial.begin(115200);
   Serial.println("\nStarting LilyGO T-CAN485 BMS Bridge...");
 
-  WiFi.config(local_IP, gateway, subnet);
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED && millis() < 10000)
-    delay(100);
+  setupNetwork();
 
   ArduinoOTA.setPort(3232);
   ArduinoOTA.setHostname("BMS-Bridge");

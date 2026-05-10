@@ -4,3 +4,5 @@
 .vscode/launch.json
 .vscode/ipch
 logging/bms_bridge.log
+# Ignore secure credentials
+include/secrets.h

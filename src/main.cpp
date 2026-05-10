@@ -9,12 +9,8 @@
 #include "SMA_CAN.h"
 #include "WebDashboard.h"
 
-// --- CONFIG & NETWORK ---
-const char *ssid = "wlesswg";
-const char *password = "hba.1245";
-IPAddress local_IP(192, 168, 178, 56);
-IPAddress gateway(192, 168, 178, 1);
-IPAddress subnet(255, 255, 255, 0);
+// Bring in your Wi-Fi credentials securely
+#include "secrets.h" 
 
 #define CELL_COUNT 16.0f
 

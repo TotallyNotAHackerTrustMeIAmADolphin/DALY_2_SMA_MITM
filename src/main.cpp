@@ -107,89 +107,15 @@ void handleUIAction(const char *action)
   }
 }
 
-void setup()
+// --- CORE 0: BMS BACKGROUND TASK ---
+// This runs independently and never blocks the CAN or Web Server
+void bmsTask(void *pvParameters)
 {
-  Serial.begin(115200);
-  Serial.println("\nStarting LilyGO T-CAN485 BMS Bridge...");
+  // Give the system 2 seconds to boot before starting serial polling
+  vTaskDelay(pdMS_TO_TICKS(2000));
 
-  WiFi.config(local_IP, gateway, subnet);
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED && millis() < 10000)
-    delay(100);
-
-  ArduinoOTA.setPort(3232);
-  ArduinoOTA.setHostname("BMS-Bridge");
-  ArduinoOTA.begin();
-
-  TelnetStream.begin();
-
-  webUI.setActionCallback(handleUIAction);
-  webUI.begin(cfg);
-
-  bms.setDebugCallback(libraryLogger);
-  bms.begin(RS485_RX, RS485_TX, RS485_SE, RS485_EN, PIN_5V_EN);
-
-  inverter.setDebugCallback(libraryLogger);
-  inverter.begin((gpio_num_t)CAN_TX, (gpio_num_t)CAN_RX);
-
-  // Initial default states
-  currentData.smaChargeMode = "Unknown";
-  currentData.smaErrorCode = 0;
-  currentData.packTemp = 220; // Default 22.0 C
-  currentData.minCellVoltage = 3.3f;
-  currentData.maxCellVoltage = 3.3f;
-}
-
-void loop()
-{
-  ArduinoOTA.handle();
-  inverter.checkBusHealth();
-  inverter.readMessages(currentData);
-
-  // Handle Reset Timer
-  if (isResetting && (millis() - resetHoldStartTime > 5500))
+  while (true)
   {
-    isResetting = false;
-    netLog("[SYS] Recovery cycle finished.\n");
-  }
-
-  // SMA CAN Transmission (Every 250ms)
-  if (millis() - lastSmaTx > 250)
-  {
-    lastSmaTx = millis();
-
-    // Evaluate Winter Maintenance Trigger (Still uses Pack Voltage to avoid false triggering on a single dipping cell under load)
-    if (!autoMaint && currentData.packVoltage > 0 && currentData.packVoltage < (cfg.cvMaintStart * CELL_COUNT))
-      autoMaint = true;
-    else if (autoMaint && currentData.packVoltage > (cfg.cvMaintStop * CELL_COUNT))
-      autoMaint = false;
-
-    currentData.maintenanceActive = manualMaintForce || autoMaint;
-    currentData.forceCharge = currentData.maintenanceActive;
-    currentData.isResetting = isResetting;
-
-    SMATxData tx;
-    tx.packVoltage = currentData.packVoltage;
-    tx.packCurrent = currentData.packCurrent;
-    tx.packTemp = currentData.packTemp;
-    tx.packSOC = currentData.packSOC;
-    tx.maintenanceActive = currentData.maintenanceActive;
-    tx.isResetting = currentData.isResetting;
-
-    // Feed the Min/Max cell outliers into the glideslope limits
-    tx.ccl = calculateCCL(currentData.maxCellVoltage);
-    tx.dcl = calculateDCL(currentData.minCellVoltage);
-    tx.cvl = currentData.maintenanceActive ? 560 : (uint16_t)(cfg.cvMaxCharge * CELL_COUNT * 10);
-    tx.dvl = (uint16_t)(cfg.cvMinDischarge * CELL_COUNT * 10);
-
-    inverter.sendStatus(tx);
-  }
-
-  // RS485 Daly Polling (Every 2 seconds)
-  if (millis() - lastBmsPoll > 2000)
-  {
-    lastBmsPoll = millis();
-
     DalyBasicInfo info;
     if (bms.readBasicInfo(info))
     {
@@ -217,10 +143,104 @@ void loop()
       currentData.avgCellVoltage = sum / CELL_COUNT;
       currentData.minCellVoltage = localMin;
       currentData.maxCellVoltage = localMax;
-      currentData.cellVoltages = cellVolts; // Save to struct for Dashboard
+      currentData.cellVoltages = cellVolts;
 
-      // Push combined telemetry to the Web UI
+      // Push telemetry to Web UI (Safe to call across cores here)
       webUI.broadcastTelemetry(currentData);
     }
+
+    // Sleep for 2 seconds before polling again
+    vTaskDelay(pdMS_TO_TICKS(2000));
+  }
+}
+
+void setup()
+{
+  Serial.begin(115200);
+  Serial.println("\nStarting LilyGO T-CAN485 BMS Bridge...");
+
+  WiFi.config(local_IP, gateway, subnet);
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED && millis() < 10000)
+    delay(100);
+
+  ArduinoOTA.setPort(3232);
+  ArduinoOTA.setHostname("BMS-Bridge");
+  ArduinoOTA.begin();
+
+  TelnetStream.begin();
+
+  webUI.setActionCallback(handleUIAction);
+  webUI.begin(cfg);
+
+  bms.setDebugCallback(libraryLogger);
+  bms.begin(RS485_RX, RS485_TX, RS485_SE, RS485_EN, PIN_5V_EN);
+
+  inverter.setDebugCallback(libraryLogger);
+  inverter.begin((gpio_num_t)CAN_TX, (gpio_num_t)CAN_RX);
+
+  // Initial safe defaults (Prevents the SMA 0.0V Death-Flash on boot)
+  currentData.packVoltage = 52.5f;
+  currentData.packCurrent = 0.0f;
+  currentData.packSOC = 50;
+  currentData.packTemp = 220;
+  currentData.minCellVoltage = 3.3f;
+  currentData.maxCellVoltage = 3.3f;
+  currentData.smaChargeMode = "Unknown";
+  currentData.smaErrorCode = 0;
+
+  // Launch the BMS Polling Task onto Core 0
+  xTaskCreatePinnedToCore(bmsTask, "BMS_Task", 4096, NULL, 1, NULL, 0);
+
+  netLog("[SYS] Boot sequence complete. Multithreading Active.\n");
+}
+
+// --- CORE 1: MAIN LOOP (Lightning Fast!) ---
+void loop()
+{
+  ArduinoOTA.handle();
+
+  static unsigned long lastCanCheck = 0;
+  if (millis() - lastCanCheck > 50)
+  {
+    lastCanCheck = millis();
+    inverter.checkBusHealth();
+    inverter.readMessages(currentData);
+  }
+
+  if (isResetting && (millis() - resetHoldStartTime > 5500))
+  {
+    isResetting = false;
+    netLog("[SYS] Recovery cycle finished.\n");
+  }
+
+  // SMA CAN Transmission (Precision 250ms Heartbeat)
+  if (millis() - lastSmaTx > 250)
+  {
+    lastSmaTx = millis();
+
+    if (!autoMaint && currentData.packVoltage > 0 && currentData.packVoltage < (cfg.cvMaintStart * CELL_COUNT))
+      autoMaint = true;
+    else if (autoMaint && currentData.packVoltage > (cfg.cvMaintStop * CELL_COUNT))
+      autoMaint = false;
+
+    currentData.maintenanceActive = manualMaintForce || autoMaint;
+    currentData.forceCharge = currentData.maintenanceActive;
+    currentData.isResetting = isResetting;
+
+    SMATxData tx;
+    tx.packVoltage = currentData.packVoltage;
+    tx.packCurrent = currentData.packCurrent;
+    tx.packTemp = currentData.packTemp;
+    tx.packSOC = currentData.packSOC;
+    tx.maintenanceActive = currentData.maintenanceActive;
+    tx.isResetting = currentData.isResetting;
+
+    tx.ccl = calculateCCL(currentData.maxCellVoltage);
+    tx.dcl = calculateDCL(currentData.minCellVoltage);
+    tx.cvl = currentData.maintenanceActive ? 560 : (uint16_t)(cfg.cvMaxCharge * CELL_COUNT * 10);
+    tx.dvl = (uint16_t)(cfg.cvMinDischarge * CELL_COUNT * 10);
+
+    inverter.sendStatus(tx);
   }
 }

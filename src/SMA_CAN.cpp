@@ -25,6 +25,12 @@ void SMA_CAN::debugLog(const char *format, ...)
 bool SMA_CAN::begin(gpio_num_t txPin, gpio_num_t rxPin)
 {
     twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(txPin, rxPin, TWAI_MODE_NORMAL);
+
+    // CRITICAL FIX: The default queue is 5. We send 6 frames at once.
+    // We MUST increase this or the SMA Keepalive frames get dropped!
+    g_config.tx_queue_len = 10;
+    g_config.rx_queue_len = 10;
+
     twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS();
     twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
 
@@ -47,20 +53,28 @@ void SMA_CAN::checkBusHealth()
 
     if (twai_stat.state == TWAI_STATE_BUS_OFF)
     {
-        // Only log this ONCE to prevent Wi-Fi choking
         if (!_wasBusOff)
         {
-            debugLog("[CAN] Bus-Off detected! (Is Inverter connected?) Initiating recovery...\n");
+            debugLog("[CAN] Bus-Off detected! Initiating recovery...\n");
+            twai_initiate_recovery();
             _wasBusOff = true;
         }
-        twai_initiate_recovery();
+    }
+    else if (twai_stat.state == TWAI_STATE_STOPPED)
+    {
+        // ESP-IDF rule: After recovery finishes, the chip halts in STOPPED state.
+        // We MUST manually start it back up!
+        if (_wasBusOff)
+        {
+            debugLog("[CAN] Hardware recovery complete. Restarting bus...\n");
+            twai_start();
+        }
     }
     else if (twai_stat.state == TWAI_STATE_RUNNING)
     {
-        // When you finally plug the cable in, it will log recovery once
         if (_wasBusOff)
         {
-            debugLog("[CAN] Bus recovered and running normally.\n");
+            debugLog("[CAN] Bus fully recovered and running normally.\n");
             _wasBusOff = false;
         }
     }
@@ -77,11 +91,8 @@ void SMA_CAN::sendFrame(uint32_t id, uint8_t dlc, uint8_t *data)
     {
         msg.data[i] = data[i];
     }
-
-    // CRITICAL FIX: Changed from pdMS_TO_TICKS(10) to 0.
-    // This makes the transmission strictly NON-BLOCKING. If the buffer is full,
-    // it simply drops the frame and moves on instantly, keeping the web server fast.
-    twai_transmit(&msg, 0);
+    // Give FreeRTOS exactly 1 tick to queue the message instead of purely dropping it
+    twai_transmit(&msg, pdMS_TO_TICKS(1));
 }
 
 void SMA_CAN::sendStatus(const SMATxData &data)
@@ -138,8 +149,13 @@ void SMA_CAN::sendStatus(const SMATxData &data)
 void SMA_CAN::readMessages(DashboardData &dashboardOut)
 {
     twai_message_t in_msg;
-    while (twai_receive(&in_msg, 0) == ESP_OK)
+    int msgCount = 0;
+
+    // Safety cap: Process max 10 messages per tick to prevent CPU lockup
+    while (twai_receive(&in_msg, 0) == ESP_OK && msgCount < 10)
     {
+        msgCount++;
+
         if (in_msg.identifier == 0x305 && in_msg.data_length_code > 0)
         {
             uint8_t m = in_msg.data[0];

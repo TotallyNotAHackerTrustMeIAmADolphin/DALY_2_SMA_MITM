@@ -105,7 +105,12 @@ bool DalyRS485::receiveSingleFrame(uint8_t expectedCmd, uint8_t *dataOut, unsign
                 }
             }
         }
-        yield();
+        else
+        {
+            // CRITICAL FIX: If no serial data is ready, sleep for 1ms.
+            // This drops CPU usage from 100% to 1%, allowing the Web Server to fly!
+            vTaskDelay(1);
+        }
     }
     return false;
 }
@@ -192,7 +197,11 @@ bool DalyRS485::readCellVoltages(uint8_t expectedCells, std::vector<float> &cell
                     idx = 0;
                 }
             }
-            yield();
+            else
+            {
+                // Sleep and let the Web Server process requests
+                vTaskDelay(1);
+            }
         }
 
         if (framesReceivedCount == expectedFrames)

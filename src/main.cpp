@@ -255,7 +255,6 @@ void setup()
   currentData.minCellVoltage = 3.3f;
   currentData.maxCellVoltage = 3.3f;
   currentData.smaChargeMode = "Unknown";
-  currentData.smaErrorCode = 0;
 
   xTaskCreatePinnedToCore(bmsTask, "BMS_Task", 4096, NULL, 1, NULL, 0);
 

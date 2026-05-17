@@ -54,22 +54,9 @@ const char index_html[] PROGMEM = R"rawliteral(
     document.getElementById('i').innerHTML = obj.i.toFixed(1) + " A";
     document.getElementById('soc').innerHTML = obj.soc.toFixed(1) + "%";
     
-    // --- SMA STATE PARSER ---
-    let stateStr = "UNKNOWN";
-    if (obj.err === 1) stateStr = "INIT";
-    else if (obj.err === 2) stateStr = "STARTUP";
-    else if (obj.err === 3) stateStr = "STANDBY";
-    else if (obj.err === 4) stateStr = "RUNNING";
-    else if (obj.err === 5) stateStr = "EMERGENCY";
-    else if (obj.err === 6) stateStr = "FAULT";
-    else if (obj.err === 0) stateStr = "WAITING";
-    else stateStr = "CODE " + obj.err;
-
-    document.getElementById('smastat').innerHTML = stateStr;
-    
-    // Only highlight in red if it's an actual Emergency or Fault (5 or 6)
-    if(obj.err >= 5 && obj.err < 60000) document.getElementById('smastat').className = "value err-active";
-    else document.getElementById('smastat').className = "value";
+    // --- SMA MODE DISPLAY ---
+    document.getElementById('smastat').innerHTML = obj.smam.toUpperCase();
+    document.getElementById('smastat').className = "value";
     
     const mb = document.getElementById('mbtn');
     if(obj.force) { mb.innerHTML = "STOP FORCE CHARGE"; mb.style.background = "#ff9800"; }

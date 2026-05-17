@@ -42,11 +42,11 @@ void WebDashboard::broadcastTelemetry(const DashboardData &data)
 
     char json[1024];
     snprintf(json, sizeof(json),
-             "{\"v\":%.2f,\"cv\":%.3f,\"minC\":%.3f,\"maxC\":%.3f,\"i\":%.1f,\"soc\":%.1f,\"smam\":\"%s\",\"maint\":%d,\"force\":%d,\"err\":%d,\"isR\":%d,\"cells\":%s}",
+             "{\"v\":%.2f,\"cv\":%.3f,\"minC\":%.3f,\"maxC\":%.3f,\"i\":%.1f,\"soc\":%.1f,\"smam\":\"%s\",\"maint\":%d,\"force\":%d,\"isR\":%d,\"cells\":%s}",
              data.packVoltage, data.avgCellVoltage, data.minCellVoltage, data.maxCellVoltage,
              data.packCurrent, data.packSOC, // <-- This will now neatly insert 99.2 instead of 99
              data.smaChargeMode.c_str(), (int)data.maintenanceActive, (int)data.forceCharge,
-             data.smaErrorCode, (int)data.isResetting, cellsStr);
+             (int)data.isResetting, cellsStr);
 
     _events.send(json, "data", millis());
 }

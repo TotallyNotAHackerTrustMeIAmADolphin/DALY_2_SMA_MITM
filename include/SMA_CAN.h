@@ -35,7 +35,6 @@ public:
 private:
     SMADebugCallback _debugCb;
     uint8_t _ticker35E;
-    uint16_t _lastSmaErrorCode;
 
     bool _wasBusOff;
     unsigned long _recoveryTimer;

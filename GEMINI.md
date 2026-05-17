@@ -36,6 +36,10 @@ This project uses **PlatformIO**.
 - Hardware pin mappings are strictly defined in `include/pin_config.h`.
 - The LilyGO board requires the `5V_EN` pin to be high to power the RS485/CAN transceivers.
 
+### CLI Operational Guidelines
+- **Self-Terminating Commands:** Always prefer commands that terminate autonomously. Use count flags (e.g., `ping -c 3`) or the `timeout` utility to prevent background processes from hanging indefinitely.
+- **Unified Logging:** Use the `netLog` function for all application-level logging to ensure output is broadcast across Serial, Telnet, and the Web UI.
+
 ### State Management
 - Shared data structures are defined in `include/SystemState.h`:
   - `SystemConfig`: Configuration values (voltages, current limits) saved in NVS.

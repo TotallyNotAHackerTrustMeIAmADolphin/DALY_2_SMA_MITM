@@ -2,7 +2,7 @@
 #include <WiFi.h>
 #include <ArduinoOTA.h>
 #include <TelnetStream.h>
-#include <time.h> // <-- ADD THIS
+#include <time.h>
 
 #include "pin_config.h"
 #include "SystemState.h"
@@ -29,6 +29,7 @@ WebDashboard webUI(80);
 
 SystemConfig cfg;
 DashboardData currentData;
+SemaphoreHandle_t dataMutex;
 
 unsigned long lastBmsPoll = 0;
 unsigned long lastSmaTx = 0;
@@ -38,47 +39,41 @@ bool isResetting = false;
 bool autoMaint = false;
 
 // --- CENTRAL LOGGING ---
-// --- CENTRAL LOGGING ---
 void netLog(const char *format, ...)
 {
-  // 1. Nachricht formatieren
   char loc_res[256];
   va_list arg;
   va_start(arg, format);
   vsnprintf(loc_res, sizeof(loc_res), format, arg);
   va_end(arg);
 
-  // 2. Zeit abrufen
   time_t now;
   struct tm timeinfo;
   time(&now);
   localtime_r(&now, &timeinfo);
 
   char final_res[350];
-
-  // Prüfen, ob die Zeit bereits per NTP synchronisiert wurde (Jahr > 1970)
   if (timeinfo.tm_year > 70)
   {
     char timeStr[64];
-    // Deutsches Format: TT.MM.JJJJ HH:MM:SS
     strftime(timeStr, sizeof(timeStr), "[%d.%m.%Y %H:%M:%S] ", &timeinfo);
     snprintf(final_res, sizeof(final_res), "%s%s", timeStr, loc_res);
   }
   else
   {
-    // Falls NTP noch nicht bereit ist, nur die Nachricht ausgeben
     snprintf(final_res, sizeof(final_res), "[WAITING FOR NTP...] %s", loc_res);
   }
 
-  // 3. Ausgabe an alle Kanäle
   Serial.print(final_res);
-  TelnetStream.print(final_res);
+  if (TelnetStream.availableForWrite() > 0) {
+    TelnetStream.print(final_res);
+  }
   webUI.broadcastLog(final_res);
 }
 
 void libraryLogger(const char *msg) { netLog("%s", msg); }
 
-// --- GLIDESLOPE LOGIC (Upgraded to Min/Max Cell math!) ---
+// --- GLIDESLOPE LOGIC ---
 uint16_t calculateCCL(float maxCellV)
 {
   if (currentData.maintenanceActive)
@@ -91,7 +86,10 @@ uint16_t calculateCCL(float maxCellV)
 
   if (maxCellV > cfg.cvStartTaper)
   {
-    float slope = (cfg.cvHighAlarmGate - maxCellV) / (cfg.cvHighAlarmGate - cfg.cvStartTaper);
+    float div = cfg.cvHighAlarmGate - cfg.cvStartTaper;
+    if (div <= 0.001f) return (uint16_t)round(cfg.trickleA * 10.0f);
+    
+    float slope = (cfg.cvHighAlarmGate - maxCellV) / div;
     float target = cfg.trickleA + (slope * (cfg.maxChargeA - cfg.trickleA));
     return (uint16_t)round(max(target, cfg.trickleA) * 10.0f);
   }
@@ -110,7 +108,10 @@ uint16_t calculateDCL(float minCellV)
 
   if (minCellV < cfg.cvStartDTaper)
   {
-    float slope = (minCellV - cfg.cvLowAlarmGate) / (cfg.cvStartDTaper - cfg.cvLowAlarmGate);
+    float div = cfg.cvStartDTaper - cfg.cvLowAlarmGate;
+    if (div <= 0.001f) return (uint16_t)round(cfg.limpDischargeA * 10.0f);
+
+    float slope = (minCellV - cfg.cvLowAlarmGate) / div;
     float target = cfg.limpDischargeA + (slope * (cfg.maxDischargeA - cfg.limpDischargeA));
     return (uint16_t)round(max(target, cfg.limpDischargeA) * 10.0f);
   }
@@ -147,13 +148,14 @@ void bmsTask(void *pvParameters)
     DalyBasicInfo info;
     if (bms.readBasicInfo(info))
     {
-      currentData.packVoltage = info.packVoltage;
-      currentData.packCurrent = info.packCurrent;
-      currentData.packSOC = info.packSOC;
+      if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        currentData.packVoltage = info.packVoltage;
+        currentData.packCurrent = info.packCurrent;
+        currentData.packSOC = info.packSOC;
+        xSemaphoreGive(dataMutex);
+      }
     }
 
-    // CRITICAL FIX: Give the Daly BMS 100 milliseconds to finish
-    // processing the 0x90 command and return to its idle listening state!
     vTaskDelay(pdMS_TO_TICKS(100));
 
     std::vector<float> cellVolts;
@@ -166,18 +168,20 @@ void bmsTask(void *pvParameters)
       for (float v : cellVolts)
       {
         sum += v;
-        if (v < localMin)
-          localMin = v;
-        if (v > localMax)
-          localMax = v;
+        if (v < localMin) localMin = v;
+        if (v > localMax) localMax = v;
       }
 
-      currentData.avgCellVoltage = sum / CELL_COUNT;
-      currentData.minCellVoltage = localMin;
-      currentData.maxCellVoltage = localMax;
-      currentData.cellVoltages = cellVolts;
-
-      webUI.broadcastTelemetry(currentData);
+      if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        currentData.avgCellVoltage = sum / CELL_COUNT;
+        currentData.minCellVoltage = localMin;
+        currentData.maxCellVoltage = localMax;
+        currentData.cellVoltages = cellVolts;
+        
+        // Broadcast while holding mutex to ensure vector stability
+        webUI.broadcastTelemetry(currentData);
+        xSemaphoreGive(dataMutex);
+      }
     }
 
     vTaskDelay(pdMS_TO_TICKS(2000));
@@ -186,7 +190,6 @@ void bmsTask(void *pvParameters)
 
 void setupNetwork()
 {
-  // Hier werden die DNS-Server jetzt mit übergeben:
   if (!WiFi.config(local_IP, gateway, subnet, primaryDNS, secondaryDNS))
   {
     Serial.println("STA Failed to configure");
@@ -204,9 +207,16 @@ void setupNetwork()
   if (WiFi.status() == WL_CONNECTED)
   {
     Serial.println("\nWiFi Connected!");
-    // Zeitzone für Deutschland (Berlin) und NTP Server setzen
-    // CET-1CEST: Central European Time, 1 Std Versatz, Sommerzeitregel M3.5.0 bis M10.5.0
     configTzTime("CET-1CEST,M3.5.0,M10.5.0/3", "pool.ntp.org", "ptbtime1.ptb.de");
+    
+    // Wait for NTP sync (up to 5 seconds)
+    Serial.print("Waiting for NTP");
+    startAttempt = millis();
+    while (time(nullptr) < 1000000000L && millis() - startAttempt < 5000) {
+      delay(500);
+      Serial.print(".");
+    }
+    Serial.println(time(nullptr) > 1000000000L ? " OK" : " Timeout");
   }
   else
   {
@@ -218,6 +228,8 @@ void setup()
 {
   Serial.begin(115200);
   Serial.println("\nStarting LilyGO T-CAN485 BMS Bridge...");
+
+  dataMutex = xSemaphoreCreateMutex();
 
   setupNetwork();
 
@@ -234,10 +246,8 @@ void setup()
   bms.begin(RS485_RX, RS485_TX, RS485_SE, RS485_EN, PIN_5V_EN);
 
   inverter.setDebugCallback(libraryLogger);
-  // UPDATE THIS LINE:
   inverter.begin((gpio_num_t)CAN_TX, (gpio_num_t)CAN_RX, (gpio_num_t)CAN_SE);
 
-  // Initial safe defaults (Prevents the SMA 0.0V Death-Flash on boot)
   currentData.packVoltage = 52.5f;
   currentData.packCurrent = 0.0f;
   currentData.packSOC = 50.0f;
@@ -247,13 +257,11 @@ void setup()
   currentData.smaChargeMode = "Unknown";
   currentData.smaErrorCode = 0;
 
-  // Launch the BMS Polling Task onto Core 0
   xTaskCreatePinnedToCore(bmsTask, "BMS_Task", 4096, NULL, 1, NULL, 0);
 
   netLog("[SYS] Boot sequence complete. Multithreading Active.\n");
 }
 
-// --- CORE 1: MAIN LOOP (Lightning Fast!) ---
 void loop()
 {
   ArduinoOTA.handle();
@@ -263,7 +271,10 @@ void loop()
   {
     lastCanCheck = millis();
     inverter.checkBusHealth();
-    inverter.readMessages(currentData);
+    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+      inverter.readMessages(currentData);
+      xSemaphoreGive(dataMutex);
+    }
   }
 
   if (isResetting && (millis() - resetHoldStartTime > 5500))
@@ -272,33 +283,35 @@ void loop()
     netLog("[SYS] Recovery cycle finished.\n");
   }
 
-  // SMA CAN Transmission (Precision 250ms Heartbeat)
   if (millis() - lastSmaTx > 250)
   {
     lastSmaTx = millis();
 
-    if (!autoMaint && currentData.packVoltage > 0 && currentData.packVoltage < (cfg.cvMaintStart * CELL_COUNT))
-      autoMaint = true;
-    else if (autoMaint && currentData.packVoltage > (cfg.cvMaintStop * CELL_COUNT))
-      autoMaint = false;
+    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+      if (!autoMaint && currentData.packVoltage > 0 && currentData.packVoltage < (cfg.cvMaintStart * CELL_COUNT))
+        autoMaint = true;
+      else if (autoMaint && currentData.packVoltage > (cfg.cvMaintStop * CELL_COUNT))
+        autoMaint = false;
 
-    currentData.maintenanceActive = manualMaintForce || autoMaint;
-    currentData.forceCharge = currentData.maintenanceActive;
-    currentData.isResetting = isResetting;
+      currentData.maintenanceActive = manualMaintForce || autoMaint;
+      currentData.forceCharge = currentData.maintenanceActive;
+      currentData.isResetting = isResetting;
 
-    SMATxData tx;
-    tx.packVoltage = currentData.packVoltage;
-    tx.packCurrent = currentData.packCurrent;
-    tx.packTemp = currentData.packTemp;
-    tx.packSOC = currentData.packSOC;
-    tx.maintenanceActive = currentData.maintenanceActive;
-    tx.isResetting = currentData.isResetting;
+      SMATxData tx;
+      tx.packVoltage = currentData.packVoltage;
+      tx.packCurrent = currentData.packCurrent;
+      tx.packTemp = currentData.packTemp;
+      tx.packSOC = currentData.packSOC;
+      tx.maintenanceActive = currentData.maintenanceActive;
+      tx.isResetting = currentData.isResetting;
 
-    tx.ccl = calculateCCL(currentData.maxCellVoltage);
-    tx.dcl = calculateDCL(currentData.minCellVoltage);
-    tx.cvl = currentData.maintenanceActive ? 560 : (uint16_t)(cfg.cvMaxCharge * CELL_COUNT * 10);
-    tx.dvl = (uint16_t)(cfg.cvMinDischarge * CELL_COUNT * 10);
+      tx.ccl = calculateCCL(currentData.maxCellVoltage);
+      tx.dcl = calculateDCL(currentData.minCellVoltage);
+      tx.cvl = currentData.maintenanceActive ? 560 : (uint16_t)(cfg.cvMaxCharge * CELL_COUNT * 10);
+      tx.dvl = (uint16_t)(cfg.cvMinDischarge * CELL_COUNT * 10);
 
-    inverter.sendStatus(tx);
+      inverter.sendStatus(tx);
+      xSemaphoreGive(dataMutex);
+    }
   }
 }

@@ -99,7 +99,7 @@ void WebDashboard::saveConfig(AsyncWebServerRequest *request)
     saveFloat("da", _cfg->maxDischargeA);
     saveFloat("cdvt", _cfg->cvStartDTaper);
     saveFloat("clag", _cfg->cvLowAlarmGate);
-    saveFloat("ld", _cfg->limpDischargeA);
+    saveFloat("ld_v2", _cfg->limpDischargeA);
     saveFloat("cmdv", _cfg->cvMinDischarge);
 
     if (request->hasParam("vs"))

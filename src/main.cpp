@@ -179,7 +179,13 @@ void bmsTask(void *pvParameters)
         // --- Higher Precision Moving Average Filter for maxCellVoltage ---
         // Store as integer mV to avoid float precision loss during accumulation
         static uint16_t voltageBuffer[20] = {0};
+        static bool bufferInitialized = false;
         static int bufferIndex = 0;
+        
+        if (!bufferInitialized) {
+            for(int i=0; i<20; i++) voltageBuffer[i] = (uint16_t)(localMax * 1000.0f);
+            bufferInitialized = true;
+        }
         
         voltageBuffer[bufferIndex] = (uint16_t)(localMax * 1000.0f);
         bufferIndex = (bufferIndex + 1) % max(1, min(20, cfg.vSamples));

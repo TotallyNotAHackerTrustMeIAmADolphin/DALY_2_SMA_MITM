@@ -305,6 +305,7 @@ void loop()
       tx.isResetting = currentData.isResetting;
 
       tx.ccl = calculateCCL(currentData.maxCellVoltage);
+      currentData.requestedCurrent = tx.ccl / 10.0f;
       tx.dcl = calculateDCL(currentData.minCellVoltage);
       tx.cvl = currentData.maintenanceActive ? 560 : (uint16_t)(cfg.cvMaxCharge * CELL_COUNT * 10);
       tx.dvl = (uint16_t)(cfg.cvMinDischarge * CELL_COUNT * 10);

@@ -29,6 +29,7 @@ const char index_html[] PROGMEM = R"rawliteral(
 <div class="nav"><a href="/">DASHBOARD</a> | <a href="/config">CONFIGURATION</a></div>
 <div class="grid">
   <div class="card"><div>Pack Voltage</div><div id="v" class="value">--</div></div>
+  <div class="card"><div>Req. Current</div><div id="reqI" class="value">--</div></div>
   <div class="card"><div>Delta (Max-Min)</div><div id="cv" class="value">--</div></div>
   <div class="card"><div>Current</div><div id="i" class="value">--</div></div>
   <div class="card"><div>SOC</div><div id="soc" class="value">--</div></div>
@@ -50,6 +51,7 @@ const char index_html[] PROGMEM = R"rawliteral(
   source.addEventListener('data', function(e) {
     var obj = JSON.parse(e.data);
     document.getElementById('v').innerHTML = obj.v.toFixed(2) + " V";
+    document.getElementById('reqI').innerHTML = obj.reqI.toFixed(1) + " A";
     document.getElementById('cv').innerHTML = ((obj.maxC - obj.minC) * 1000).toFixed(0) + " mV";
     document.getElementById('i').innerHTML = obj.i.toFixed(1) + " A";
     document.getElementById('soc').innerHTML = obj.soc.toFixed(1) + "%";

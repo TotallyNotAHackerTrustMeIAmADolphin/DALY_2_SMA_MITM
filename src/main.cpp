@@ -244,22 +244,14 @@ void setup()
   Serial.begin(115200);
   Serial.println("\nStarting LilyGO T-CAN485 BMS Bridge...");
 
-  // Initialize filter buffer with a safe default (Max Charge Voltage)
-  float defaultV = cfg.cvMaxCharge * 1000.0f;
-  for(int i=0; i<20; i++) voltageBuffer[i] = (uint16_t)defaultV;
-
-  dataMutex = xSemaphoreCreateMutex();
-
-  setupNetwork();
-
-  ArduinoOTA.setPort(3232);
-  ArduinoOTA.setHostname("BMS-Bridge");
-  ArduinoOTA.begin();
-
   TelnetStream.begin();
 
   webUI.setActionCallback(handleUIAction);
   webUI.begin(cfg);
+  
+  // Initialize filter buffer with a safe default (Max Charge Voltage)
+  float defaultV = cfg.cvMaxCharge * 1000.0f;
+  for(int i=0; i<20; i++) voltageBuffer[i] = (uint16_t)defaultV;
 
   bms.setDebugCallback(libraryLogger);
   bms.begin(RS485_RX, RS485_TX, RS485_SE, RS485_EN, PIN_5V_EN);

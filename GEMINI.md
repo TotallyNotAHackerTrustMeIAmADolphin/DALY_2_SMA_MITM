@@ -52,7 +52,7 @@ This project uses **PlatformIO**.
 
 ### Communication Protocols
 - **Daly RS485:** Implementation in `src/DalyRS485.cpp`. Uses standard 9600 baud serial.
-- **SMA CAN:** Implementation in `src/SMA_CAN.cpp`. Adheres to the SMA/Victron CAN protocol (250kbps, specific PGNs).
+- **SMA CAN:** Implementation in `src/SMA_CAN.cpp`. Adheres to the SMA/Victron CAN protocol (250kbps, specific PGNs). *Note: The driver now relies on the hardware queue for frame transmission to ensure reliable delivery of status frames like SOC.*
 
 ## ⚠️ Critical Safety Note
 This firmware controls high-power charging/discharging. Always verify the `calculateCCL` and `calculateDCL` logic in `src/main.cpp` when making changes to the glideslope math.

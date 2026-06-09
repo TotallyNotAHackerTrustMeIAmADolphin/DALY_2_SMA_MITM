@@ -98,9 +98,6 @@ void SMA_CAN::sendFrame(uint32_t id, uint8_t dlc, uint8_t *data)
         return;
     }
 
-    if (twai_stat.msgs_to_tx >= 5)
-        return;
-
     twai_message_t msg;
     msg.identifier = id;
     msg.extd = 0;

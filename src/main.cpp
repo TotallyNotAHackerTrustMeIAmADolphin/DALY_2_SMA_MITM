@@ -196,10 +196,10 @@ void bmsTask(void *pvParameters)
         // Broadcast while holding mutex to ensure vector stability
         webUI.broadcastTelemetry(currentData);
         xSemaphoreGive(dataMutex);
-        }
-        // ...
-        // Later in bmsTask...
-        tx.ccl = calculateCCL(currentData.smoothedMaxCellVoltage);
+      }
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(2000));
   }
 }
 
@@ -323,7 +323,7 @@ void loop()
       tx.maintenanceActive = currentData.maintenanceActive;
       tx.isResetting = currentData.isResetting;
 
-      tx.ccl = calculateCCL(currentData.maxCellVoltage);
+      tx.ccl = calculateCCL(currentData.smoothedMaxCellVoltage);
       currentData.requestedCurrent = tx.ccl / 10.0f;
       tx.dcl = calculateDCL(currentData.minCellVoltage);
       tx.cvl = currentData.maintenanceActive ? 560 : (uint16_t)(cfg.cvMaxCharge * CELL_COUNT * 10);

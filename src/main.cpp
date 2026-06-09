@@ -175,7 +175,19 @@ void bmsTask(void *pvParameters)
       if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         currentData.avgCellVoltage = sum / CELL_COUNT;
         currentData.minCellVoltage = localMin;
-        currentData.maxCellVoltage = localMax;
+        
+        // --- Moving Average Filter for maxCellVoltage ---
+        static float voltageBuffer[20] = {0};
+        static int bufferIndex = 0;
+        
+        voltageBuffer[bufferIndex] = localMax;
+        bufferIndex = (bufferIndex + 1) % max(1, min(20, cfg.vSamples));
+        
+        float smoothedMax = 0;
+        int count = min(20, cfg.vSamples);
+        for(int i=0; i<count; i++) smoothedMax += voltageBuffer[i];
+        currentData.maxCellVoltage = smoothedMax / count;
+        
         currentData.cellVoltages = cellVolts;
         
         // Broadcast while holding mutex to ensure vector stability

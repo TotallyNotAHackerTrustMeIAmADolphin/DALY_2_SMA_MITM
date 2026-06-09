@@ -176,17 +176,18 @@ void bmsTask(void *pvParameters)
         currentData.avgCellVoltage = sum / CELL_COUNT;
         currentData.minCellVoltage = localMin;
         
-        // --- Moving Average Filter for maxCellVoltage ---
-        static float voltageBuffer[20] = {0};
+        // --- Higher Precision Moving Average Filter for maxCellVoltage ---
+        // Store as integer mV to avoid float precision loss during accumulation
+        static uint16_t voltageBuffer[20] = {0};
         static int bufferIndex = 0;
         
-        voltageBuffer[bufferIndex] = localMax;
+        voltageBuffer[bufferIndex] = (uint16_t)(localMax * 1000.0f);
         bufferIndex = (bufferIndex + 1) % max(1, min(20, cfg.vSamples));
         
-        float smoothedMax = 0;
+        uint32_t sumMV = 0;
         int count = min(20, cfg.vSamples);
-        for(int i=0; i<count; i++) smoothedMax += voltageBuffer[i];
-        currentData.maxCellVoltage = smoothedMax / count;
+        for(int i=0; i<count; i++) sumMV += voltageBuffer[i];
+        currentData.maxCellVoltage = (float)(sumMV / count) / 1000.0f;
         
         currentData.cellVoltages = cellVolts;
         

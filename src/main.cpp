@@ -77,9 +77,15 @@ void netLog(const char *format, ...)
 
 void libraryLogger(const char *msg) { netLog("%s", msg); }
 
+unsigned long lastSuccessfulBmsRead = 0;
+
 // --- GLIDESLOPE LOGIC ---
 uint16_t calculateCCL(float maxCellV)
 {
+  // 1. BMS Comms Timeout Fail-safe
+  if (millis() - lastSuccessfulBmsRead > (unsigned long)cfg.bmsTimeout * 1000)
+    return 0;
+
   if (currentData.maintenanceActive)
     return (uint16_t)round(cfg.maintAmps * 10.0f);
 
@@ -91,9 +97,12 @@ uint16_t calculateCCL(float maxCellV)
   if (maxCellV > cfg.cvStartTaper)
   {
     float div = cfg.cvHighAlarmGate - cfg.cvStartTaper;
-    if (div <= 0.001f) return (uint16_t)round(cfg.trickleA * 10.0f);
+    if (div <= 0.0001f) return (uint16_t)round(cfg.trickleA * 10.0f);
     
     float slope = (cfg.cvHighAlarmGate - maxCellV) / div;
+    if (slope < 0.0f) slope = 0.0f;
+    if (slope > 1.0f) slope = 1.0f;
+
     float target = cfg.trickleA + (slope * (cfg.maxChargeA - cfg.trickleA));
     return (uint16_t)round(max(target, cfg.trickleA) * 10.0f);
   }
@@ -102,6 +111,10 @@ uint16_t calculateCCL(float maxCellV)
 
 uint16_t calculateDCL(float minCellV)
 {
+  // 1. BMS Comms Timeout Fail-safe
+  if (millis() - lastSuccessfulBmsRead > (unsigned long)cfg.bmsTimeout * 1000)
+    return 0;
+
   if (currentData.maintenanceActive)
     return 0;
 
@@ -113,9 +126,12 @@ uint16_t calculateDCL(float minCellV)
   if (minCellV < cfg.cvStartDTaper)
   {
     float div = cfg.cvStartDTaper - cfg.cvLowAlarmGate;
-    if (div <= 0.001f) return (uint16_t)round(cfg.limpDischargeA * 10.0f);
+    if (div <= 0.0001f) return (uint16_t)round(cfg.limpDischargeA * 10.0f);
 
     float slope = (minCellV - cfg.cvLowAlarmGate) / div;
+    if (slope < 0.0f) slope = 0.0f;
+    if (slope > 1.0f) slope = 1.0f;
+
     float target = cfg.limpDischargeA + (slope * (cfg.maxDischargeA - cfg.limpDischargeA));
     return (uint16_t)round(max(target, cfg.limpDischargeA) * 10.0f);
   }
@@ -156,6 +172,7 @@ void bmsTask(void *pvParameters)
         currentData.packVoltage = info.packVoltage;
         currentData.packCurrent = info.packCurrent;
         currentData.packSOC = info.packSOC;
+        lastSuccessfulBmsRead = millis();
         xSemaphoreGive(dataMutex);
       }
     }
@@ -176,6 +193,9 @@ void bmsTask(void *pvParameters)
         if (v > localMax) localMax = v;
       }
 
+      DashboardData broadcastCopy;
+      bool shouldBroadcast = false;
+
       if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
         currentData.avgCellVoltage = sum / CELL_COUNT;
         currentData.minCellVoltage = localMin;
@@ -192,10 +212,17 @@ void bmsTask(void *pvParameters)
         currentData.smoothedMaxCellVoltage = (float)(sumMV / count) / 1000.0f;
 
         currentData.cellVoltages = cellVolts;
+        lastSuccessfulBmsRead = millis();
 
-        // Broadcast while holding mutex to ensure vector stability
-        webUI.broadcastTelemetry(currentData);
+        // Copy for broadcast outside mutex
+        broadcastCopy = currentData;
+        shouldBroadcast = true;
+        
         xSemaphoreGive(dataMutex);
+      }
+
+      if (shouldBroadcast) {
+        webUI.broadcastTelemetry(broadcastCopy);
       }
     }
 

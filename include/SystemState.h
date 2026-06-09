@@ -27,6 +27,7 @@ struct DashboardData {
     float avgCellVoltage;
     float minCellVoltage; // Added for Discharging Math
     float maxCellVoltage; // Added for Charging Math
+    float smoothedMaxCellVoltage; // Added for Stable Charging Math
     std::vector<float> cellVoltages; // Added for the Dashboard Grid
     
     float packCurrent;

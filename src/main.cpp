@@ -183,21 +183,23 @@ void bmsTask(void *pvParameters)
         // --- Higher Precision Moving Average Filter for maxCellVoltage ---
         voltageBuffer[bufferIndex] = (uint16_t)(localMax * 1000.0f);
         bufferIndex = (bufferIndex + 1) % max(1, min(20, cfg.vSamples));
-        
+
         uint32_t sumMV = 0;
         int count = min(20, cfg.vSamples);
         for(int i=0; i<count; i++) sumMV += voltageBuffer[i];
-        currentData.maxCellVoltage = (float)(sumMV / count) / 1000.0f;
-        
+
+        currentData.maxCellVoltage = localMax;
+        currentData.smoothedMaxCellVoltage = (float)(sumMV / count) / 1000.0f;
+
         currentData.cellVoltages = cellVolts;
-        
+
         // Broadcast while holding mutex to ensure vector stability
         webUI.broadcastTelemetry(currentData);
         xSemaphoreGive(dataMutex);
-      }
-    }
-
-    vTaskDelay(pdMS_TO_TICKS(2000));
+        }
+        // ...
+        // Later in bmsTask...
+        tx.ccl = calculateCCL(currentData.smoothedMaxCellVoltage);
   }
 }
 

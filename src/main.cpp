@@ -244,6 +244,14 @@ void setup()
   Serial.begin(115200);
   Serial.println("\nStarting LilyGO T-CAN485 BMS Bridge...");
 
+  dataMutex = xSemaphoreCreateMutex();
+
+  setupNetwork();
+
+  ArduinoOTA.setPort(3232);
+  ArduinoOTA.setHostname("BMS-Bridge");
+  ArduinoOTA.begin();
+
   TelnetStream.begin();
 
   webUI.setActionCallback(handleUIAction);

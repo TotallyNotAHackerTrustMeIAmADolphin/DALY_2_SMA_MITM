@@ -31,6 +31,10 @@ SystemConfig cfg;
 DashboardData currentData;
 SemaphoreHandle_t dataMutex;
 
+// Global filter buffers
+uint16_t voltageBuffer[20] = {0};
+int bufferIndex = 0;
+
 unsigned long lastBmsPoll = 0;
 unsigned long lastSmaTx = 0;
 unsigned long resetHoldStartTime = 0;
@@ -177,16 +181,6 @@ void bmsTask(void *pvParameters)
         currentData.minCellVoltage = localMin;
         
         // --- Higher Precision Moving Average Filter for maxCellVoltage ---
-        // Store as integer mV to avoid float precision loss during accumulation
-        static uint16_t voltageBuffer[20] = {0};
-        static bool bufferInitialized = false;
-        static int bufferIndex = 0;
-        
-        if (!bufferInitialized) {
-            for(int i=0; i<20; i++) voltageBuffer[i] = (uint16_t)(localMax * 1000.0f);
-            bufferInitialized = true;
-        }
-        
         voltageBuffer[bufferIndex] = (uint16_t)(localMax * 1000.0f);
         bufferIndex = (bufferIndex + 1) % max(1, min(20, cfg.vSamples));
         
@@ -247,6 +241,10 @@ void setup()
 {
   Serial.begin(115200);
   Serial.println("\nStarting LilyGO T-CAN485 BMS Bridge...");
+
+  // Initialize filter buffer with a safe default (Max Charge Voltage)
+  float defaultV = cfg.cvMaxCharge * 1000.0f;
+  for(int i=0; i<20; i++) voltageBuffer[i] = (uint16_t)defaultV;
 
   dataMutex = xSemaphoreCreateMutex();
 

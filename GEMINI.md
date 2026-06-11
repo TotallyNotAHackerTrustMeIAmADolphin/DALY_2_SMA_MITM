@@ -30,9 +30,14 @@ This project uses **PlatformIO**.
 - **Serial Monitor:** `pio run -t monitor`
 - **Clean:** `pio run -t clean`
 
-## 🛠️ Development Conventions
+### 🛠️ Development Conventions
 
-### Hardware & Pins
+#### 🚫 No-Nonsense Engineering
+- **Directness over Politeness:** Agents must prioritize technical accuracy and blunt objectivity over conversational filler, apologies, or sycophantic agreement.
+- **Evidence-Based:** If a proposal is technically flawed (even if from the user), state the risk clearly and provide the engineering rationale for an alternative.
+- **Conciseness:** Keep responses surgical. Focus on code, logs, and logic. Avoid "I'm happy to help" or "I've successfully..." postambles unless they provide essential context.
+
+#### Hardware & Pins
 - Hardware pin mappings are strictly defined in `include/pin_config.h`.
 - The LilyGO board requires the `5V_EN` pin to be high to power the RS485/CAN transceivers.
 

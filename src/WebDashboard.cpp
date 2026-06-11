@@ -67,7 +67,7 @@ void WebDashboard::loadConfig()
     _cfg->trickleA = _prefs.getFloat("ta", 2.0);
     _cfg->limpDischargeA = _prefs.getFloat("ld_v2", 15.0);
     _cfg->vSamples = _prefs.getInt("vs", 12);
-    _cfg->bmsTimeout = _prefs.getInt("to", 15);
+    _cfg->bmsTimeout = _prefs.getInt("to", 60);
     _cfg->cvMaintStart = _prefs.getFloat("cmsv", 3.030);
     _cfg->cvMaintStop = _prefs.getFloat("cmpp", 3.220);
     _cfg->maintAmps = _prefs.getFloat("mam", 20.0);

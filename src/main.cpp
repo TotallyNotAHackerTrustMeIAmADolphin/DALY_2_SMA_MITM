@@ -20,7 +20,8 @@ IPAddress subnet(255, 255, 255, 0);
 IPAddress primaryDNS(8, 8, 8, 8);   // Google DNS
 IPAddress secondaryDNS(1, 1, 1, 1); // Cloudflare DNS
 
-#define CELL_COUNT 16.0f
+#define MAX_CELLS 16
+#define MAX_SAMPLES 20
 
 // --- GLOBAL INSTANCES ---
 DalyRS485 bms(Serial2);
@@ -32,7 +33,7 @@ DashboardData currentData;
 SemaphoreHandle_t dataMutex;
 
 // Global filter buffers
-uint16_t voltageBuffer[20] = {0};
+uint16_t cellBuffers[MAX_CELLS][MAX_SAMPLES] = {0};
 int bufferIndex = 0;
 
 unsigned long lastBmsPoll = 0;
@@ -180,39 +181,47 @@ void bmsTask(void *pvParameters)
     vTaskDelay(pdMS_TO_TICKS(100));
 
     std::vector<float> cellVolts;
-    if (bms.readCellVoltages(CELL_COUNT, cellVolts))
+    if (bms.readCellVoltages(MAX_CELLS, cellVolts))
     {
       float sum = 0;
       float localMin = 10.0f;
       float localMax = 0.0f;
+      std::vector<float> smoothedCellVolts;
+      smoothedCellVolts.reserve(MAX_CELLS);
 
-      for (float v : cellVolts)
+      int windowSize = max(1, min(MAX_SAMPLES, cfg.vSamples));
+
+      for (int i = 0; i < (int)cellVolts.size() && i < MAX_CELLS; i++)
       {
-        sum += v;
-        if (v < localMin) localMin = v;
-        if (v > localMax) localMax = v;
+        // Update per-cell buffer
+        cellBuffers[i][bufferIndex] = (uint16_t)(cellVolts[i] * 1000.0f);
+        
+        // Calculate smoothed average for this cell
+        uint32_t cellSumMV = 0;
+        for (int j = 0; j < windowSize; j++) {
+          cellSumMV += cellBuffers[i][j];
+        }
+        
+        float smoothedV = (float)(cellSumMV / windowSize) / 1000.0f;
+        smoothedCellVolts.push_back(smoothedV);
+        
+        sum += smoothedV;
+        if (smoothedV < localMin) localMin = smoothedV;
+        if (smoothedV > localMax) localMax = smoothedV;
       }
 
       DashboardData broadcastCopy;
       bool shouldBroadcast = false;
 
       if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        currentData.avgCellVoltage = sum / CELL_COUNT;
+        currentData.avgCellVoltage = sum / MAX_CELLS;
         currentData.minCellVoltage = localMin;
-        
-        // --- Higher Precision Moving Average Filter for maxCellVoltage ---
-        voltageBuffer[bufferIndex] = (uint16_t)(localMax * 1000.0f);
-        bufferIndex = (bufferIndex + 1) % max(1, min(20, cfg.vSamples));
-
-        uint32_t sumMV = 0;
-        int count = min(20, cfg.vSamples);
-        for(int i=0; i<count; i++) sumMV += voltageBuffer[i];
-
         currentData.maxCellVoltage = localMax;
-        currentData.smoothedMaxCellVoltage = (float)(sumMV / count) / 1000.0f;
-
-        currentData.cellVoltages = cellVolts;
+        currentData.cellVoltages = smoothedCellVolts;
         lastSuccessfulBmsRead = millis();
+
+        // Increment circular buffer index AFTER processing all cells
+        bufferIndex = (bufferIndex + 1) % windowSize;
 
         // Copy for broadcast outside mutex
         broadcastCopy = currentData;
@@ -286,7 +295,11 @@ void setup()
   
   // Initialize filter buffer with a safe default (Max Charge Voltage)
   float defaultV = cfg.cvMaxCharge * 1000.0f;
-  for(int i=0; i<20; i++) voltageBuffer[i] = (uint16_t)defaultV;
+  for(int i=0; i<MAX_CELLS; i++) {
+    for(int j=0; j<MAX_SAMPLES; j++) {
+      cellBuffers[i][j] = (uint16_t)defaultV;
+    }
+  }
 
   bms.setDebugCallback(libraryLogger);
   bms.begin(RS485_RX, RS485_TX, RS485_SE, RS485_EN, PIN_5V_EN);
@@ -333,9 +346,9 @@ void loop()
     lastSmaTx = millis();
 
     if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
-      if (!autoMaint && currentData.packVoltage > 0 && currentData.packVoltage < (cfg.cvMaintStart * CELL_COUNT))
+      if (!autoMaint && currentData.packVoltage > 0 && currentData.packVoltage < (cfg.cvMaintStart * MAX_CELLS))
         autoMaint = true;
-      else if (autoMaint && currentData.packVoltage > (cfg.cvMaintStop * CELL_COUNT))
+      else if (autoMaint && currentData.packVoltage > (cfg.cvMaintStop * MAX_CELLS))
         autoMaint = false;
 
       currentData.maintenanceActive = manualMaintForce || autoMaint;
@@ -350,11 +363,11 @@ void loop()
       tx.maintenanceActive = currentData.maintenanceActive;
       tx.isResetting = currentData.isResetting;
 
-      tx.ccl = calculateCCL(currentData.smoothedMaxCellVoltage);
+      tx.ccl = calculateCCL(currentData.maxCellVoltage);
       currentData.requestedCurrent = tx.ccl / 10.0f;
       tx.dcl = calculateDCL(currentData.minCellVoltage);
-      tx.cvl = currentData.maintenanceActive ? 560 : (uint16_t)(cfg.cvMaxCharge * CELL_COUNT * 10);
-      tx.dvl = (uint16_t)(cfg.cvMinDischarge * CELL_COUNT * 10);
+      tx.cvl = currentData.maintenanceActive ? 560 : (uint16_t)(cfg.cvMaxCharge * MAX_CELLS * 10);
+      tx.dvl = (uint16_t)(cfg.cvMinDischarge * MAX_CELLS * 10);
 
       inverter.sendStatus(tx);
       xSemaphoreGive(dataMutex);

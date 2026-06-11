@@ -10,6 +10,7 @@ const char index_html[] PROGMEM = R"rawliteral(
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; padding: 15px; }
   .card { background: #1e1e1e; padding: 15px; border-radius: 10px; border: 1px solid #333; }
   .value { font-size: 2em; font-weight: bold; color: #4caf50; }
+  .negative-val { color: #f44336 !important; }
   .err-active { color: #f44336 !important; }
   .btn { border: none; padding: 12px 20px; border-radius: 5px; cursor: pointer; font-weight: bold; margin: 10px; display: inline-block; text-decoration: none; color: white; }
   .btn-blue { background: #0277bd; } .btn-red { background: #d32f2f; }
@@ -17,8 +18,10 @@ const char index_html[] PROGMEM = R"rawliteral(
   /* Cell Grid Styles */
   .cells-container { background: #1e1e1e; padding: 15px; border-radius: 10px; border: 1px solid #333; margin: 0 15px 15px 15px; }
   .cells-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(65px, 1fr)); gap: 8px; margin-top: 15px; }
-  .cell-box { background: #2a2a2a; padding: 10px 5px; border-radius: 5px; font-size: 0.85em; border: 1px solid #444; color: #aaa; }
+  .cell-box { background: #2a2a2a; padding: 10px 5px; border-radius: 5px; font-size: 0.85em; border: 1px solid #444; color: #aaa; position: relative; overflow: hidden; }
   .cell-box span { display: block; font-size: 1.25em; font-weight: bold; margin-top: 4px; color: #e0e0e0; }
+  .cell-fill { position: absolute; bottom: 0; left: 0; right: 0; background: rgba(76, 175, 80, 0.4); transition: height 0.3s; z-index: 1; }
+  .cell-content { position: relative; z-index: 2; }
   .cell-min { border-color: #2196F3; background: rgba(33, 150, 243, 0.1); }
   .cell-min span { color: #2196F3; }
   .cell-max { border-color: #f44336; background: rgba(244, 67, 54, 0.1); }
@@ -53,7 +56,10 @@ const char index_html[] PROGMEM = R"rawliteral(
     document.getElementById('v').innerHTML = obj.v.toFixed(2) + " V";
     document.getElementById('reqI').innerHTML = obj.reqI.toFixed(1) + " A";
     document.getElementById('cv').innerHTML = ((obj.maxC - obj.minC) * 1000).toFixed(0) + " mV";
-    document.getElementById('i').innerHTML = obj.i.toFixed(1) + " A";
+    const curEl = document.getElementById('i');
+    curEl.innerHTML = obj.i.toFixed(1) + " A";
+    if (obj.i < -0.1) curEl.classList.add('negative-val');
+    else curEl.classList.remove('negative-val');
     document.getElementById('soc').innerHTML = obj.soc.toFixed(1) + "%";
     
     // --- SMA MODE DISPLAY ---
@@ -68,11 +74,13 @@ const char index_html[] PROGMEM = R"rawliteral(
     if(obj.cells && obj.cells.length > 0) {
       var cg = document.getElementById('cGrid');
       var html = "";
+      var range = obj.maxC - obj.minC;
       for(var i=0; i<obj.cells.length; i++) {
         var cls = "cell-box";
+        var pct = range > 0.001 ? ((obj.cells[i] - obj.minC) / range) * 100 : 100;
         if(obj.cells[i] === obj.minC) cls += " cell-min";
         else if(obj.cells[i] === obj.maxC) cls += " cell-max";
-        html += "<div class='"+cls+"'>C"+(i+1)+"<span>"+obj.cells[i].toFixed(3)+"V</span></div>";
+        html += "<div class='"+cls+"'><div class='cell-fill' style='height:"+pct+"%'></div><div class='cell-content'>C"+(i+1)+"<span>"+obj.cells[i].toFixed(3)+"V</span></div></div>";
       }
       cg.innerHTML = html;
     }

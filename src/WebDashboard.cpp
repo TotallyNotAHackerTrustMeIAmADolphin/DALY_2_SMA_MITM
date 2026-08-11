@@ -130,7 +130,14 @@ bool WebDashboard::findLogFile(AsyncWebServerRequest *request, String &outName, 
     // path-traversal guard, since our filenames never contain '/' or '..'.
     std::vector<String> names;
     std::vector<uint32_t> sizes;
-    SDLogger::listLogFiles(names, sizes);
+    if (!SDLogger::listLogFiles(names, sizes))
+    {
+        // Distinguish "SD card busy/not ready" from "genuinely no such file"
+        // below - otherwise a transient lock timeout looks like a 404 and
+        // misleads anyone debugging it.
+        request->send(503, "text/plain", "SD card busy, try again");
+        return false;
+    }
 
     for (size_t i = 0; i < names.size(); i++)
     {
@@ -237,6 +244,13 @@ void WebDashboard::setupRoutes()
         // Released exactly once when this connection closes (completion or
         // abort) - this library always closes file-response connections
         // (no keep-alive), so onDisconnect is a reliable single release point.
+        // Held for the WHOLE transfer (accepted tradeoff: the background
+        // writer drops samples it can't log during that window - see PR
+        // description). Explicitly (re-)set the library's ack timeout so a
+        // client that stops ACKing (e.g. walks out of WiFi range) gets
+        // force-disconnected - and this mutex released - within 5s rather
+        // than relying silently on the library's own default.
+        request->client()->setAckTimeout(5000);
         request->onDisconnect([mtx]() { xSemaphoreGive(mtx); });
 
         request->send(SD, "/" + name, contentTypeForLogFile(name), true /* download */); });
@@ -256,7 +270,7 @@ void WebDashboard::setupRoutes()
 
         String csv;
         if (!SDLogger::readGraphSeries(name, 600, csv)) {
-            request->send(500, "text/plain", "Failed to read file");
+            request->send(500, "text/plain", "Failed to read file (it may be too large to graph - try Download instead)");
             return;
         }
 

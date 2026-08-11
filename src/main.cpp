@@ -295,6 +295,7 @@ void setup()
   webUI.setActionCallback(handleUIAction);
   webUI.begin(cfg);
 
+  SDLogger::setDebugCallback(libraryLogger);
   if (SDLogger::begin()) {
     netLog("[SYS] SD card logging initialized.\n");
   } else {

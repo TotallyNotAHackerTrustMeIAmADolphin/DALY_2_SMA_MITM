@@ -8,6 +8,7 @@
 bool SDLogger::initialized = false;
 QueueHandle_t SDLogger::logQueue = NULL;
 SemaphoreHandle_t SDLogger::sdMutex_ = NULL;
+SDDebugCallback SDLogger::debugCb = nullptr;
 
 namespace
 {
@@ -18,7 +19,15 @@ namespace
         char data[480];
     };
 
-    constexpr uint8_t kMaxLoggedCells = 32;
+    // This app is always a 16S pack (MAX_CELLS in main.cpp) - keep the CSV
+    // header's cell-column count matching what logTelemetry() actually
+    // writes, rather than a padded upper bound.
+    constexpr uint8_t kMaxLoggedCells = 16;
+
+    // Caps how much of a source file readGraphSeries() will scan, so a very
+    // large (e.g. multi-week boot_ fallback) file can't hold sdMutex_ for an
+    // unbounded two-pass scan.
+    constexpr uint32_t kMaxGraphSourceBytes = 4 * 1024 * 1024;
 }
 
 bool SDLogger::isReady()
@@ -26,32 +35,45 @@ bool SDLogger::isReady()
     return initialized;
 }
 
+void SDLogger::setDebugCallback(SDDebugCallback cb)
+{
+    debugCb = cb;
+}
+
+void SDLogger::logFailure(const char *msg)
+{
+    if (debugCb)
+        debugCb(msg);
+    else
+        Serial.println(msg);
+}
+
 bool SDLogger::begin()
 {
     SPI.begin(SD_SCLK, SD_MISO, SD_MOSI, SD_CS);
     if (!SD.begin(SD_CS))
     {
-        Serial.println("[SD] Card mount failed");
+        logFailure("[SD] Card mount failed");
         return false;
     }
 
     if (SD.cardType() == CARD_NONE)
     {
-        Serial.println("[SD] No SD card attached");
+        logFailure("[SD] No SD card attached");
         return false;
     }
 
     logQueue = xQueueCreate(32, sizeof(LogMessage));
     if (logQueue == NULL)
     {
-        Serial.println("[SD] Failed to create log queue");
+        logFailure("[SD] Failed to create log queue");
         return false;
     }
 
     sdMutex_ = xSemaphoreCreateMutex();
     if (sdMutex_ == NULL)
     {
-        Serial.println("[SD] Failed to create SD mutex");
+        logFailure("[SD] Failed to create SD mutex");
         return false;
     }
 
@@ -239,12 +261,25 @@ bool SDLogger::listLogFiles(std::vector<String> &outNames, std::vector<uint32_t>
 
     xSemaphoreGive(sdMutex_);
 
-    // Bubble sort is fine here: at most a few dozen daily files.
+    // Bubble sort is fine here: at most a few dozen daily files. boot_*
+    // fallback files (written pre-NTP-sync) always sort before dated
+    // YYYY-MM-DD files regardless of their boot ID, since a plain string
+    // compare would otherwise put "boot_..." AFTER any digit-starting name
+    // ('b' > '0'-'9') - which would wrongly rank a stale boot_ file as more
+    // recent than a properly dated one and break "select most recent = last".
+    auto isOlderName = [](const String &a, const String &b)
+    {
+        bool aBoot = a.startsWith("boot_");
+        bool bBoot = b.startsWith("boot_");
+        if (aBoot != bBoot)
+            return aBoot; // boot_* always sorts first
+        return a < b;
+    };
     for (size_t i = 0; i < outNames.size(); i++)
     {
         for (size_t j = i + 1; j < outNames.size(); j++)
         {
-            if (outNames[j] < outNames[i])
+            if (isOlderName(outNames[j], outNames[i]))
             {
                 std::swap(outNames[i], outNames[j]);
                 std::swap(outSizes[i], outSizes[j]);
@@ -327,6 +362,21 @@ bool SDLogger::readGraphSeries(const String &fileName, size_t targetPoints, Stri
 
     String path = "/" + fileName;
     bool ok = false;
+
+    // Cheap check (just a directory-entry size, no read) before committing
+    // to a two-pass scan of the whole file - bounds the mutex hold time
+    // regardless of how large the source file has grown.
+    File sizeCheck = SD.open(path, FILE_READ);
+    bool opened = (bool)sizeCheck;
+    uint32_t sourceSize = opened ? sizeCheck.size() : 0;
+    if (opened)
+        sizeCheck.close();
+    if (!opened || sourceSize > kMaxGraphSourceBytes)
+    {
+        xSemaphoreGive(sdMutex_);
+        outCSV = "";
+        return false;
+    }
 
     // Pass 1: count data rows (total newlines, minus the header line) so we
     // can pick a skip interval - a plain byte scan, no line objects allocated.

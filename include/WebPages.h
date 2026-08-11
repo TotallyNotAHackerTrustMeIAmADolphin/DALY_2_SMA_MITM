@@ -29,7 +29,7 @@ const char index_html[] PROGMEM = R"rawliteral(
   
   #console { width: 95%; max-width: 1000px; height: 300px; margin: 15px auto; background: #000; color: #00ff00; font-family: monospace; text-align: left; padding: 15px; overflow-y: scroll; border-radius: 8px; border: 1px solid #444; }
 </style></head><body>
-<div class="nav"><a href="/">DASHBOARD</a> | <a href="/config">CONFIGURATION</a> | <a href="/logs">LOGS</a></div>
+<div class="nav"><a href="/">DASHBOARD</a> | <a href="/config">CONFIGURATION</a> | <a href="/logs">LOGS</a> | <a href="/graphs">GRAPHS</a></div>
 <div class="grid">
   <div class="card"><div>Pack Voltage</div><div id="v" class="value">--</div></div>
   <div class="card"><div>Req. Current</div><div id="reqI" class="value">--</div></div>
@@ -109,6 +109,8 @@ const char config_html[] PROGMEM = R"rawliteral(
   <a href="/" style="color:#4caf50;text-decoration:none;">&larr; Back to Dashboard</a>
   &nbsp;|&nbsp;
   <a href="/logs" style="color:#4caf50;text-decoration:none;">Logs &rarr;</a>
+  &nbsp;|&nbsp;
+  <a href="/graphs" style="color:#4caf50;text-decoration:none;">Graphs &rarr;</a>
   <form action="/save" method="GET">
     <h2>Charging Profile (16S)</h2>
     <div class="row"><div class="text-group"><strong>Max Charge Amps</strong><span class="desc">Global bulk charging limit.</span></div>
@@ -163,6 +165,8 @@ const char logs_html[] PROGMEM = R"rawliteral(
 </style></head><body>
 <div class="container">
   <a href="/" style="color:#4caf50;text-decoration:none;">&larr; Back to Dashboard</a>
+  &nbsp;|&nbsp;
+  <a href="/graphs" style="color:#4caf50;text-decoration:none;">Graphs &rarr;</a>
   <h2 style="color:#4caf50;">SD Card Logs</h2>
   <div class="toolbar">
     <select id="fileSelect"></select>
@@ -217,6 +221,142 @@ const char logs_html[] PROGMEM = R"rawliteral(
       }
     } catch (e) {
       status.innerText = 'Failed to load file: ' + e.message;
+    }
+  }
+
+  loadList();
+</script></body></html>)rawliteral";
+
+const char graphs_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE HTML><html><head><title>Graphs</title><meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+  body { font-family: sans-serif; background: #121212; color: #eee; padding: 10px; }
+  .container { max-width: 900px; margin: auto; background: #1e1e1e; padding: 25px; border-radius: 12px; border: 1px solid #333; }
+  .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 15px 0; }
+  select { font-size: 1em; padding: 6px; background: #000; color: #0f0; border: 1px solid #444; border-radius: 4px; flex: 1; min-width: 180px; }
+  .btn { border: none; padding: 10px 16px; border-radius: 5px; cursor: pointer; font-weight: bold; color: white; background: #0277bd; }
+  .note { color: #ff9800; font-size: 0.85em; margin: 5px 0; }
+  .chart-box { background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 10px; margin: 15px 0; }
+  h3 { color: #4caf50; margin: 5px 0 10px 0; font-size: 1em; }
+</style></head><body>
+<div class="container">
+  <a href="/" style="color:#4caf50;text-decoration:none;">&larr; Back to Dashboard</a>
+  &nbsp;|&nbsp;
+  <a href="/logs" style="color:#4caf50;text-decoration:none;">Logs &rarr;</a>
+  <h2 style="color:#4caf50;">Trend Graphs</h2>
+  <div class="toolbar">
+    <select id="fileSelect"></select>
+    <button class="btn" onclick="loadGraph()">Reload</button>
+  </div>
+  <div id="status" class="note"></div>
+
+  <div class="chart-box"><h3>Pack Voltage &amp; SOC</h3><canvas id="chartV"></canvas></div>
+  <div class="chart-box"><h3>Pack Current &amp; Requested Current</h3><canvas id="chartI"></canvas></div>
+  <div class="chart-box"><h3>Min / Max Cell Voltage</h3><canvas id="chartCell"></canvas></div>
+</div>
+<script>
+  let charts = {};
+
+  function darkChart(canvasId, datasets, extraScales) {
+    const ctx = document.getElementById(canvasId).getContext('2d');
+    if (charts[canvasId]) charts[canvasId].destroy();
+    charts[canvasId] = new Chart(ctx, {
+      type: 'line',
+      data: { labels: [], datasets: datasets },
+      options: {
+        animation: false,
+        interaction: { mode: 'index', intersect: false },
+        scales: Object.assign({
+          x: { ticks: { color: '#888', maxTicksLimit: 12 }, grid: { color: '#222' } }
+        }, extraScales),
+        plugins: { legend: { labels: { color: '#ccc' } } }
+      }
+    });
+    return charts[canvasId];
+  }
+
+  function parseCSV(text) {
+    const lines = text.trim().split('\n');
+    lines.shift(); // header
+    const labels = [], packV = [], soc = [], packI = [], reqI = [], minC = [], maxC = [];
+    lines.forEach(line => {
+      const c = line.split(',');
+      if (c.length < 7) return;
+      const t = c[0];
+      labels.push(t.includes(' ') ? t.split(' ')[1] : t);
+      packV.push(parseFloat(c[1]));
+      packI.push(parseFloat(c[2]));
+      soc.push(parseFloat(c[3]));
+      minC.push(parseFloat(c[4]));
+      maxC.push(parseFloat(c[5]));
+      reqI.push(parseFloat(c[6]));
+    });
+    return { labels, packV, soc, packI, reqI, minC, maxC };
+  }
+
+  async function loadList() {
+    const sel = document.getElementById('fileSelect');
+    const status = document.getElementById('status');
+    try {
+      const res = await fetch('/api/logs/list');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const files = (await res.json()).filter(f => f.name.endsWith('.csv'));
+      sel.innerHTML = '';
+      if (!files.length) {
+        status.innerText = 'No telemetry CSV files found (SD card missing or empty).';
+        return;
+      }
+      files.forEach(f => {
+        const opt = document.createElement('option');
+        opt.value = f.name;
+        opt.text = f.name;
+        sel.appendChild(opt);
+      });
+      sel.selectedIndex = files.length - 1; // most recent
+      loadGraph();
+    } catch (e) {
+      status.innerText = 'Failed to list log files: ' + e.message;
+    }
+  }
+
+  async function loadGraph() {
+    const sel = document.getElementById('fileSelect');
+    const status = document.getElementById('status');
+    if (!sel.value) return;
+    status.innerText = 'Loading...';
+    try {
+      const res = await fetch('/api/logs/graph?file=' + encodeURIComponent(sel.value));
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = parseCSV(await res.text());
+      status.innerText = data.labels.length + ' points shown (downsampled for display).';
+
+      const vChart = darkChart('chartV', [
+        { label: 'Pack V', data: data.packV, borderColor: '#4caf50', yAxisID: 'yV', pointRadius: 0 },
+        { label: 'SOC %', data: data.soc, borderColor: '#ff9800', yAxisID: 'ySoc', pointRadius: 0 }
+      ], {
+        yV: { position: 'left', ticks: { color: '#4caf50' }, grid: { color: '#222' } },
+        ySoc: { position: 'right', min: 0, max: 100, ticks: { color: '#ff9800' }, grid: { drawOnChartArea: false } }
+      });
+      vChart.data.labels = data.labels; vChart.update();
+
+      const iChart = darkChart('chartI', [
+        { label: 'Pack Current (A)', data: data.packI, borderColor: '#2196F3', yAxisID: 'yI', pointRadius: 0 },
+        { label: 'Requested Current (A)', data: data.reqI, borderColor: '#9c27b0', yAxisID: 'yI', pointRadius: 0 }
+      ], {
+        yI: { position: 'left', ticks: { color: '#ccc' }, grid: { color: '#222' } }
+      });
+      iChart.data.labels = data.labels; iChart.update();
+
+      const cChart = darkChart('chartCell', [
+        { label: 'Min Cell V', data: data.minC, borderColor: '#2196F3', yAxisID: 'yC', pointRadius: 0 },
+        { label: 'Max Cell V', data: data.maxC, borderColor: '#f44336', yAxisID: 'yC', pointRadius: 0 }
+      ], {
+        yC: { position: 'left', ticks: { color: '#ccc' }, grid: { color: '#222' } }
+      });
+      cChart.data.labels = data.labels; cChart.update();
+    } catch (e) {
+      status.innerText = 'Failed to load graph: ' + e.message;
     }
   }
 

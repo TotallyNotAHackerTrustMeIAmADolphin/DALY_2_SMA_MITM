@@ -291,3 +291,103 @@ bool SDLogger::readTail(const String &fileName, String &outContent, size_t maxBy
     xSemaphoreGive(sdMutex_);
     return ok;
 }
+
+namespace
+{
+    // Returns the idx'th comma-separated field of line (0-based), or "" past the end.
+    String csvField(const String &line, int idx)
+    {
+        int start = 0;
+        for (int i = 0; i < idx; i++)
+        {
+            int comma = line.indexOf(',', start);
+            if (comma < 0)
+                return "";
+            start = comma + 1;
+        }
+        int comma = line.indexOf(',', start);
+        return comma < 0 ? line.substring(start) : line.substring(start, comma);
+    }
+}
+
+bool SDLogger::readGraphSeries(const String &fileName, size_t targetPoints, String &outCSV)
+{
+    outCSV = "Timestamp,PackV,PackI,SOC,MinCellV,MaxCellV,ReqI\n";
+
+    if (!initialized)
+        return false;
+
+    if (targetPoints == 0)
+        targetPoints = 1;
+    if (targetPoints > 2000)
+        targetPoints = 2000; // keep worst-case output bounded regardless of caller
+
+    if (xSemaphoreTake(sdMutex_, pdMS_TO_TICKS(2000)) != pdTRUE)
+        return false;
+
+    String path = "/" + fileName;
+    bool ok = false;
+
+    // Pass 1: count data rows (total newlines, minus the header line) so we
+    // can pick a skip interval - a plain byte scan, no line objects allocated.
+    size_t totalLines = 0;
+    {
+        File f = SD.open(path, FILE_READ);
+        if (f)
+        {
+            uint8_t buf[512];
+            int n;
+            while ((n = f.read(buf, sizeof(buf))) > 0)
+            {
+                for (int i = 0; i < n; i++)
+                {
+                    if (buf[i] == '\n')
+                        totalLines++;
+                }
+            }
+            f.close();
+            if (totalLines > 0)
+                totalLines--; // header line
+            ok = true;
+        }
+    }
+
+    // Pass 2: re-read, keeping every Nth data row, extracting only the
+    // columns needed for graphing.
+    if (ok)
+    {
+        size_t skip = (totalLines > targetPoints) ? (totalLines / targetPoints) : 1;
+
+        File f = SD.open(path, FILE_READ);
+        if (f)
+        {
+            outCSV.reserve(outCSV.length() + (targetPoints + 1) * 60);
+            f.readStringUntil('\n'); // header
+
+            size_t lineIdx = 0;
+            while (f.available())
+            {
+                String line = f.readStringUntil('\n');
+                if (line.length() == 0)
+                    continue;
+
+                if (lineIdx % skip == 0)
+                {
+                    outCSV += csvField(line, 0) + "," + csvField(line, 1) + "," +
+                              csvField(line, 2) + "," + csvField(line, 3) + "," +
+                              csvField(line, 4) + "," + csvField(line, 5) + "," +
+                              csvField(line, 6) + "\n";
+                }
+                lineIdx++;
+            }
+            f.close();
+        }
+        else
+        {
+            ok = false;
+        }
+    }
+
+    xSemaphoreGive(sdMutex_);
+    return ok;
+}

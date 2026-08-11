@@ -34,6 +34,13 @@ public:
     // can't be opened.
     static bool readTail(const String &fileName, String &outContent, size_t maxBytes = 65536);
 
+    // Decimates a telemetry CSV (bare name, must be one returned by
+    // listLogFiles) down to at most targetPoints rows, keeping only the
+    // columns needed for graphing (Timestamp,PackV,PackI,SOC,MinCellV,
+    // MaxCellV,ReqI), so the output stays small regardless of the source
+    // file's size. Returns false if the file can't be opened.
+    static bool readGraphSeries(const String &fileName, size_t targetPoints, String &outCSV);
+
     // Guards all direct (non-queued) SD/SPI access. Held briefly by the
     // writer task around each file write, and by web-route handlers around
     // each read.

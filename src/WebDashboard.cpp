@@ -240,4 +240,25 @@ void WebDashboard::setupRoutes()
         request->onDisconnect([mtx]() { xSemaphoreGive(mtx); });
 
         request->send(SD, "/" + name, contentTypeForLogFile(name), true /* download */); });
+
+    _server.on("/graphs", HTTP_GET, [](AsyncWebServerRequest *request)
+               { request->send(200, "text/html", graphs_html); });
+
+    _server.on("/api/logs/graph", HTTP_GET, [](AsyncWebServerRequest *request)
+               {
+        String name; uint32_t size;
+        if (!findLogFile(request, name, size)) return;
+
+        if (!name.endsWith(".csv")) {
+            request->send(400, "text/plain", "Not a telemetry CSV file");
+            return;
+        }
+
+        String csv;
+        if (!SDLogger::readGraphSeries(name, 600, csv)) {
+            request->send(500, "text/plain", "Failed to read file");
+            return;
+        }
+
+        request->send(200, "text/csv", csv); });
 }

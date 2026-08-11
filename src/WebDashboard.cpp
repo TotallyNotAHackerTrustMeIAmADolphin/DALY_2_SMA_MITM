@@ -1,6 +1,7 @@
 #include "WebDashboard.h"
 #include "WebPages.h"
 #include "SDLogger.h"
+#include <SD.h>
 
 WebDashboard::WebDashboard(uint16_t port)
     : _server(port), _events("/events"), _actionCb(nullptr), _cfg(nullptr) {}
@@ -116,6 +117,40 @@ void WebDashboard::saveConfig(AsyncWebServerRequest *request)
     request->redirect("/");
 }
 
+bool WebDashboard::findLogFile(AsyncWebServerRequest *request, String &outName, uint32_t &outSize)
+{
+    if (!request->hasParam("file"))
+    {
+        request->send(400, "text/plain", "Missing file parameter");
+        return false;
+    }
+    String requested = request->getParam("file")->value();
+
+    // Only match names we actually listed ourselves - this doubles as the
+    // path-traversal guard, since our filenames never contain '/' or '..'.
+    std::vector<String> names;
+    std::vector<uint32_t> sizes;
+    SDLogger::listLogFiles(names, sizes);
+
+    for (size_t i = 0; i < names.size(); i++)
+    {
+        if (names[i] == requested)
+        {
+            outName = names[i];
+            outSize = sizes[i];
+            return true;
+        }
+    }
+
+    request->send(404, "text/plain", "Unknown log file");
+    return false;
+}
+
+const char *WebDashboard::contentTypeForLogFile(const String &name)
+{
+    return name.endsWith(".csv") ? "text/csv" : "text/plain";
+}
+
 void WebDashboard::setupRoutes()
 {
     _server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
@@ -172,37 +207,37 @@ void WebDashboard::setupRoutes()
 
     _server.on("/api/logs/content", HTTP_GET, [](AsyncWebServerRequest *request)
                {
-        if (!request->hasParam("file")) {
-            request->send(400, "text/plain", "Missing file parameter");
-            return;
-        }
-        String requested = request->getParam("file")->value();
-
-        // Only serve names we actually listed ourselves - this doubles as the
-        // path-traversal guard, since our filenames never contain '/' or '..'.
-        std::vector<String> names;
-        std::vector<uint32_t> sizes;
-        SDLogger::listLogFiles(names, sizes);
-
-        int idx = -1;
-        for (size_t i = 0; i < names.size(); i++) {
-            if (names[i] == requested) { idx = (int)i; break; }
-        }
-        if (idx < 0) {
-            request->send(404, "text/plain", "Unknown log file");
-            return;
-        }
+        String name; uint32_t size;
+        if (!findLogFile(request, name, size)) return;
 
         const size_t maxBytes = 65536;
         String content;
-        if (!SDLogger::readTail(requested, content, maxBytes)) {
+        if (!SDLogger::readTail(name, content, maxBytes)) {
             request->send(500, "text/plain", "Failed to read file");
             return;
         }
 
         AsyncWebServerResponse *response = request->beginResponse(200, "text/plain", content);
-        if (sizes[idx] > maxBytes) {
+        if (size > maxBytes) {
             response->addHeader("X-Truncated", "1");
         }
         request->send(response); });
+
+    _server.on("/api/logs/download", HTTP_GET, [](AsyncWebServerRequest *request)
+               {
+        String name; uint32_t size;
+        if (!findLogFile(request, name, size)) return;
+
+        SemaphoreHandle_t mtx = SDLogger::sdMutex();
+        if (!mtx || xSemaphoreTake(mtx, pdMS_TO_TICKS(2000)) != pdTRUE) {
+            request->send(503, "text/plain", "SD card busy, try again");
+            return;
+        }
+
+        // Released exactly once when this connection closes (completion or
+        // abort) - this library always closes file-response connections
+        // (no keep-alive), so onDisconnect is a reliable single release point.
+        request->onDisconnect([mtx]() { xSemaphoreGive(mtx); });
+
+        request->send(SD, "/" + name, contentTypeForLogFile(name), true /* download */); });
 }

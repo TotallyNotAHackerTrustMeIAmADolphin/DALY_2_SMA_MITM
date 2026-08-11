@@ -167,6 +167,7 @@ const char logs_html[] PROGMEM = R"rawliteral(
   <div class="toolbar">
     <select id="fileSelect"></select>
     <button class="btn" onclick="loadFile()">Reload</button>
+    <a id="downloadLink" class="btn" style="text-decoration:none;" href="#" download>Download</a>
   </div>
   <div id="status" class="note"></div>
   <div id="content">Loading file list...</div>
@@ -202,6 +203,7 @@ const char logs_html[] PROGMEM = R"rawliteral(
     const content = document.getElementById('content');
     const status = document.getElementById('status');
     if (!sel.value) return;
+    document.getElementById('downloadLink').href = '/api/logs/download?file=' + encodeURIComponent(sel.value);
     status.innerText = '';
     content.innerText = 'Loading...';
     try {

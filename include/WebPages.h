@@ -251,7 +251,8 @@ const char graphs_html[] PROGMEM = R"rawliteral(
   </div>
   <div id="status" class="note"></div>
 
-  <div class="chart-box"><h3>Pack Voltage &amp; SOC</h3><canvas id="chartV"></canvas></div>
+  <div class="chart-box"><h3>Pack Voltage</h3><canvas id="chartV"></canvas></div>
+  <div class="chart-box"><h3>State of Charge</h3><canvas id="chartSoc"></canvas></div>
   <div class="chart-box"><h3>Pack Current &amp; Requested Current</h3><canvas id="chartI"></canvas></div>
   <div class="chart-box"><h3>Min / Max Cell Voltage</h3><canvas id="chartCell"></canvas></div>
 </div>
@@ -270,7 +271,9 @@ const char graphs_html[] PROGMEM = R"rawliteral(
         scales: Object.assign({
           x: { ticks: { color: '#888', maxTicksLimit: 12 }, grid: { color: '#222' } }
         }, extraScales),
-        plugins: { legend: { labels: { color: '#ccc' } } }
+        // A single series needs no legend box - the chart title already says
+        // what's plotted; only show it once there's more than one series.
+        plugins: { legend: { display: datasets.length > 1, labels: { color: '#ccc' } } }
       }
     });
     return charts[canvasId];
@@ -332,13 +335,18 @@ const char graphs_html[] PROGMEM = R"rawliteral(
       status.innerText = data.labels.length + ' points shown (downsampled for display).';
 
       const vChart = darkChart('chartV', [
-        { label: 'Pack V', data: data.packV, borderColor: '#4caf50', yAxisID: 'yV', pointRadius: 0 },
-        { label: 'SOC %', data: data.soc, borderColor: '#ff9800', yAxisID: 'ySoc', pointRadius: 0 }
+        { label: 'Pack V', data: data.packV, borderColor: '#4caf50', yAxisID: 'yV', pointRadius: 0 }
       ], {
-        yV: { position: 'left', ticks: { color: '#4caf50' }, grid: { color: '#222' } },
-        ySoc: { position: 'right', min: 0, max: 100, ticks: { color: '#ff9800' }, grid: { drawOnChartArea: false } }
+        yV: { position: 'left', ticks: { color: '#4caf50' }, grid: { color: '#222' } }
       });
       vChart.data.labels = data.labels; vChart.update();
+
+      const socChart = darkChart('chartSoc', [
+        { label: 'SOC %', data: data.soc, borderColor: '#ff9800', yAxisID: 'ySoc', pointRadius: 0 }
+      ], {
+        ySoc: { position: 'left', min: 0, max: 100, ticks: { color: '#ff9800' }, grid: { color: '#222' } }
+      });
+      socChart.data.labels = data.labels; socChart.update();
 
       const iChart = darkChart('chartI', [
         { label: 'Pack Current (A)', data: data.packI, borderColor: '#2196F3', yAxisID: 'yI', pointRadius: 0 },

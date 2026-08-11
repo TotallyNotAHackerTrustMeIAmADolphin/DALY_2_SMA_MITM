@@ -2,10 +2,12 @@
 #include <SD.h>
 #include <SPI.h>
 #include <time.h>
+#include <utility>
 #include "pin_config.h"
 
 bool SDLogger::initialized = false;
 QueueHandle_t SDLogger::logQueue = NULL;
+SemaphoreHandle_t SDLogger::sdMutex_ = NULL;
 
 namespace
 {
@@ -46,10 +48,22 @@ bool SDLogger::begin()
         return false;
     }
 
+    sdMutex_ = xSemaphoreCreateMutex();
+    if (sdMutex_ == NULL)
+    {
+        Serial.println("[SD] Failed to create SD mutex");
+        return false;
+    }
+
     xTaskCreatePinnedToCore(loggingTask, "SD_LogTask", 8192, NULL, 1, NULL, 0);
 
     initialized = true;
     return true;
+}
+
+SemaphoreHandle_t SDLogger::sdMutex()
+{
+    return sdMutex_;
 }
 
 void SDLogger::logTelemetry(const DashboardData &data)
@@ -162,6 +176,9 @@ void SDLogger::loggingTask(void *parameter)
             snprintf(timeStr, sizeof(timeStr), "UP:%lu", millis() / 1000);
         }
 
+        if (xSemaphoreTake(sdMutex_, pdMS_TO_TICKS(1000)) != pdTRUE)
+            continue; // a reader is hogging the bus; drop this line rather than stall forever
+
         if (msg.type == 'T')
         {
             String path = currentLogPath(".csv");
@@ -182,5 +199,95 @@ void SDLogger::loggingTask(void *parameter)
                 file.close();
             }
         }
+
+        xSemaphoreGive(sdMutex_);
     }
+}
+
+bool SDLogger::listLogFiles(std::vector<String> &outNames, std::vector<uint32_t> &outSizes)
+{
+    outNames.clear();
+    outSizes.clear();
+
+    if (!initialized)
+        return false;
+
+    if (xSemaphoreTake(sdMutex_, pdMS_TO_TICKS(500)) != pdTRUE)
+        return false;
+
+    File root = SD.open("/");
+    if (root)
+    {
+        File file = root.openNextFile();
+        while (file)
+        {
+            if (!file.isDirectory())
+            {
+                String name = String(file.name());
+                if (name.startsWith("/"))
+                    name.remove(0, 1);
+                if (name.endsWith(".csv") || name.endsWith(".log"))
+                {
+                    outNames.push_back(name);
+                    outSizes.push_back((uint32_t)file.size());
+                }
+            }
+            file = root.openNextFile();
+        }
+        root.close();
+    }
+
+    xSemaphoreGive(sdMutex_);
+
+    // Bubble sort is fine here: at most a few dozen daily files.
+    for (size_t i = 0; i < outNames.size(); i++)
+    {
+        for (size_t j = i + 1; j < outNames.size(); j++)
+        {
+            if (outNames[j] < outNames[i])
+            {
+                std::swap(outNames[i], outNames[j]);
+                std::swap(outSizes[i], outSizes[j]);
+            }
+        }
+    }
+
+    return true;
+}
+
+bool SDLogger::readTail(const String &fileName, String &outContent, size_t maxBytes)
+{
+    outContent = "";
+
+    if (!initialized)
+        return false;
+
+    if (xSemaphoreTake(sdMutex_, pdMS_TO_TICKS(500)) != pdTRUE)
+        return false;
+
+    bool ok = false;
+    File file = SD.open("/" + fileName, FILE_READ);
+    if (file)
+    {
+        size_t size = file.size();
+        if (size > maxBytes)
+        {
+            file.seek(size - maxBytes);
+            // Skip the (likely truncated) first line so content starts cleanly.
+            file.readStringUntil('\n');
+        }
+
+        outContent.reserve(min(size, maxBytes) + 1);
+        uint8_t buf[512];
+        int n;
+        while ((n = file.read(buf, sizeof(buf))) > 0)
+        {
+            outContent.concat((const char *)buf, n);
+        }
+        file.close();
+        ok = true;
+    }
+
+    xSemaphoreGive(sdMutex_);
+    return ok;
 }

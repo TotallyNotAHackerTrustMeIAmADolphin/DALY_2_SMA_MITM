@@ -29,7 +29,7 @@ const char index_html[] PROGMEM = R"rawliteral(
   
   #console { width: 95%; max-width: 1000px; height: 300px; margin: 15px auto; background: #000; color: #00ff00; font-family: monospace; text-align: left; padding: 15px; overflow-y: scroll; border-radius: 8px; border: 1px solid #444; }
 </style></head><body>
-<div class="nav"><a href="/">DASHBOARD</a> | <a href="/config">CONFIGURATION</a></div>
+<div class="nav"><a href="/">DASHBOARD</a> | <a href="/config">CONFIGURATION</a> | <a href="/logs">LOGS</a></div>
 <div class="grid">
   <div class="card"><div>Pack Voltage</div><div id="v" class="value">--</div></div>
   <div class="card"><div>Req. Current</div><div id="reqI" class="value">--</div></div>
@@ -107,6 +107,8 @@ const char config_html[] PROGMEM = R"rawliteral(
 </style></head><body>
 <div class="container">
   <a href="/" style="color:#4caf50;text-decoration:none;">&larr; Back to Dashboard</a>
+  &nbsp;|&nbsp;
+  <a href="/logs" style="color:#4caf50;text-decoration:none;">Logs &rarr;</a>
   <form action="/save" method="GET">
     <h2>Charging Profile (16S)</h2>
     <div class="row"><div class="text-group"><strong>Max Charge Amps</strong><span class="desc">Global bulk charging limit.</span></div>
@@ -147,3 +149,74 @@ const char config_html[] PROGMEM = R"rawliteral(
     <button type="submit" class="save">SAVE & APPLY ALL CHANGES</button>
   </form>
 </div></body></html>)rawliteral";
+
+const char logs_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE HTML><html><head><title>Logs</title><meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body { font-family: sans-serif; background: #121212; color: #eee; padding: 10px; }
+  .container { max-width: 900px; margin: auto; background: #1e1e1e; padding: 25px; border-radius: 12px; border: 1px solid #333; }
+  .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 15px 0; }
+  select { font-size: 1em; padding: 6px; background: #000; color: #0f0; border: 1px solid #444; border-radius: 4px; flex: 1; min-width: 180px; }
+  .btn { border: none; padding: 10px 16px; border-radius: 5px; cursor: pointer; font-weight: bold; color: white; background: #0277bd; }
+  .note { color: #ff9800; font-size: 0.85em; margin: 5px 0; }
+  #content { background: #000; color: #0f0; font-family: monospace; font-size: 0.85em; white-space: pre-wrap; word-break: break-all; padding: 15px; border-radius: 8px; border: 1px solid #444; height: 500px; overflow-y: scroll; }
+</style></head><body>
+<div class="container">
+  <a href="/" style="color:#4caf50;text-decoration:none;">&larr; Back to Dashboard</a>
+  <h2 style="color:#4caf50;">SD Card Logs</h2>
+  <div class="toolbar">
+    <select id="fileSelect"></select>
+    <button class="btn" onclick="loadFile()">Reload</button>
+  </div>
+  <div id="status" class="note"></div>
+  <div id="content">Loading file list...</div>
+</div>
+<script>
+  async function loadList() {
+    const sel = document.getElementById('fileSelect');
+    const status = document.getElementById('status');
+    try {
+      const res = await fetch('/api/logs/list');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const files = await res.json();
+      sel.innerHTML = '';
+      if (!files.length) {
+        document.getElementById('content').innerText = 'No log files found (SD card missing or empty).';
+        return;
+      }
+      files.forEach(f => {
+        const opt = document.createElement('option');
+        opt.value = f.name;
+        opt.text = f.name + ' (' + Math.round(f.size / 1024) + ' KB)';
+        sel.appendChild(opt);
+      });
+      sel.selectedIndex = files.length - 1; // most recent
+      loadFile();
+    } catch (e) {
+      status.innerText = 'Failed to list log files: ' + e.message;
+    }
+  }
+
+  async function loadFile() {
+    const sel = document.getElementById('fileSelect');
+    const content = document.getElementById('content');
+    const status = document.getElementById('status');
+    if (!sel.value) return;
+    status.innerText = '';
+    content.innerText = 'Loading...';
+    try {
+      const res = await fetch('/api/logs/content?file=' + encodeURIComponent(sel.value));
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const text = await res.text();
+      content.innerText = text;
+      content.scrollTop = content.scrollHeight;
+      if (res.headers.get('X-Truncated') === '1') {
+        status.innerText = 'Showing only the most recent portion of this file (it is larger than the view limit). Use Download for the full file.';
+      }
+    } catch (e) {
+      status.innerText = 'Failed to load file: ' + e.message;
+    }
+  }
+
+  loadList();
+</script></body></html>)rawliteral";

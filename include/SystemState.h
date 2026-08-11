@@ -2,6 +2,11 @@
 #include <Arduino.h>
 #include <vector>
 
+// Guards cross-core access to both SystemConfig (cfg) and DashboardData
+// (currentData) - defined in main.cpp, created in setup() before any task
+// that touches either struct is started.
+extern SemaphoreHandle_t dataMutex;
+
 // Holds all NVS saved settings
 struct SystemConfig {
     float maxChargeA;

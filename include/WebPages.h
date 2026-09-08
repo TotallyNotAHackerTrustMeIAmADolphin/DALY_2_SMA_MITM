@@ -1,12 +1,19 @@
 #pragma once
 #include <Arduino.h>
 
+// Single source of truth for the nav bar shared by every page below - each
+// PROGMEM literal splices these in via adjacent string-literal concatenation
+// (a compile-time, zero-runtime-cost operation), so a page can never drift
+// out of sync with the others the way the standalone "Back to Dashboard"
+// links and the once-forgotten body margin:0 did.
+#define NAV_CSS ".nav { background: #1e1e1e; padding: 10px; border-bottom: 2px solid #333; margin-bottom: 10px; text-align: center; } .nav a { color: #4caf50; text-decoration: none; margin: 0 15px; font-weight: bold; }"
+#define NAV_BAR "<div class=\"nav\"><a href=\"/\">DASHBOARD</a> | <a href=\"/config\">CONFIGURATION</a> | <a href=\"/logs\">LOGS</a> | <a href=\"/graphs\">GRAPHS</a></div>"
+
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML><html><head><title>BMS Bridge Pro</title><meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
   body { font-family: sans-serif; text-align: center; background: #121212; color: #e0e0e0; margin: 0; }
-  .nav { background: #1e1e1e; padding: 10px; border-bottom: 2px solid #333; margin-bottom: 10px; }
-  .nav a { color: #4caf50; text-decoration: none; margin: 0 15px; font-weight: bold; }
+  )rawliteral" NAV_CSS R"rawliteral(
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; padding: 15px; }
   .card { background: #1e1e1e; padding: 15px; border-radius: 10px; border: 1px solid #333; }
   .value { font-size: 2em; font-weight: bold; color: #4caf50; }
@@ -29,7 +36,7 @@ const char index_html[] PROGMEM = R"rawliteral(
   
   #console { width: 95%; max-width: 1000px; height: 300px; margin: 15px auto; background: #000; color: #00ff00; font-family: monospace; text-align: left; padding: 15px; overflow-y: scroll; border-radius: 8px; border: 1px solid #444; }
 </style></head><body>
-<div class="nav"><a href="/">DASHBOARD</a> | <a href="/config">CONFIGURATION</a> | <a href="/logs">LOGS</a></div>
+)rawliteral" NAV_BAR R"rawliteral(
 <div class="grid">
   <div class="card"><div>Pack Voltage</div><div id="v" class="value">--</div></div>
   <div class="card"><div>Req. Current</div><div id="reqI" class="value">--</div></div>
@@ -48,8 +55,28 @@ const char index_html[] PROGMEM = R"rawliteral(
   <a href="/toggleMaint" class="btn btn-blue" id="mbtn">TRIGGER FORCE CHARGE</a>
   <button class="btn btn-red" onclick="if(confirm('Simulate battery disconnect?')) fetch('/resetSMA')">CLEAR SMA ERROR (Reset)</button>
 </div>
-<div id="console">Log Active...<br></div>
+<div id="console">Loading history...<br></div>
 <script>
+  const con = document.getElementById('console');
+
+  // Seed the console with the tail of today's SD .log file on load, so it
+  // shows recent history instead of only events that happen to fire after
+  // this tab connects (the SSE 'log' channel has no replay/backlog).
+  async function loadRecentLog() {
+    try {
+      const files = (await (await fetch('/api/logs/list')).json()).filter(f => f.name.endsWith('.log'));
+      if (!files.length) { con.innerHTML = 'Log Active... (no SD log file yet)<br>'; return; }
+      const latest = files[files.length - 1].name; // listLogFiles sorts ascending -> last = newest
+      const text = await (await fetch('/api/logs/content?file=' + encodeURIComponent(latest))).text();
+      const lines = text.split('\n').filter(l => l.length > 0).slice(-100);
+      con.innerHTML = (lines.length ? lines.join('<br>') + '<br>' : '') + '--- live ---<br>';
+      con.scrollTop = con.scrollHeight;
+    } catch (e) {
+      con.innerHTML = 'Log Active... (failed to load SD history: ' + e.message + ')<br>';
+    }
+  }
+  loadRecentLog();
+
   var source = new EventSource('/events');
   source.addEventListener('data', function(e) {
     var obj = JSON.parse(e.data);
@@ -86,7 +113,7 @@ const char index_html[] PROGMEM = R"rawliteral(
     }
   }, false);
   source.addEventListener('log', function(e) {
-    const con = document.getElementById('console'); con.innerHTML += e.data + "<br>";
+    con.innerHTML += e.data + "<br>";
     if(con.childNodes.length > 100) con.removeChild(con.firstChild);
     con.scrollTop = con.scrollHeight;
   }, false);
@@ -95,7 +122,8 @@ const char index_html[] PROGMEM = R"rawliteral(
 const char config_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML><html><head><title>Settings</title><meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-  body { font-family: sans-serif; background: #121212; color: #eee; padding: 10px; }
+  body { font-family: sans-serif; background: #121212; color: #eee; margin: 0; padding: 0; }
+  )rawliteral" NAV_CSS R"rawliteral(
   .container { max-width: 650px; margin: auto; background: #1e1e1e; padding: 25px; border-radius: 12px; border: 1px solid #333; }
   .row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 1px solid #2a2a2a; padding-bottom: 8px; }
   .text-group { text-align: left; padding-right: 15px; }
@@ -105,10 +133,8 @@ const char config_html[] PROGMEM = R"rawliteral(
   input { font-size: 1.1em; padding: 5px; width: 110px; text-align: center; background: #000; color: #0f0; border: 1px solid #444; border-radius: 4px; }
   .save { background: #2e7d32; color: white; border: none; padding: 15px; width: 100%; border-radius: 5px; font-weight: bold; cursor: pointer; font-size: 1.1em; margin-top: 20px; }
 </style></head><body>
+)rawliteral" NAV_BAR R"rawliteral(
 <div class="container">
-  <a href="/" style="color:#4caf50;text-decoration:none;">&larr; Back to Dashboard</a>
-  &nbsp;|&nbsp;
-  <a href="/logs" style="color:#4caf50;text-decoration:none;">Logs &rarr;</a>
   <form action="/save" method="GET">
     <h2>Charging Profile (16S)</h2>
     <div class="row"><div class="text-group"><strong>Max Charge Amps</strong><span class="desc">Global bulk charging limit.</span></div>
@@ -153,7 +179,8 @@ const char config_html[] PROGMEM = R"rawliteral(
 const char logs_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML><html><head><title>Logs</title><meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-  body { font-family: sans-serif; background: #121212; color: #eee; padding: 10px; }
+  body { font-family: sans-serif; background: #121212; color: #eee; margin: 0; padding: 0; }
+  )rawliteral" NAV_CSS R"rawliteral(
   .container { max-width: 900px; margin: auto; background: #1e1e1e; padding: 25px; border-radius: 12px; border: 1px solid #333; }
   .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 15px 0; }
   select { font-size: 1em; padding: 6px; background: #000; color: #0f0; border: 1px solid #444; border-radius: 4px; flex: 1; min-width: 180px; }
@@ -161,8 +188,8 @@ const char logs_html[] PROGMEM = R"rawliteral(
   .note { color: #ff9800; font-size: 0.85em; margin: 5px 0; }
   #content { background: #000; color: #0f0; font-family: monospace; font-size: 0.85em; white-space: pre-wrap; word-break: break-all; padding: 15px; border-radius: 8px; border: 1px solid #444; height: 500px; overflow-y: scroll; }
 </style></head><body>
+)rawliteral" NAV_BAR R"rawliteral(
 <div class="container">
-  <a href="/" style="color:#4caf50;text-decoration:none;">&larr; Back to Dashboard</a>
   <h2 style="color:#4caf50;">SD Card Logs</h2>
   <div class="toolbar">
     <select id="fileSelect"></select>
@@ -217,6 +244,151 @@ const char logs_html[] PROGMEM = R"rawliteral(
       }
     } catch (e) {
       status.innerText = 'Failed to load file: ' + e.message;
+    }
+  }
+
+  loadList();
+</script></body></html>)rawliteral";
+
+const char graphs_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE HTML><html><head><title>Graphs</title><meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+  body { font-family: sans-serif; background: #121212; color: #eee; margin: 0; padding: 0; }
+  )rawliteral" NAV_CSS R"rawliteral(
+  .container { max-width: 900px; margin: auto; background: #1e1e1e; padding: 25px; border-radius: 12px; border: 1px solid #333; }
+  .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 15px 0; }
+  select { font-size: 1em; padding: 6px; background: #000; color: #0f0; border: 1px solid #444; border-radius: 4px; flex: 1; min-width: 180px; }
+  .btn { border: none; padding: 10px 16px; border-radius: 5px; cursor: pointer; font-weight: bold; color: white; background: #0277bd; }
+  .note { color: #ff9800; font-size: 0.85em; margin: 5px 0; }
+  .chart-box { background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 10px; margin: 15px 0; }
+  h3 { color: #4caf50; margin: 5px 0 10px 0; font-size: 1em; }
+</style></head><body>
+)rawliteral" NAV_BAR R"rawliteral(
+<div class="container">
+  <h2 style="color:#4caf50;">Trend Graphs</h2>
+  <div class="toolbar">
+    <select id="fileSelect"></select>
+    <button class="btn" onclick="loadGraph()">Reload</button>
+    <a id="downloadLink" class="btn" style="text-decoration:none;" href="#" download>Download</a>
+  </div>
+  <div id="status" class="note"></div>
+
+  <div class="chart-box"><h3>Pack Voltage</h3><canvas id="chartV"></canvas></div>
+  <div class="chart-box"><h3>State of Charge</h3><canvas id="chartSoc"></canvas></div>
+  <div class="chart-box"><h3>Pack Current &amp; Requested Current</h3><canvas id="chartI"></canvas></div>
+  <div class="chart-box"><h3>Min / Max Cell Voltage</h3><canvas id="chartCell"></canvas></div>
+</div>
+<script>
+  let charts = {};
+
+  function darkChart(canvasId, datasets, extraScales) {
+    const ctx = document.getElementById(canvasId).getContext('2d');
+    if (charts[canvasId]) charts[canvasId].destroy();
+    charts[canvasId] = new Chart(ctx, {
+      type: 'line',
+      data: { labels: [], datasets: datasets },
+      options: {
+        animation: false,
+        interaction: { mode: 'index', intersect: false },
+        scales: Object.assign({
+          x: { ticks: { color: '#888', maxTicksLimit: 12 }, grid: { color: '#222' } }
+        }, extraScales),
+        // A single series needs no legend box - the chart title already says
+        // what's plotted; only show it once there's more than one series.
+        plugins: { legend: { display: datasets.length > 1, labels: { color: '#ccc' } } }
+      }
+    });
+    return charts[canvasId];
+  }
+
+  function parseCSV(text) {
+    const lines = text.trim().split('\n');
+    lines.shift(); // header
+    const labels = [], packV = [], soc = [], packI = [], reqI = [], minC = [], maxC = [];
+    lines.forEach(line => {
+      const c = line.split(',');
+      if (c.length < 7) return;
+      const t = c[0];
+      labels.push(t.includes(' ') ? t.split(' ')[1] : t);
+      packV.push(parseFloat(c[1]));
+      packI.push(parseFloat(c[2]));
+      soc.push(parseFloat(c[3]));
+      minC.push(parseFloat(c[4]));
+      maxC.push(parseFloat(c[5]));
+      reqI.push(parseFloat(c[6]));
+    });
+    return { labels, packV, soc, packI, reqI, minC, maxC };
+  }
+
+  async function loadList() {
+    const sel = document.getElementById('fileSelect');
+    const status = document.getElementById('status');
+    try {
+      const res = await fetch('/api/logs/list');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const files = (await res.json()).filter(f => f.name.endsWith('.csv'));
+      sel.innerHTML = '';
+      if (!files.length) {
+        status.innerText = 'No telemetry CSV files found (SD card missing or empty).';
+        return;
+      }
+      files.forEach(f => {
+        const opt = document.createElement('option');
+        opt.value = f.name;
+        opt.text = f.name;
+        sel.appendChild(opt);
+      });
+      sel.selectedIndex = files.length - 1; // most recent
+      loadGraph();
+    } catch (e) {
+      status.innerText = 'Failed to list log files: ' + e.message;
+    }
+  }
+
+  async function loadGraph() {
+    const sel = document.getElementById('fileSelect');
+    const status = document.getElementById('status');
+    if (!sel.value) return;
+    document.getElementById('downloadLink').href = '/api/logs/download?file=' + encodeURIComponent(sel.value);
+    status.innerText = 'Loading...';
+    try {
+      const res = await fetch('/api/logs/graph?file=' + encodeURIComponent(sel.value));
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = parseCSV(await res.text());
+      status.innerText = data.labels.length + ' points shown (downsampled for display).';
+
+      const vChart = darkChart('chartV', [
+        { label: 'Pack V', data: data.packV, borderColor: '#4caf50', yAxisID: 'yV', pointRadius: 0 }
+      ], {
+        yV: { position: 'left', ticks: { color: '#4caf50' }, grid: { color: '#222' } }
+      });
+      vChart.data.labels = data.labels; vChart.update();
+
+      const socChart = darkChart('chartSoc', [
+        { label: 'SOC %', data: data.soc, borderColor: '#ff9800', yAxisID: 'ySoc', pointRadius: 0 }
+      ], {
+        ySoc: { position: 'left', min: 0, max: 100, ticks: { color: '#ff9800' }, grid: { color: '#222' } }
+      });
+      socChart.data.labels = data.labels; socChart.update();
+
+      const iChart = darkChart('chartI', [
+        { label: 'Pack Current (A)', data: data.packI, borderColor: '#2196F3', yAxisID: 'yI', pointRadius: 0 },
+        { label: 'Requested Current (A)', data: data.reqI, borderColor: '#9c27b0', yAxisID: 'yI', pointRadius: 0 }
+      ], {
+        yI: { position: 'left', ticks: { color: '#ccc' }, grid: { color: '#222' } }
+      });
+      iChart.data.labels = data.labels; iChart.update();
+
+      const cChart = darkChart('chartCell', [
+        { label: 'Min Cell V', data: data.minC, borderColor: '#2196F3', yAxisID: 'yC', pointRadius: 0 },
+        { label: 'Max Cell V', data: data.maxC, borderColor: '#f44336', yAxisID: 'yC', pointRadius: 0 }
+      ], {
+        yC: { position: 'left', ticks: { color: '#ccc' }, grid: { color: '#222' } }
+      });
+      cChart.data.labels = data.labels; cChart.update();
+    } catch (e) {
+      status.innerText = 'Failed to load graph: ' + e.message;
     }
   }
 

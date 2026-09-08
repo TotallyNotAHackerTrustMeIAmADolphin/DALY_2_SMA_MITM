@@ -237,6 +237,73 @@ void bmsTask(void *pvParameters)
       }
     }
 
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    // BMS's own hardware protection state - polled at the same 2s cadence
+    // as the rest of this loop. Edge-triggered logging only (not every
+    // poll) so a stuck-on alarm doesn't spam the log queue; this is what
+    // lets a future SMA "battery voltage out of range" fault be lined up
+    // against the BMS's own MOSFET/alarm timeline to the second.
+    static bool lastChargeMosOn = true;
+    static bool lastDischargeMosOn = true;
+    static bool lastCellOV1 = false, lastCellOV2 = false;
+    static bool lastPackOV1 = false, lastPackOV2 = false;
+    static bool haveMosfetBaseline = false;
+    static bool haveAlarmBaseline = false;
+
+    DalyMosfetStatus mosStatus;
+    if (bms.readMosfetStatus(mosStatus))
+    {
+      if (haveMosfetBaseline)
+      {
+        if (mosStatus.chargeMosOn != lastChargeMosOn)
+          netLog("[BMS] Charge MOSFET %s\n", mosStatus.chargeMosOn ? "ON" : "OFF - protection or BMS-initiated cutoff");
+        if (mosStatus.dischargeMosOn != lastDischargeMosOn)
+          netLog("[BMS] Discharge MOSFET %s\n", mosStatus.dischargeMosOn ? "ON" : "OFF - protection or BMS-initiated cutoff");
+      }
+      lastChargeMosOn = mosStatus.chargeMosOn;
+      lastDischargeMosOn = mosStatus.dischargeMosOn;
+      haveMosfetBaseline = true;
+
+      if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        currentData.chargeMosOn = mosStatus.chargeMosOn;
+        currentData.dischargeMosOn = mosStatus.dischargeMosOn;
+        xSemaphoreGive(dataMutex);
+      }
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    DalyAlarmStatus alarmStatus;
+    if (bms.readAlarmStatus(alarmStatus))
+    {
+      if (haveAlarmBaseline)
+      {
+        if (alarmStatus.cellOvervoltLevel1 != lastCellOV1)
+          netLog("[BMS] Alarm: Cell overvoltage Level 1 %s\n", alarmStatus.cellOvervoltLevel1 ? "SET" : "CLEARED");
+        if (alarmStatus.cellOvervoltLevel2 != lastCellOV2)
+          netLog("[BMS] Alarm: Cell overvoltage Level 2 %s\n", alarmStatus.cellOvervoltLevel2 ? "SET" : "CLEARED");
+        if (alarmStatus.packOvervoltLevel1 != lastPackOV1)
+          netLog("[BMS] Alarm: Pack overvoltage Level 1 %s\n", alarmStatus.packOvervoltLevel1 ? "SET" : "CLEARED");
+        if (alarmStatus.packOvervoltLevel2 != lastPackOV2)
+          netLog("[BMS] Alarm: Pack overvoltage Level 2 %s\n", alarmStatus.packOvervoltLevel2 ? "SET" : "CLEARED");
+      }
+      lastCellOV1 = alarmStatus.cellOvervoltLevel1;
+      lastCellOV2 = alarmStatus.cellOvervoltLevel2;
+      lastPackOV1 = alarmStatus.packOvervoltLevel1;
+      lastPackOV2 = alarmStatus.packOvervoltLevel2;
+      haveAlarmBaseline = true;
+
+      if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        currentData.bmsProtectionActive = alarmStatus.anyProtectionActive;
+        currentData.cellOvervoltLevel1 = alarmStatus.cellOvervoltLevel1;
+        currentData.cellOvervoltLevel2 = alarmStatus.cellOvervoltLevel2;
+        currentData.packOvervoltLevel1 = alarmStatus.packOvervoltLevel1;
+        currentData.packOvervoltLevel2 = alarmStatus.packOvervoltLevel2;
+        xSemaphoreGive(dataMutex);
+      }
+    }
+
     vTaskDelay(pdMS_TO_TICKS(2000));
   }
 }
@@ -295,6 +362,7 @@ void setup()
   webUI.setActionCallback(handleUIAction);
   webUI.begin(cfg);
 
+  SDLogger::setDebugCallback(libraryLogger);
   if (SDLogger::begin()) {
     netLog("[SYS] SD card logging initialized.\n");
   } else {

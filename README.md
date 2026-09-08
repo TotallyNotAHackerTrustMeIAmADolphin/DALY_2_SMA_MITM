@@ -20,6 +20,7 @@ Built for the **LilyGO T-CAN485** board, this firmware utilizes true FreeRTOS mu
 *   **❄️ Winter Maintenance Mode:** Automatically detects dangerously low cell voltages during dark winter weeks and spoofs a 2% SOC to force the SMA Sunny Island to pull from the grid.
 *   **🛡️ "Nuclear" Bus-Off Recovery:** Includes deep ESP-IDF workarounds. If the CAN cable is unplugged, the system gracefully suspends the driver instead of crashing, and auto-recovers the second the cable is reattached.
 *   **📡 Remote Telnet Logging:** Stream live diagnostic data and state changes directly to your terminal.
+*   **💾 SD Card Logging & Graphs:** Every telemetry sample and system event is written to a daily-rotated CSV/log file on an onboard microSD card. Browse and view historical logs, download a full file, or chart Pack Voltage, SOC, Current, and Cell Voltage trends over time, all from the web UI.
 
 ---
 
@@ -28,6 +29,7 @@ Built for the **LilyGO T-CAN485** board, this firmware utilizes true FreeRTOS mu
 1.  **Microcontroller:** [LilyGO T-CAN485](https://github.com/Xinyuan-LilyGO/T-CAN485) (ESP32 WROVER/WROOM based).
 2.  **Inverter:** SMA Sunny Island (Tested on 8.0H-13 Clusters).
 3.  **Battery/BMS:** Daly Smart BMS with RS485 / UART output.
+4.  **Storage (optional):** A FAT32-formatted microSD card in the T-CAN485's onboard slot, for telemetry/event logging. No extra wiring — it uses the board's built-in card reader. The bridge runs fine without one; logging is simply unavailable until a card is inserted.
 
 ### 🔌 Wiring Guide
 
@@ -84,6 +86,8 @@ Once booted, navigate to the device's IP address in your web browser (e.g., `htt
 *   **Dashboard Tab:** View live telemetry, the 16-cell grid, and the live SMA Inverter State.
     *   *SMA States:* `INIT`, `STARTUP`, `STANDBY`, `RUNNING`, `EMERGENCY` (Normal during glideslope limiting), `FAULT`.
 *   **Configuration Tab:** Adjust your glideslope voltage targets and current limits. Hitting "Save" instantly updates the running math and writes the values to the ESP32's non-volatile storage (NVS).
+*   **Logs Tab:** Lists every daily CSV/log file on the SD card. Pick one to view its recent content in-browser (capped at the last ~64KB so it stays fast on a big file), or hit Download to save the complete file.
+*   **Graphs Tab:** Pick a day's CSV file to chart Pack Voltage, State of Charge, Pack/Requested Current, and Min/Max Cell Voltage over that day — decimated server-side to a fixed number of points so it loads quickly regardless of file size.
 
 ---
 

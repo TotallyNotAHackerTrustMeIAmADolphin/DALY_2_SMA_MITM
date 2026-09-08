@@ -164,7 +164,7 @@ const char config_html[] PROGMEM = R"rawliteral(
     <div class="row"><div class="text-group"><strong>Target Limp Vpc</strong><span class="desc">Entry point for keeping-alive mode.</span></div>
       <input type="number" name="clag" step="0.001" value="!!VAL_LAG!!"></div>
     <div class="row"><div class="text-group"><strong>Limp Amps</strong><span class="desc">Minimum keeping-alive current floor.</span></div>
-      <input type="number" name="ld" step="1" value="!!VAL_LIMP!!"></div>
+      <input type="number" name="ld_v2" step="1" value="!!VAL_LIMP!!"></div>
     <div class="row"><div class="text-group"><strong>Min Discharge Vpc</strong><span class="desc">Absolute floor to prevent cell reversal.</span></div>
       <input type="number" name="cmdv" step="0.001" value="!!VAL_MDV!!"></div>
 

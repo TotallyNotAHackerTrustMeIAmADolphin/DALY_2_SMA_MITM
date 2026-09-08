@@ -191,7 +191,12 @@ void bmsTask(void *pvParameters)
       std::vector<float> smoothedCellVolts;
       smoothedCellVolts.reserve(MAX_CELLS);
 
-      int windowSize = max(1, min(MAX_SAMPLES, cfg.vSamples));
+      static int lastKnownVSamples = 12; // falls back to this if the lock is briefly contended
+      if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+        lastKnownVSamples = cfg.vSamples;
+        xSemaphoreGive(dataMutex);
+      }
+      int windowSize = max(1, min(MAX_SAMPLES, lastKnownVSamples));
 
       for (int i = 0; i < (int)cellVolts.size() && i < MAX_CELLS; i++)
       {

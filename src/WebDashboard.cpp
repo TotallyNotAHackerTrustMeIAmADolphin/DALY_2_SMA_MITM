@@ -55,6 +55,8 @@ void WebDashboard::broadcastTelemetry(const DashboardData &data)
 
 void WebDashboard::loadConfig()
 {
+    // No dataMutex needed here: this runs once from setup(), before bmsTask
+    // or loop() exist, so there is no concurrent reader yet.
     _prefs.begin("bms-bridge", false);
 
     // Read from NVS or set defaults
@@ -79,6 +81,17 @@ void WebDashboard::loadConfig()
 
 void WebDashboard::saveConfig(AsyncWebServerRequest *request)
 {
+    // calculateCCL()/calculateDCL() in main.cpp's loop() read these same
+    // _cfg fields while holding dataMutex. Taking the same mutex here makes
+    // the whole set of field updates atomic from loop()'s point of view,
+    // instead of a reader potentially seeing a mix of old and new setpoints
+    // mid-save.
+    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(300)) != pdTRUE)
+    {
+        request->send(503, "text/plain", "Device busy, please try Save again");
+        return;
+    }
+
     _prefs.begin("bms-bridge", false);
 
     auto saveFloat = [&](const char *param, float &val)
@@ -111,6 +124,7 @@ void WebDashboard::saveConfig(AsyncWebServerRequest *request)
     }
 
     _prefs.end();
+    xSemaphoreGive(dataMutex);
 
     if (_actionCb)
         _actionCb("configSaved");

@@ -21,6 +21,7 @@ Built for the **LilyGO T-CAN485** board, this firmware utilizes true FreeRTOS mu
 *   **🛡️ "Nuclear" Bus-Off Recovery:** Includes deep ESP-IDF workarounds. If the CAN cable is unplugged, the system gracefully suspends the driver instead of crashing, and auto-recovers the second the cable is reattached.
 *   **📡 Remote Telnet Logging:** Stream live diagnostic data and state changes directly to your terminal.
 *   **💾 SD Card Logging & Graphs:** Every telemetry sample and system event is written to a daily-rotated CSV/log file on an onboard microSD card. Browse and view historical logs, download a full file, or chart Pack Voltage, SOC, Current, and Cell Voltage trends over time, all from the web UI.
+*   **🩺 BMS Protection Visibility:** Polls the Daly BMS's own hardware protection state (charge/discharge MOSFET on/off, cell/pack overvoltage alarm bits) independently of the glideslope math, and logs it the moment it changes — so if the BMS itself cuts the pack off, you have a timestamped record to line up against the inverter's own event log instead of just inferring it from a voltage glitch.
 
 ---
 
@@ -83,11 +84,13 @@ The exact same math applies in reverse for discharging, using the **Lowest Cell*
 
 Once booted, navigate to the device's IP address in your web browser (e.g., `http://192.168.178.56`).
 
-*   **Dashboard Tab:** View live telemetry, the 16-cell grid, and the live SMA Inverter State.
+All four tabs share the same navigation bar, so every page is reachable from every other page.
+
+*   **Dashboard Tab:** View live telemetry, the 16-cell grid, and the live SMA Inverter State. The live console at the bottom seeds itself with the tail of today's SD `.log` file on load, so a fresh page shows recent history instead of only events that happen to fire after you open it.
     *   *SMA States:* `INIT`, `STARTUP`, `STANDBY`, `RUNNING`, `EMERGENCY` (Normal during glideslope limiting), `FAULT`.
 *   **Configuration Tab:** Adjust your glideslope voltage targets and current limits. Hitting "Save" instantly updates the running math and writes the values to the ESP32's non-volatile storage (NVS).
 *   **Logs Tab:** Lists every daily CSV/log file on the SD card. Pick one to view its recent content in-browser (capped at the last ~64KB so it stays fast on a big file), or hit Download to save the complete file.
-*   **Graphs Tab:** Pick a day's CSV file to chart Pack Voltage, State of Charge, Pack/Requested Current, and Min/Max Cell Voltage over that day — decimated server-side to a fixed number of points so it loads quickly regardless of file size.
+*   **Graphs Tab:** Pick a day's CSV file to chart Pack Voltage, State of Charge, Pack/Requested Current, and Min/Max Cell Voltage over that day — decimated server-side to a fixed number of points so it loads quickly regardless of file size. Hit Download to save that day's complete raw CSV.
 
 ---
 

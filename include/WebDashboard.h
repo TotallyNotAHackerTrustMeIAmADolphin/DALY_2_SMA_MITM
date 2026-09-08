@@ -33,4 +33,13 @@ private:
     void loadConfig();
     void saveConfig(AsyncWebServerRequest *request);
     void setupRoutes();
+
+    // Validates the "file" request param against SDLogger::listLogFiles(). On
+    // success returns true with outName/outSize populated. On failure it sends
+    // the error response itself (400 missing param, 404 unknown file) - callers
+    // just do `if (!findLogFile(request, name, size)) return;`.
+    static bool findLogFile(AsyncWebServerRequest *request, String &outName, uint32_t &outSize);
+
+    // Picks a Content-Type by file extension (.csv -> text/csv, else text/plain).
+    static const char *contentTypeForLogFile(const String &name);
 };

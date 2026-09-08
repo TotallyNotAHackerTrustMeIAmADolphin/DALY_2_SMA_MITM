@@ -48,8 +48,28 @@ const char index_html[] PROGMEM = R"rawliteral(
   <a href="/toggleMaint" class="btn btn-blue" id="mbtn">TRIGGER FORCE CHARGE</a>
   <button class="btn btn-red" onclick="if(confirm('Simulate battery disconnect?')) fetch('/resetSMA')">CLEAR SMA ERROR (Reset)</button>
 </div>
-<div id="console">Log Active...<br></div>
+<div id="console">Loading history...<br></div>
 <script>
+  const con = document.getElementById('console');
+
+  // Seed the console with the tail of today's SD .log file on load, so it
+  // shows recent history instead of only events that happen to fire after
+  // this tab connects (the SSE 'log' channel has no replay/backlog).
+  async function loadRecentLog() {
+    try {
+      const files = (await (await fetch('/api/logs/list')).json()).filter(f => f.name.endsWith('.log'));
+      if (!files.length) { con.innerHTML = 'Log Active... (no SD log file yet)<br>'; return; }
+      const latest = files[files.length - 1].name; // listLogFiles sorts ascending -> last = newest
+      const text = await (await fetch('/api/logs/content?file=' + encodeURIComponent(latest))).text();
+      const lines = text.split('\n').filter(l => l.length > 0).slice(-100);
+      con.innerHTML = (lines.length ? lines.join('<br>') + '<br>' : '') + '--- live ---<br>';
+      con.scrollTop = con.scrollHeight;
+    } catch (e) {
+      con.innerHTML = 'Log Active... (failed to load SD history: ' + e.message + ')<br>';
+    }
+  }
+  loadRecentLog();
+
   var source = new EventSource('/events');
   source.addEventListener('data', function(e) {
     var obj = JSON.parse(e.data);
@@ -86,7 +106,7 @@ const char index_html[] PROGMEM = R"rawliteral(
     }
   }, false);
   source.addEventListener('log', function(e) {
-    const con = document.getElementById('console'); con.innerHTML += e.data + "<br>";
+    con.innerHTML += e.data + "<br>";
     if(con.childNodes.length > 100) con.removeChild(con.firstChild);
     con.scrollTop = con.scrollHeight;
   }, false);

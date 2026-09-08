@@ -115,7 +115,7 @@ const char index_html[] PROGMEM = R"rawliteral(
 const char config_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML><html><head><title>Settings</title><meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-  body { font-family: sans-serif; background: #121212; color: #eee; padding: 0; }
+  body { font-family: sans-serif; background: #121212; color: #eee; margin: 0; padding: 0; }
   .nav { background: #1e1e1e; padding: 10px; border-bottom: 2px solid #333; margin-bottom: 10px; text-align: center; }
   .nav a { color: #4caf50; text-decoration: none; margin: 0 15px; font-weight: bold; }
   .container { max-width: 650px; margin: auto; background: #1e1e1e; padding: 25px; border-radius: 12px; border: 1px solid #333; }
@@ -173,7 +173,7 @@ const char config_html[] PROGMEM = R"rawliteral(
 const char logs_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML><html><head><title>Logs</title><meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-  body { font-family: sans-serif; background: #121212; color: #eee; padding: 0; }
+  body { font-family: sans-serif; background: #121212; color: #eee; margin: 0; padding: 0; }
   .nav { background: #1e1e1e; padding: 10px; border-bottom: 2px solid #333; margin-bottom: 10px; text-align: center; }
   .nav a { color: #4caf50; text-decoration: none; margin: 0 15px; font-weight: bold; }
   .container { max-width: 900px; margin: auto; background: #1e1e1e; padding: 25px; border-radius: 12px; border: 1px solid #333; }
@@ -249,7 +249,7 @@ const char graphs_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML><html><head><title>Graphs</title><meta name="viewport" content="width=device-width, initial-scale=1">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
-  body { font-family: sans-serif; background: #121212; color: #eee; padding: 0; }
+  body { font-family: sans-serif; background: #121212; color: #eee; margin: 0; padding: 0; }
   .nav { background: #1e1e1e; padding: 10px; border-bottom: 2px solid #333; margin-bottom: 10px; text-align: center; }
   .nav a { color: #4caf50; text-decoration: none; margin: 0 15px; font-weight: bold; }
   .container { max-width: 900px; margin: auto; background: #1e1e1e; padding: 25px; border-radius: 12px; border: 1px solid #333; }

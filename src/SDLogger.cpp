@@ -432,12 +432,22 @@ bool SDLogger::readGraphSeries(const String &fileName, size_t targetPoints, Stri
             outCSV.reserve(outCSV.length() + (targetPoints + 1) * 60);
             f.readStringUntil('\n'); // header
 
+            // Bounded by totalLines (from pass 1, over the same mutex-held,
+            // now-immutable file content) as well as f.available() - if
+            // readStringUntil() ever returns without actually advancing the
+            // file position (an EOF/empty-line edge case observed in
+            // practice), f.available() can stay truthy forever and this
+            // would otherwise spin forever while holding sdMutex_, wedging
+            // every other SD route behind it.
             size_t lineIdx = 0;
-            while (f.available())
+            while (f.available() && lineIdx <= totalLines)
             {
                 String line = f.readStringUntil('\n');
                 if (line.length() == 0)
+                {
+                    lineIdx++;
                     continue;
+                }
 
                 if (lineIdx % skip == 0)
                 {

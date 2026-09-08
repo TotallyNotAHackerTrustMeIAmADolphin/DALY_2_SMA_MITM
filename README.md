@@ -86,7 +86,7 @@ All four tabs share the same navigation bar, so every page is reachable from eve
 *   **Dashboard Tab:** View live telemetry, the 16-cell grid, and the live SMA Inverter State. The live console at the bottom seeds itself with the tail of today's SD `.log` file on load, so a fresh page shows recent history instead of only events that happen to fire after you open it.
     *   *SMA States:* `INIT`, `STARTUP`, `STANDBY`, `RUNNING`, `EMERGENCY` (Normal during glideslope limiting), `FAULT`.
 *   **Configuration Tab:** Adjust your glideslope voltage targets and current limits. Hitting "Save" instantly updates the running math and writes the values to the ESP32's non-volatile storage (NVS).
-*   **Logs Tab:** Lists every daily CSV/log file on the SD card. Pick one to view its recent content in-browser (capped at the last ~64KB so it stays fast on a big file), or hit Download to save the complete file.
+*   **Logs Tab:** Lists every daily CSV/log file on the SD card. Pick one to view its recent content in-browser (capped at the last ~8KB so it stays fast on a big file, and reliably fits in memory), or hit Download to save the complete file.
 *   **Graphs Tab:** Pick a day's CSV file to chart Pack Voltage, State of Charge, Pack/Requested Current, and Min/Max Cell Voltage over that day — decimated server-side to a fixed number of points so it loads quickly regardless of file size. Hit Download to save that day's complete raw CSV.
 
 ---

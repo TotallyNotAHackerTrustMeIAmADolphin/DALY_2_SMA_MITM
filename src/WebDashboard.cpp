@@ -231,7 +231,17 @@ void WebDashboard::setupRoutes()
         String name; uint32_t size;
         if (!findLogFile(request, name, size)) return;
 
-        const size_t maxBytes = 65536;
+        // Deliberately conservative, not "as much as fits in RAM": this is
+        // a single contiguous String, copied again internally by
+        // beginResponse(). Live-tested at 64KB with 80KB+ free heap and it
+        // still failed - getMaxAllocHeap() showed only ~43KB was actually
+        // contiguous, so the copy silently produced an empty String (no
+        // error, just content-length: 0) rather than the requested tail.
+        // 8KB stays comfortably under real-world fragmentation on this
+        // device. A chunked/streaming response (like /api/logs/download
+        // already uses) would remove this ceiling entirely if a larger
+        // tail is ever needed.
+        const size_t maxBytes = 8192;
         String content;
         if (!SDLogger::readTail(name, content, maxBytes)) {
             request->send(500, "text/plain", "Failed to read file");
@@ -282,8 +292,15 @@ void WebDashboard::setupRoutes()
             return;
         }
 
+        // 300, not readGraphSeries' own 2000-point ceiling: request->send()
+        // needs this whole CSV as one contiguous String, same as
+        // /api/logs/content - live-tested at 600 points (~42KB) with a
+        // fragmented heap (getMaxAllocHeap() well under that) and it came
+        // back as a silent empty 200 response. 300 points keeps output
+        // small enough to reliably fit, and is still plenty of resolution
+        // for a trend chart at typical browser widths.
         String csv;
-        if (!SDLogger::readGraphSeries(name, 600, csv)) {
+        if (!SDLogger::readGraphSeries(name, 300, csv)) {
             request->send(500, "text/plain", "Failed to read file (it may be too large to graph - try Download instead)");
             return;
         }

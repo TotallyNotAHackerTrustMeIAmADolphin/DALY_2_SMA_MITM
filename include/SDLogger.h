@@ -40,8 +40,13 @@ public:
 
     // Reads up to maxBytes from the end of fileName (bare name, must be one
     // returned by listLogFiles) into outContent. Returns false if the file
-    // can't be opened.
-    static bool readTail(const String &fileName, String &outContent, size_t maxBytes = 65536);
+    // can't be opened. Keep maxBytes modest (a few KB, not tens of KB): the
+    // caller typically copies outContent again into a single contiguous
+    // buffer (e.g. AsyncWebServerResponse) - live-tested with an 80KB+ free
+    // heap that still had no single ~65KB contiguous block, which made that
+    // downstream copy silently produce empty content. 8KB is the current,
+    // deliberately conservative default.
+    static bool readTail(const String &fileName, String &outContent, size_t maxBytes = 8192);
 
     // Decimates a telemetry CSV (bare name, must be one returned by
     // listLogFiles) down to at most targetPoints rows, keeping only the

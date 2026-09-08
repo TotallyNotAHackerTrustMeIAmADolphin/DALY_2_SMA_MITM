@@ -4,6 +4,7 @@
 #include <time.h>
 #include <utility>
 #include "pin_config.h"
+#include "esp_task_wdt.h"
 
 bool SDLogger::initialized = false;
 QueueHandle_t SDLogger::logQueue = NULL;
@@ -322,26 +323,42 @@ bool SDLogger::readTail(const String &fileName, String &outContent, size_t maxBy
     File file = SD.open("/" + fileName, FILE_READ);
     if (file)
     {
-        size_t size = file.size();
-        if (size > maxBytes)
-        {
-            file.seek(size - maxBytes);
-            // Skip the (likely truncated) first line so content starts cleanly.
-            file.readStringUntil('\n');
-        }
-
-        size_t wantBytes = min(size, maxBytes);
-        outContent.reserve(wantBytes + 1);
+        // Read sequentially from the start rather than file.seek()-ing near
+        // the end - live-tested against a file that's been reopened for
+        // FILE_APPEND hundreds of times across many reboots, seek() to an
+        // arbitrary offset near EOF consistently made the following read()
+        // return 0 bytes immediately (empty tail, silently "successful").
+        // Sequential reads from 0 are the one access pattern proven
+        // reliable everywhere else in this file (pass 1/2 below, and the
+        // /api/logs/download route), so use that here too, trimming down to
+        // the last maxBytes as we go instead of seeking there directly.
+        // Reserved once up front (not just left to grow) - concat-then-
+        // remove hundreds of times without a stable reserved capacity
+        // fragments the heap badly enough to make the *caller's* later
+        // allocation (building the HTTP response from this string) fail
+        // silently, even though this function's own final content is
+        // correct - confirmed via serial diagnostics live on-device.
+        outContent.reserve(maxBytes + 600);
         uint8_t buf[512];
         int n;
-        size_t bytesRead = 0;
-        // Bounded by wantBytes in addition to read() returning 0 - see the
-        // matching comment in readGraphSeries() for why a raw read() loop
-        // can't be trusted to self-terminate on a corrupted file.
-        while (bytesRead < wantBytes && (n = file.read(buf, sizeof(buf))) > 0)
+        uint32_t bytesScanned = 0;
+        uint32_t chunkCount = 0;
+        while (bytesScanned < kMaxGraphSourceBytes && (n = file.read(buf, sizeof(buf))) > 0)
         {
             outContent.concat((const char *)buf, n);
-            bytesRead += (size_t)n;
+            bytesScanned += (uint32_t)n;
+            if (outContent.length() > maxBytes)
+                outContent.remove(0, outContent.length() - maxBytes);
+            if (++chunkCount % 8 == 0)
+                { esp_task_wdt_reset(); vTaskDelay(1); }
+        }
+        if (outContent.length() > 0)
+        {
+            // Whatever partial line got cut off at the new start, drop it
+            // so content begins cleanly on a full line.
+            int firstNewline = outContent.indexOf('\n');
+            if (firstNewline >= 0 && (size_t)firstNewline < outContent.length() - 1)
+                outContent.remove(0, firstNewline + 1);
         }
         file.close();
         ok = true;
@@ -405,11 +422,13 @@ bool SDLogger::readGraphSeries(const String &fileName, size_t targetPoints, Stri
     // Pass 1: count data rows (total newlines, minus the header line) so we
     // can pick a skip interval - a plain byte scan, no line objects allocated.
     // Bounded by sourceSize (the directory-entry size read moments ago,
-    // above) in addition to read() returning 0 - a corrupted/cyclic FAT
-    // cluster chain (observed in practice on a file appended across many
-    // reboots) can make read() keep returning data forever, well past the
-    // file's real content, which would otherwise spin this loop forever
-    // while holding sdMutex_.
+    // above) in addition to read() returning 0, so a filesystem edge case
+    // can't spin this forever while holding sdMutex_. This whole route runs
+    // synchronously on the AsyncTCP task (confirmed via serial: a hung/slow
+    // scan here previously starved that task's own watchdog feed and
+    // crashed the whole device - `task_wdt: ... async_tcp` -> abort() ->
+    // reboot) so it must yield periodically regardless of how bounded the
+    // loop is.
     size_t totalLines = 0;
     {
         File f = SD.open(path, FILE_READ);
@@ -418,6 +437,7 @@ bool SDLogger::readGraphSeries(const String &fileName, size_t targetPoints, Stri
             uint8_t buf[512];
             int n;
             uint32_t bytesRead = 0;
+            uint32_t chunkCount = 0;
             while (bytesRead < sourceSize && (n = f.read(buf, sizeof(buf))) > 0)
             {
                 bytesRead += (uint32_t)n;
@@ -426,6 +446,8 @@ bool SDLogger::readGraphSeries(const String &fileName, size_t targetPoints, Stri
                     if (buf[i] == '\n')
                         totalLines++;
                 }
+                if (++chunkCount % 8 == 0)
+                    { esp_task_wdt_reset(); vTaskDelay(1); }
             }
             f.close();
             if (totalLines > 0)
@@ -447,12 +469,12 @@ bool SDLogger::readGraphSeries(const String &fileName, size_t targetPoints, Stri
             f.readStringUntil('\n'); // header
 
             // Bounded by totalLines (from pass 1, over the same mutex-held,
-            // now-immutable file content) as well as f.available() - if
-            // readStringUntil() ever returns without actually advancing the
-            // file position (an EOF/empty-line edge case observed in
-            // practice), f.available() can stay truthy forever and this
-            // would otherwise spin forever while holding sdMutex_, wedging
-            // every other SD route behind it.
+            // now-immutable file content) as well as f.available(), and
+            // yields every few lines for the same watchdog reason as pass 1
+            // above - this loop does several String allocations per line
+            // (readStringUntil + csvField x7), which is exactly the kind of
+            // CPU-bound-with-no-yield work that starved async_tcp's
+            // watchdog on a file with enough rows.
             size_t lineIdx = 0;
             while (f.available() && lineIdx <= totalLines)
             {
@@ -471,6 +493,8 @@ bool SDLogger::readGraphSeries(const String &fileName, size_t targetPoints, Stri
                               csvField(line, 6) + "\n";
                 }
                 lineIdx++;
+                if (lineIdx % 32 == 0)
+                    { esp_task_wdt_reset(); vTaskDelay(1); }
             }
             f.close();
         }

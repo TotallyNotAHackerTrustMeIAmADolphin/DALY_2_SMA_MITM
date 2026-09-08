@@ -330,12 +330,18 @@ bool SDLogger::readTail(const String &fileName, String &outContent, size_t maxBy
             file.readStringUntil('\n');
         }
 
-        outContent.reserve(min(size, maxBytes) + 1);
+        size_t wantBytes = min(size, maxBytes);
+        outContent.reserve(wantBytes + 1);
         uint8_t buf[512];
         int n;
-        while ((n = file.read(buf, sizeof(buf))) > 0)
+        size_t bytesRead = 0;
+        // Bounded by wantBytes in addition to read() returning 0 - see the
+        // matching comment in readGraphSeries() for why a raw read() loop
+        // can't be trusted to self-terminate on a corrupted file.
+        while (bytesRead < wantBytes && (n = file.read(buf, sizeof(buf))) > 0)
         {
             outContent.concat((const char *)buf, n);
+            bytesRead += (size_t)n;
         }
         file.close();
         ok = true;
@@ -398,6 +404,12 @@ bool SDLogger::readGraphSeries(const String &fileName, size_t targetPoints, Stri
 
     // Pass 1: count data rows (total newlines, minus the header line) so we
     // can pick a skip interval - a plain byte scan, no line objects allocated.
+    // Bounded by sourceSize (the directory-entry size read moments ago,
+    // above) in addition to read() returning 0 - a corrupted/cyclic FAT
+    // cluster chain (observed in practice on a file appended across many
+    // reboots) can make read() keep returning data forever, well past the
+    // file's real content, which would otherwise spin this loop forever
+    // while holding sdMutex_.
     size_t totalLines = 0;
     {
         File f = SD.open(path, FILE_READ);
@@ -405,8 +417,10 @@ bool SDLogger::readGraphSeries(const String &fileName, size_t targetPoints, Stri
         {
             uint8_t buf[512];
             int n;
-            while ((n = f.read(buf, sizeof(buf))) > 0)
+            uint32_t bytesRead = 0;
+            while (bytesRead < sourceSize && (n = f.read(buf, sizeof(buf))) > 0)
             {
+                bytesRead += (uint32_t)n;
                 for (int i = 0; i < n; i++)
                 {
                     if (buf[i] == '\n')

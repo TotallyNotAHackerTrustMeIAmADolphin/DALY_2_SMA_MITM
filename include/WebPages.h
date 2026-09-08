@@ -115,7 +115,9 @@ const char index_html[] PROGMEM = R"rawliteral(
 const char config_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML><html><head><title>Settings</title><meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-  body { font-family: sans-serif; background: #121212; color: #eee; padding: 10px; }
+  body { font-family: sans-serif; background: #121212; color: #eee; padding: 0; }
+  .nav { background: #1e1e1e; padding: 10px; border-bottom: 2px solid #333; margin-bottom: 10px; text-align: center; }
+  .nav a { color: #4caf50; text-decoration: none; margin: 0 15px; font-weight: bold; }
   .container { max-width: 650px; margin: auto; background: #1e1e1e; padding: 25px; border-radius: 12px; border: 1px solid #333; }
   .row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 1px solid #2a2a2a; padding-bottom: 8px; }
   .text-group { text-align: left; padding-right: 15px; }
@@ -125,12 +127,8 @@ const char config_html[] PROGMEM = R"rawliteral(
   input { font-size: 1.1em; padding: 5px; width: 110px; text-align: center; background: #000; color: #0f0; border: 1px solid #444; border-radius: 4px; }
   .save { background: #2e7d32; color: white; border: none; padding: 15px; width: 100%; border-radius: 5px; font-weight: bold; cursor: pointer; font-size: 1.1em; margin-top: 20px; }
 </style></head><body>
+<div class="nav"><a href="/">DASHBOARD</a> | <a href="/config">CONFIGURATION</a> | <a href="/logs">LOGS</a> | <a href="/graphs">GRAPHS</a></div>
 <div class="container">
-  <a href="/" style="color:#4caf50;text-decoration:none;">&larr; Back to Dashboard</a>
-  &nbsp;|&nbsp;
-  <a href="/logs" style="color:#4caf50;text-decoration:none;">Logs &rarr;</a>
-  &nbsp;|&nbsp;
-  <a href="/graphs" style="color:#4caf50;text-decoration:none;">Graphs &rarr;</a>
   <form action="/save" method="GET">
     <h2>Charging Profile (16S)</h2>
     <div class="row"><div class="text-group"><strong>Max Charge Amps</strong><span class="desc">Global bulk charging limit.</span></div>
@@ -175,7 +173,9 @@ const char config_html[] PROGMEM = R"rawliteral(
 const char logs_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML><html><head><title>Logs</title><meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-  body { font-family: sans-serif; background: #121212; color: #eee; padding: 10px; }
+  body { font-family: sans-serif; background: #121212; color: #eee; padding: 0; }
+  .nav { background: #1e1e1e; padding: 10px; border-bottom: 2px solid #333; margin-bottom: 10px; text-align: center; }
+  .nav a { color: #4caf50; text-decoration: none; margin: 0 15px; font-weight: bold; }
   .container { max-width: 900px; margin: auto; background: #1e1e1e; padding: 25px; border-radius: 12px; border: 1px solid #333; }
   .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 15px 0; }
   select { font-size: 1em; padding: 6px; background: #000; color: #0f0; border: 1px solid #444; border-radius: 4px; flex: 1; min-width: 180px; }
@@ -183,10 +183,8 @@ const char logs_html[] PROGMEM = R"rawliteral(
   .note { color: #ff9800; font-size: 0.85em; margin: 5px 0; }
   #content { background: #000; color: #0f0; font-family: monospace; font-size: 0.85em; white-space: pre-wrap; word-break: break-all; padding: 15px; border-radius: 8px; border: 1px solid #444; height: 500px; overflow-y: scroll; }
 </style></head><body>
+<div class="nav"><a href="/">DASHBOARD</a> | <a href="/config">CONFIGURATION</a> | <a href="/logs">LOGS</a> | <a href="/graphs">GRAPHS</a></div>
 <div class="container">
-  <a href="/" style="color:#4caf50;text-decoration:none;">&larr; Back to Dashboard</a>
-  &nbsp;|&nbsp;
-  <a href="/graphs" style="color:#4caf50;text-decoration:none;">Graphs &rarr;</a>
   <h2 style="color:#4caf50;">SD Card Logs</h2>
   <div class="toolbar">
     <select id="fileSelect"></select>
@@ -251,7 +249,9 @@ const char graphs_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML><html><head><title>Graphs</title><meta name="viewport" content="width=device-width, initial-scale=1">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
-  body { font-family: sans-serif; background: #121212; color: #eee; padding: 10px; }
+  body { font-family: sans-serif; background: #121212; color: #eee; padding: 0; }
+  .nav { background: #1e1e1e; padding: 10px; border-bottom: 2px solid #333; margin-bottom: 10px; text-align: center; }
+  .nav a { color: #4caf50; text-decoration: none; margin: 0 15px; font-weight: bold; }
   .container { max-width: 900px; margin: auto; background: #1e1e1e; padding: 25px; border-radius: 12px; border: 1px solid #333; }
   .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 15px 0; }
   select { font-size: 1em; padding: 6px; background: #000; color: #0f0; border: 1px solid #444; border-radius: 4px; flex: 1; min-width: 180px; }
@@ -260,10 +260,8 @@ const char graphs_html[] PROGMEM = R"rawliteral(
   .chart-box { background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 10px; margin: 15px 0; }
   h3 { color: #4caf50; margin: 5px 0 10px 0; font-size: 1em; }
 </style></head><body>
+<div class="nav"><a href="/">DASHBOARD</a> | <a href="/config">CONFIGURATION</a> | <a href="/logs">LOGS</a> | <a href="/graphs">GRAPHS</a></div>
 <div class="container">
-  <a href="/" style="color:#4caf50;text-decoration:none;">&larr; Back to Dashboard</a>
-  &nbsp;|&nbsp;
-  <a href="/logs" style="color:#4caf50;text-decoration:none;">Logs &rarr;</a>
   <h2 style="color:#4caf50;">Trend Graphs</h2>
   <div class="toolbar">
     <select id="fileSelect"></select>

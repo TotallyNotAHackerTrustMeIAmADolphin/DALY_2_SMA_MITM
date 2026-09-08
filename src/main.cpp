@@ -9,6 +9,7 @@
 #include "DalyRS485.h"
 #include "SMA_CAN.h"
 #include "WebDashboard.h"
+#include "SDLogger.h"
 
 // Bring in your Wi-Fi credentials securely
 #include "secrets.h"
@@ -74,6 +75,7 @@ void netLog(const char *format, ...)
     TelnetStream.print(final_res);
   }
   webUI.broadcastLog(final_res);
+  SDLogger::logEvent(loc_res);
 }
 
 void libraryLogger(const char *msg) { netLog("%s", msg); }
@@ -292,7 +294,13 @@ void setup()
 
   webUI.setActionCallback(handleUIAction);
   webUI.begin(cfg);
-  
+
+  if (SDLogger::begin()) {
+    netLog("[SYS] SD card logging initialized.\n");
+  } else {
+    netLog("[SYS] SD card logging unavailable (no card or mount failed).\n");
+  }
+
   // Initialize filter buffer with a safe default (Max Charge Voltage)
   float defaultV = cfg.cvMaxCharge * 1000.0f;
   for(int i=0; i<MAX_CELLS; i++) {
@@ -370,6 +378,16 @@ void loop()
       tx.dvl = (uint16_t)(cfg.cvMinDischarge * MAX_CELLS * 10);
 
       inverter.sendStatus(tx);
+      xSemaphoreGive(dataMutex);
+    }
+  }
+
+  static unsigned long lastSdLog = 0;
+  if (millis() - lastSdLog > 10000)
+  {
+    lastSdLog = millis();
+    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+      SDLogger::logTelemetry(currentData);
       xSemaphoreGive(dataMutex);
     }
   }

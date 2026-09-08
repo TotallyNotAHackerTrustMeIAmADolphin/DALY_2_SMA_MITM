@@ -10,4 +10,10 @@
 // --- T-CAN485 CAN PINS ---
 #define CAN_TX        27
 #define CAN_RX        26
-#define CAN_SE        23  // ADD THIS LINE!
+#define CAN_SE        23
+
+// --- T-CAN485 SD CARD PINS ---
+#define SD_MOSI       15
+#define SD_MISO       2
+#define SD_SCLK       14
+#define SD_CS         13

@@ -29,6 +29,21 @@ namespace
     // large (e.g. multi-week boot_ fallback) file can't hold sdMutex_ for an
     // unbounded two-pass scan.
     constexpr uint32_t kMaxGraphSourceBytes = 4 * 1024 * 1024;
+
+    // Same idea for readTail(), but much tighter: unlike readGraphSeries
+    // (which only needs to touch the card twice, briefly, per request),
+    // readTail can't seek to near the end (file.seek() on a file reopened
+    // for FILE_APPEND hundreds of times across reboots was observed to make
+    // the following read() return 0 bytes - see readTail()'s comment), so
+    // it must scan sequentially from byte 0 for the whole time it holds
+    // sdMutex_. Bounding that scan to kMaxGraphSourceBytes (4MB) would let a
+    // single request hold the mutex far longer than the SD writer task's
+    // own 1s mutex-acquire timeout, dropping telemetry samples for the
+    // whole scan. 512KB comfortably covers a full day's telemetry CSV
+    // (observed ~400KB/day in practice) while keeping the worst case small;
+    // beyond that, readTail() fails cleanly (like readGraphSeries does for
+    // oversized files) rather than silently returning a stale tail.
+    constexpr uint32_t kMaxTailSourceBytes = 512 * 1024;
 }
 
 bool SDLogger::isReady()
@@ -320,6 +335,24 @@ bool SDLogger::readTail(const String &fileName, String &outContent, size_t maxBy
         return false;
 
     bool ok = false;
+
+    // Cheap size-check first (matches readGraphSeries' pattern) - readTail
+    // can't seek to near the end (see below), so it must scan sequentially
+    // from byte 0 for its whole sdMutex_ hold. Rejecting outsized files
+    // here keeps that hold bounded to kMaxTailSourceBytes worst-case,
+    // instead of silently scanning (and holding the mutex for) however
+    // large the file has grown.
+    File sizeCheck = SD.open("/" + fileName, FILE_READ);
+    bool opened = (bool)sizeCheck;
+    uint32_t sourceSize = opened ? sizeCheck.size() : 0;
+    if (opened)
+        sizeCheck.close();
+    if (!opened || sourceSize > kMaxTailSourceBytes)
+    {
+        xSemaphoreGive(sdMutex_);
+        return false;
+    }
+
     File file = SD.open("/" + fileName, FILE_READ);
     if (file)
     {
@@ -343,19 +376,25 @@ bool SDLogger::readTail(const String &fileName, String &outContent, size_t maxBy
         int n;
         uint32_t bytesScanned = 0;
         uint32_t chunkCount = 0;
-        while (bytesScanned < kMaxGraphSourceBytes && (n = file.read(buf, sizeof(buf))) > 0)
+        bool truncated = false;
+        while (bytesScanned < sourceSize && (n = file.read(buf, sizeof(buf))) > 0)
         {
             outContent.concat((const char *)buf, n);
             bytesScanned += (uint32_t)n;
             if (outContent.length() > maxBytes)
+            {
                 outContent.remove(0, outContent.length() - maxBytes);
+                truncated = true;
+            }
             if (++chunkCount % 8 == 0)
                 { esp_task_wdt_reset(); vTaskDelay(1); }
         }
-        if (outContent.length() > 0)
+        // Only drop the leading partial line if we actually trimmed content
+        // away - for a file that never exceeded maxBytes, outContent is the
+        // untouched file from byte 0 and its first line is real content,
+        // not a truncation artifact.
+        if (truncated && outContent.length() > 0)
         {
-            // Whatever partial line got cut off at the new start, drop it
-            // so content begins cleanly on a full line.
             int firstNewline = outContent.indexOf('\n');
             if (firstNewline >= 0 && (size_t)firstNewline < outContent.length() - 1)
                 outContent.remove(0, firstNewline + 1);

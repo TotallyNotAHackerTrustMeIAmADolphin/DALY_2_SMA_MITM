@@ -38,4 +38,15 @@ struct DashboardData {
     bool maintenanceActive;
     bool isResetting;
     bool gridPresent;
+
+    // Daly BMS's own hardware protection state (cmd 0x93/0x98), independent
+    // of our calculateCCL/DCL glideslope - lets us see if the BMS itself
+    // cut the pack off rather than inferring it from a voltage glitch.
+    bool chargeMosOn;
+    bool dischargeMosOn;
+    bool bmsProtectionActive;
+    bool cellOvervoltLevel1;
+    bool cellOvervoltLevel2;
+    bool packOvervoltLevel1;
+    bool packOvervoltLevel2;
 };

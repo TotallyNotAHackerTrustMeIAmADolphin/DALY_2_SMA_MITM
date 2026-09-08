@@ -12,6 +12,24 @@ struct DalyBasicInfo
     float packSOC;
 };
 
+struct DalyMosfetStatus
+{
+    bool chargeMosOn;
+    bool dischargeMosOn;
+};
+
+// Subset of the Daly "Alarm Info" (cmd 0x98) protection bitfield - only the
+// bits relevant to diagnosing an SMA-side "battery voltage out of range"
+// fault are decoded (see readAlarmStatus() for the byte layout/provenance).
+struct DalyAlarmStatus
+{
+    bool cellOvervoltLevel1;
+    bool cellOvervoltLevel2;
+    bool packOvervoltLevel1;
+    bool packOvervoltLevel2;
+    bool anyProtectionActive; // true if any byte in the alarm frame is nonzero
+};
+
 class DalyRS485
 {
 public:
@@ -24,6 +42,8 @@ public:
 
     bool readBasicInfo(DalyBasicInfo &info);
     bool readCellVoltages(uint8_t expectedCells, std::vector<float> &cellVoltages);
+    bool readMosfetStatus(DalyMosfetStatus &status);
+    bool readAlarmStatus(DalyAlarmStatus &status);
 
 private:
     HardwareSerial *_serial;

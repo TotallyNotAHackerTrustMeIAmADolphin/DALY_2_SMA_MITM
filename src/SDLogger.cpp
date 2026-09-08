@@ -114,6 +114,23 @@ void SDLogger::logTelemetry(const DashboardData &data)
         written += n;
     }
 
+    // BMS protection columns appended strictly after the cell columns -
+    // readGraphSeries() hardcodes extraction of raw columns 0-6
+    // (Timestamp..ReqI), so anything added here doesn't disturb that.
+    if (written > 0 && written < (int)sizeof(msg.data))
+    {
+        int n = snprintf(msg.data + written, sizeof(msg.data) - written, ",%d,%d,%d,%d,%d,%d,%d",
+                          data.chargeMosOn ? 1 : 0,
+                          data.dischargeMosOn ? 1 : 0,
+                          data.bmsProtectionActive ? 1 : 0,
+                          data.cellOvervoltLevel1 ? 1 : 0,
+                          data.cellOvervoltLevel2 ? 1 : 0,
+                          data.packOvervoltLevel1 ? 1 : 0,
+                          data.packOvervoltLevel2 ? 1 : 0);
+        if (n > 0)
+            written += n;
+    }
+
     // Queue is sized generously for the ~1 sample/10s telemetry rate; if a
     // write is genuinely stuck (e.g. card removed mid-session) we drop the
     // sample rather than block the caller.
@@ -171,6 +188,7 @@ void SDLogger::writeCSVHeaderIfMissing(const String &path)
     {
         file.printf(",Cell%d", i);
     }
+    file.print(",ChargeMOS,DischargeMOS,BmsProtection,CellOV1,CellOV2,PackOV1,PackOV2");
     file.println();
     file.close();
 }

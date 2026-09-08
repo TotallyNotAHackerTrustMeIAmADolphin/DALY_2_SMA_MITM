@@ -248,6 +248,7 @@ const char graphs_html[] PROGMEM = R"rawliteral(
   <div class="toolbar">
     <select id="fileSelect"></select>
     <button class="btn" onclick="loadGraph()">Reload</button>
+    <a id="downloadLink" class="btn" style="text-decoration:none;" href="#" download>Download</a>
   </div>
   <div id="status" class="note"></div>
 
@@ -327,6 +328,7 @@ const char graphs_html[] PROGMEM = R"rawliteral(
     const sel = document.getElementById('fileSelect');
     const status = document.getElementById('status');
     if (!sel.value) return;
+    document.getElementById('downloadLink').href = '/api/logs/download?file=' + encodeURIComponent(sel.value);
     status.innerText = 'Loading...';
     try {
       const res = await fetch('/api/logs/graph?file=' + encodeURIComponent(sel.value));

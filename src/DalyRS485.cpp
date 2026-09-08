@@ -207,3 +207,70 @@ bool DalyRS485::readCellVoltages(uint8_t expectedCells, std::vector<float> &cell
     }
     return false;
 }
+
+bool DalyRS485::readMosfetStatus(DalyMosfetStatus &status)
+{
+    sendCommand(0x93);
+    uint8_t data[8];
+
+    if (!receiveSingleFrame(0x93, data, 150))
+        return false;
+
+    // Daly UART "Status Info 2" (cmd 0x93) payload layout, from the same
+    // community-documented protocol family as the 0x90/0x95 frames above
+    // (e.g. syssi/esphome-daly-bms, patman15 Daly UART docs):
+    //   [0] charge/discharge status (0=stall, 1=charge, 2=discharge)
+    //   [1] charge MOSFET state (0=off, 1=on)
+    //   [2] discharge MOSFET state (0=off, 1=on)
+    //   [3] BMS life cycle count
+    //   [4..7] remaining capacity, Ah*1000
+    // NOT yet verified byte-for-byte against this specific pack's firmware -
+    // sanity-check against a serial monitor / known MOSFET state after
+    // flashing. Defensive: MOSFET bytes must be 0 or 1; anything else means
+    // this frame isn't what we think it is, so report failure instead of
+    // guessing.
+    if (data[1] > 1 || data[2] > 1)
+    {
+        debugLog("[DALY-LIB] 0x93 MOSFET bytes out of expected range (%d,%d). Ignoring frame.\n", data[1], data[2]);
+        return false;
+    }
+
+    status.chargeMosOn = (data[1] == 1);
+    status.dischargeMosOn = (data[2] == 1);
+    return true;
+}
+
+bool DalyRS485::readAlarmStatus(DalyAlarmStatus &status)
+{
+    sendCommand(0x98);
+    uint8_t data[8];
+
+    if (!receiveSingleFrame(0x98, data, 150))
+        return false;
+
+    // Daly UART "Alarm Info" (cmd 0x98) payload layout, same documented
+    // protocol family as above. Byte 0 carries cell/pack voltage alarm
+    // bits (bytes 1-6 carry temperature/current/SOC/other protection bits,
+    // not decoded here since they're not relevant to this investigation):
+    //   [0] bit0/1 = cell overvolt level1/2, bit2/3 = cell undervolt level1/2,
+    //       bit4/5 = pack overvolt level1/2, bit6/7 = pack undervolt level1/2
+    // NOT yet verified byte-for-byte against this specific pack's firmware -
+    // sanity-check against a serial monitor after flashing, e.g. by
+    // temporarily lowering cvMaxCharge below the pack's real voltage and
+    // confirming bit0 sets.
+    status.cellOvervoltLevel1 = data[0] & 0x01;
+    status.cellOvervoltLevel2 = data[0] & 0x02;
+    status.packOvervoltLevel1 = data[0] & 0x10;
+    status.packOvervoltLevel2 = data[0] & 0x20;
+
+    status.anyProtectionActive = false;
+    for (int i = 0; i < 7; i++)
+    {
+        if (data[i] != 0)
+        {
+            status.anyProtectionActive = true;
+            break;
+        }
+    }
+    return true;
+}

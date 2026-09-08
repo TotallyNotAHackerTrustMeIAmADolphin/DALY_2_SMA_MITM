@@ -11,15 +11,11 @@
 #include "WebDashboard.h"
 #include "SDLogger.h"
 
-// Bring in your Wi-Fi credentials securely
+// Bring in your Wi-Fi credentials AND network config (static IP, gateway,
+// subnet, DNS) - all of it lives in this one gitignored file now, so a
+// public checkout never reveals your home network layout. See
+// secrets_example.h for the template.
 #include "secrets.h"
-
-// --- CONFIG & NETWORK ---
-IPAddress local_IP(192, 168, 178, 56);
-IPAddress gateway(192, 168, 178, 1);
-IPAddress subnet(255, 255, 255, 0);
-IPAddress primaryDNS(8, 8, 8, 8);   // Google DNS
-IPAddress secondaryDNS(1, 1, 1, 1); // Cloudflare DNS
 
 #define MAX_CELLS 16
 #define MAX_SAMPLES 20

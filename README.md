@@ -51,18 +51,15 @@ Built for the **LilyGO T-CAN485** board, this firmware utilizes true FreeRTOS mu
 
 This project is built using [PlatformIO](https://platformio.org/).
 
-### 1. Configure Wi-Fi Credentials
-For security, Wi-Fi passwords are intentionally excluded from the codebase.
+### 1. Configure Wi-Fi & Network
+For security, Wi-Fi credentials and your network layout are intentionally excluded from the codebase — everything lives in one gitignored file.
 1. Navigate to the `include/` directory.
 2. Rename `secrets_example.h` to `secrets.h`.
-3. Open `secrets.h` and enter your Wi-Fi SSID and Password.
+3. Open `secrets.h` and enter your Wi-Fi SSID/Password, and (optional but recommended) adjust the static IP block (`local_IP`, `gateway`, `subnet`, DNS) to match your network.
 
-### 2. Set your Static IP (Optional but recommended)
-Open `src/main.cpp` and adjust the IP address block at the top of the file to match your local network setup.
-
-### 3. Flash the Board
-Plug the LilyGO T-CAN485 into your computer via USB. Open PlatformIO and hit **Upload**. 
-*(Note: Subsequent updates can be flashed Over-The-Air (OTA) without plugging in the device).*
+### 2. Flash the Board
+Plug the LilyGO T-CAN485 into your computer via USB. Open PlatformIO and hit **Upload**.
+*(Note: Subsequent updates can be flashed Over-The-Air (OTA) without plugging in the device — `upload_port` is derived automatically from the `local_IP` you set in `secrets.h`.)*
 
 ---
 

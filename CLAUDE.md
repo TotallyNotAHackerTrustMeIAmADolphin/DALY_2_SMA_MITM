@@ -12,14 +12,13 @@ This firmware controls high-power charging/discharging of a real battery pack. T
 
 - **Build:** `pio run`
 - **Upload via USB:** `pio run -t upload` (platformio.ini defaults to OTA upload; override `--upload-port` for a USB serial port)
-- **Upload via OTA:** `pio run -t upload --upload-port <DEVICE_IP>` (default configured IP is `192.168.178.56`, port 3232)
+- **Upload via OTA:** `pio run -t upload` (`upload_port` is derived automatically from `include/secrets.h`'s `local_IP` by `scripts/extract_upload_ip.py`, a PlatformIO `pre:` build script — pass `--upload-port <DEVICE_IP>` only to override it, e.g. targeting a different device); OTA port is 3232
 - **Serial monitor:** `pio run -t monitor` (115200 baud)
 - **Clean:** `pio run -t clean`
 - **Run unit tests:** `pio test` (Unity framework; runs on-device/native per `test/` — see below)
 
 ### First-time setup
-1. Copy `include/secrets_example.h` to `include/secrets.h` and fill in `ssid`/`password`. This file is gitignored — never commit real credentials.
-2. Static IP is hardcoded near the top of `src/main.cpp` (`local_IP`, `gateway`, `subnet`); adjust to match the target network.
+1. Copy `include/secrets_example.h` to `include/secrets.h` and fill in `ssid`/`password` **and** the network block (`local_IP`, `gateway`, `subnet`, `primaryDNS`, `secondaryDNS`) to match your network. This file is gitignored — never commit real credentials or your network layout. All network config lives in this one file now; don't add new hardcoded IPs back into `src/main.cpp` or `platformio.ini`.
 
 ## Architecture
 

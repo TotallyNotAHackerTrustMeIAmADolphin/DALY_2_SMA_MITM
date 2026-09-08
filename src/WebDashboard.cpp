@@ -1,5 +1,6 @@
 #include "WebDashboard.h"
 #include "WebPages.h"
+#include "SDLogger.h"
 
 WebDashboard::WebDashboard(uint16_t port)
     : _server(port), _events("/events"), _actionCb(nullptr), _cfg(nullptr) {}
@@ -151,4 +152,57 @@ void WebDashboard::setupRoutes()
 
     _server.on("/save", HTTP_GET, [this](AsyncWebServerRequest *request)
                { saveConfig(request); });
+
+    _server.on("/logs", HTTP_GET, [](AsyncWebServerRequest *request)
+               { request->send(200, "text/html", logs_html); });
+
+    _server.on("/api/logs/list", HTTP_GET, [](AsyncWebServerRequest *request)
+               {
+        std::vector<String> names;
+        std::vector<uint32_t> sizes;
+        SDLogger::listLogFiles(names, sizes);
+
+        String json = "[";
+        for (size_t i = 0; i < names.size(); i++) {
+            if (i > 0) json += ",";
+            json += "{\"name\":\"" + names[i] + "\",\"size\":" + String(sizes[i]) + "}";
+        }
+        json += "]";
+        request->send(200, "application/json", json); });
+
+    _server.on("/api/logs/content", HTTP_GET, [](AsyncWebServerRequest *request)
+               {
+        if (!request->hasParam("file")) {
+            request->send(400, "text/plain", "Missing file parameter");
+            return;
+        }
+        String requested = request->getParam("file")->value();
+
+        // Only serve names we actually listed ourselves - this doubles as the
+        // path-traversal guard, since our filenames never contain '/' or '..'.
+        std::vector<String> names;
+        std::vector<uint32_t> sizes;
+        SDLogger::listLogFiles(names, sizes);
+
+        int idx = -1;
+        for (size_t i = 0; i < names.size(); i++) {
+            if (names[i] == requested) { idx = (int)i; break; }
+        }
+        if (idx < 0) {
+            request->send(404, "text/plain", "Unknown log file");
+            return;
+        }
+
+        const size_t maxBytes = 65536;
+        String content;
+        if (!SDLogger::readTail(requested, content, maxBytes)) {
+            request->send(500, "text/plain", "Failed to read file");
+            return;
+        }
+
+        AsyncWebServerResponse *response = request->beginResponse(200, "text/plain", content);
+        if (sizes[idx] > maxBytes) {
+            response->addHeader("X-Truncated", "1");
+        }
+        request->send(response); });
 }

@@ -3,8 +3,8 @@
 // The glideslope current-limit math, kept free of Arduino/FreeRTOS
 // dependencies so test/test_glideslope compiles and runs *this* code
 // natively (`pio test -e native`) instead of a hand-copied mirror of it.
-// main.cpp's calculateCCL()/calculateDCL() are thin wrappers that feed in
-// live state (cfg, currentData, millis()) under dataMutex.
+// StatusFrame::decide() (include/StatusFrame.h) is the only caller; it
+// feeds in the snapshot canTask copied out of currentData under dataMutex.
 //
 // All limits are returned in 0.1A units, as sent in CAN frame 0x351.
 

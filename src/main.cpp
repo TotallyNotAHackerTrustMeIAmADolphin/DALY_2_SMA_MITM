@@ -570,8 +570,10 @@ void logHealth()
          WiFi.status() == WL_CONNECTED ? (int)WiFi.RSSI() : 0);
 }
 
-// Why did we (re)boot, and what does the last stored core dump say? Logged
-// once the clock is set (so it lands in the dated SD .log file).
+// Why did we (re)boot, and what does the last stored core dump say? Called
+// directly from setup() right after SD init, so even a reset within the
+// first 60s of a cold boot (or a crash loop) still gets its reason onto the
+// SD log - it no longer waits for loop()'s clock-ready gate.
 void logBootDiagnostics()
 {
   esp_reset_reason_t reason = esp_reset_reason();
@@ -587,11 +589,23 @@ void logBootDiagnostics()
   netLog("[DIAG] Running firmware ELF sha256: %s, partition %s, image state: %s\n",
          elfSha, running ? running->label : "?", otaStateName(otaState));
 
+  const esp_partition_t *bad = esp_ota_get_last_invalid_partition();
+  if (bad)
+  {
+    netLog("[DIAG] ROLLED BACK: partition %s is invalid/aborted - running the previous firmware\n", bad->label);
+  }
+
+  if (otaState == ESP_OTA_IMG_PENDING_VERIFY)
+  {
+    netLog("[DIAG] Image pending verification: OTA is refused until it is confirmed (needs >= 120 s uptime with WiFi up and BMS data); a reset before that boots the previous firmware.\n");
+  }
+
   // A dump stays in flash until the next crash overwrites it, so it can be
   // from an earlier crash than the one that caused this boot - compare its
   // ELF sha with the running one, and the reset reason above.
   static esp_core_dump_summary_t summary;
-  if (esp_core_dump_image_check() == ESP_OK && esp_core_dump_get_summary(&summary) == ESP_OK)
+  esp_err_t chk = esp_core_dump_image_check();
+  if (chk == ESP_OK && esp_core_dump_get_summary(&summary) == ESP_OK)
   {
     netLog("[DIAG] Stored core dump: task '%s', PC 0x%08x, cause %u, vaddr 0x%08x, ELF %s\n",
            summary.exc_task, (unsigned)summary.exc_pc,
@@ -606,12 +620,14 @@ void logBootDiagnostics()
     netLog("[DIAG] Backtrace%s:%s\n", summary.exc_bt_info.corrupted ? " (corrupted)" : "", bt);
     netLog("[DIAG] Full dump: GET /api/coredump\n");
   }
-  else
+  else if (chk == ESP_ERR_NOT_FOUND || chk == ESP_ERR_INVALID_SIZE)
   {
     netLog("[DIAG] No core dump stored.\n");
   }
-
-  logHealth();
+  else
+  {
+    netLog("[DIAG] Core dump present but unreadable (%s).\n", esp_err_to_name(chk));
+  }
 }
 
 void setup()
@@ -640,6 +656,13 @@ void setup()
 
   SDLogger::setDebugCallback(libraryLogger);
   bool sdOk = SDLogger::begin();
+  netLog(sdOk ? "[SYS] SD card logging initialized.\n"
+              : "[SYS] SD card logging unavailable (no card or mount failed).\n");
+
+  // Reset reason / rollback state / core dump summary, right after the SD
+  // log exists to receive it - not deferred to loop(), so a reset within
+  // the first 60s of a cold boot (or a crash loop) still gets logged.
+  logBootDiagnostics();
 
   currentData.packTemp = 220; // no temperature sensor is read - fixed 22.0C goes to the SMA
   currentData.smaChargeMode = "Unknown";
@@ -666,8 +689,6 @@ void setup()
   webUI.begin();
   netReady = true;
 
-  netLog(sdOk ? "[SYS] SD card logging initialized.\n"
-              : "[SYS] SD card logging unavailable (no card or mount failed).\n");
   netLog("[SYS] Boot sequence complete. Multithreading Active.\n");
 }
 
@@ -687,11 +708,15 @@ void loop()
     }
   }
 
-  static bool bootDiagDone = false;
-  if (!bootDiagDone && (time(nullptr) > 1000000000L || millis() > 60000))
+  // logBootDiagnostics() itself now runs from setup(), right after SD init,
+  // so even a reset in the first 60s (or a crash loop) gets logged. This
+  // just gets one logHealth() sample in once the clock/BMS data settle,
+  // ahead of the regular 10-minute cadence below.
+  static bool firstHealthDone = false;
+  if (!firstHealthDone && (time(nullptr) > 1000000000L || millis() > 60000))
   {
-    bootDiagDone = true;
-    logBootDiagnostics();
+    firstHealthDone = true;
+    logHealth();
   }
 
   static bool imageConfirmed = false;

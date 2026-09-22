@@ -334,39 +334,99 @@ void bmsTask(void *pvParameters)
   }
 }
 
+// --- WIFI EVENT LOGGING ---
+// Arduino's auto-reconnect handles the actual recovery silently; this just
+// makes drops/recoveries visible in the SD log, edge-triggered like the
+// Daly MOSFET/alarm logging (one line per transition, not per retry while
+// the AP is unreachable).
+const char *wifiDisconnectReasonName(uint8_t reason)
+{
+  switch (reason)
+  {
+  case WIFI_REASON_UNSPECIFIED: return "unspecified";
+  case WIFI_REASON_AUTH_EXPIRE: return "auth expired";
+  case WIFI_REASON_ASSOC_EXPIRE: return "association expired";
+  case WIFI_REASON_ASSOC_LEAVE: return "we disconnected (assoc leave)";
+  case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT: return "4-way handshake timeout (wrong password?)";
+  case WIFI_REASON_AUTH_FAIL: return "auth failed";
+  case WIFI_REASON_NO_AP_FOUND: return "AP not found (out of range / AP down?)";
+  case WIFI_REASON_BEACON_TIMEOUT: return "beacon timeout (weak signal / interference)";
+  case WIFI_REASON_MIC_FAILURE: return "MIC failure";
+  case WIFI_REASON_AP_INITIATED: return "kicked by AP";
+  case WIFI_REASON_STA_LEAVING: return "we disconnected (leaving)";
+  default: return "see reason code";
+  }
+}
+
+// Guarded only by being called from the WiFi event task and read/written
+// nowhere else - no cross-task access, so no mutex needed.
+static bool s_wifiConnected = false;
+static bool s_wifiEverConnected = false;
+static unsigned long s_wifiDownSince = 0;
+
+void wifiEventHandler(WiFiEvent_t event, WiFiEventInfo_t info)
+{
+  if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED)
+  {
+    if (s_wifiConnected)
+    {
+      s_wifiConnected = false;
+      s_wifiDownSince = millis();
+      uint8_t reason = info.wifi_sta_disconnected.reason;
+      netLog("[WIFI] Disconnected (reason %u: %s)\n", (unsigned)reason, wifiDisconnectReasonName(reason));
+    }
+    // else: still trying to (re)connect - don't log every retry.
+  }
+  else if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP)
+  {
+    if (!s_wifiConnected)
+    {
+      s_wifiConnected = true;
+      if (s_wifiEverConnected)
+      {
+        unsigned long downMs = millis() - s_wifiDownSince;
+        netLog("[WIFI] Reconnected (%s), was down for %lus\n", WiFi.localIP().toString().c_str(), downMs / 1000);
+      }
+      else
+      {
+        s_wifiEverConnected = true;
+        netLog("[WIFI] Connected, IP %s\n", WiFi.localIP().toString().c_str());
+      }
+    }
+  }
+}
+
 void setupNetwork()
 {
+  WiFi.onEvent(wifiEventHandler);
+
   if (!WiFi.config(local_IP, gateway, subnet, primaryDNS, secondaryDNS))
   {
-    Serial.println("STA Failed to configure");
+    netLog("[WIFI] STA config (static IP) failed - falling back to DHCP\n");
   }
   WiFi.begin(ssid, password);
 
-  Serial.print("Connecting to WiFi");
   unsigned long startAttempt = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - startAttempt < 10000)
   {
     delay(500);
-    Serial.print(".");
   }
 
   if (WiFi.status() == WL_CONNECTED)
   {
-    Serial.println("\nWiFi Connected!");
     configTzTime("CET-1CEST,M3.5.0,M10.5.0/3", "pool.ntp.org", "ptbtime1.ptb.de");
-    
+
     // Wait for NTP sync (up to 5 seconds)
-    Serial.print("Waiting for NTP");
+    netLog("[SYS] Waiting for NTP sync...\n");
     startAttempt = millis();
     while (time(nullptr) < 1000000000L && millis() - startAttempt < 5000) {
       delay(500);
-      Serial.print(".");
     }
-    Serial.println(time(nullptr) > 1000000000L ? " OK" : " Timeout");
+    netLog(time(nullptr) > 1000000000L ? "[SYS] NTP sync OK\n" : "[SYS] NTP sync timed out\n");
   }
   else
   {
-    Serial.println("\nWiFi Connection Failed. Continuing in Offline Mode...");
+    netLog("[WIFI] Not connected after 10s - continuing in offline mode (will keep retrying in the background)\n");
   }
 }
 
@@ -500,13 +560,14 @@ void logHealth()
   TaskHandle_t asyncTcp = xTaskGetHandle("async_tcp");
   TaskHandle_t sdTask = xTaskGetHandle("SD_LogTask");
   // On ESP-IDF the stack high-water mark is in bytes.
-  netLog("[DIAG] Heap free %u, min %u, max block %u | stack left: loop %u, bms %u, can %u, sd %u, async_tcp %u\n",
+  netLog("[DIAG] Heap free %u, min %u, max block %u | stack left: loop %u, bms %u, can %u, sd %u, async_tcp %u | WiFi RSSI %d dBm\n",
          (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap(), (unsigned)ESP.getMaxAllocHeap(),
          (unsigned)uxTaskGetStackHighWaterMark(NULL),
          bmsTaskHandle ? (unsigned)uxTaskGetStackHighWaterMark(bmsTaskHandle) : 0u,
          canTaskHandle ? (unsigned)uxTaskGetStackHighWaterMark(canTaskHandle) : 0u,
          sdTask ? (unsigned)uxTaskGetStackHighWaterMark(sdTask) : 0u,
-         asyncTcp ? (unsigned)uxTaskGetStackHighWaterMark(asyncTcp) : 0u);
+         asyncTcp ? (unsigned)uxTaskGetStackHighWaterMark(asyncTcp) : 0u,
+         WiFi.status() == WL_CONNECTED ? (int)WiFi.RSSI() : 0);
 }
 
 // Why did we (re)boot, and what does the last stored core dump say? Logged

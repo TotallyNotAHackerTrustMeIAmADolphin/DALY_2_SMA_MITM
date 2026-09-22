@@ -53,17 +53,20 @@ void WebDashboard::broadcastTelemetry(const DashboardData &data)
     }
     strcat(cellsStr, "]");
 
-    // Worst-case length (verified: 99.99/9.999-valued fields, a 20-char
-    // smam string, 16 cells at "3.999," each) is ~290 bytes - json[1024]
-    // has plenty of headroom for the two extra raw fields below.
+    // Worst-case length, recounted for the #24 spreadMv/derate fields:
+    // numeric fields at their widest (99.99/9.999/-999.9-valued) plus keys
+    // ~150 bytes, a 20-char smam string ~29 bytes, cells:%s up to the
+    // cellsStr buffer itself (256) ~264 bytes, spreadMv (5-digit uint16)
+    // ~16 bytes and derate (0.00-1.00) ~13 bytes, plus punctuation - comes
+    // to ~490 bytes. json[1024] keeps comfortable headroom above that.
     char json[1024];
     snprintf(json, sizeof(json),
-             "{\"v\":%.2f,\"cv\":%.3f,\"minC\":%.3f,\"maxC\":%.3f,\"minCellRaw\":%.3f,\"maxCellRaw\":%.3f,\"i\":%.1f,\"reqI\":%.1f,\"soc\":%.1f,\"smam\":\"%s\",\"maint\":%d,\"force\":%d,\"isR\":%d,\"cells\":%s}",
+             "{\"v\":%.2f,\"cv\":%.3f,\"minC\":%.3f,\"maxC\":%.3f,\"minCellRaw\":%.3f,\"maxCellRaw\":%.3f,\"i\":%.1f,\"reqI\":%.1f,\"soc\":%.1f,\"smam\":\"%s\",\"maint\":%d,\"force\":%d,\"isR\":%d,\"spreadMv\":%u,\"derate\":%.2f,\"cells\":%s}",
              data.packVoltage, data.avgCellVoltage, data.minCellVoltage, data.maxCellVoltage,
              data.minCellVoltageRaw, data.maxCellVoltageRaw,
              data.packCurrent, data.requestedCurrent, data.packSOC,
              data.smaChargeMode.c_str(), (int)data.maintenanceActive, (int)data.forceCharge,
-             (int)data.isResetting, cellsStr);
+             (int)data.isResetting, (unsigned)data.cellSpreadRawMv, data.derateFactor, cellsStr);
 
     _events.send(json, "data", millis());
 }
@@ -92,6 +95,8 @@ void WebDashboard::loadConfig(SystemConfig &configOut)
     _cfg->cvMaintStart = _prefs.getFloat("cmsv", 3.030);
     _cfg->cvMaintStop = _prefs.getFloat("cmpp", 3.220);
     _cfg->maintAmps = _prefs.getFloat("mam", 20.0);
+    _cfg->spreadStartMv = (uint16_t)_prefs.getUInt("sps", 60);
+    _cfg->spreadMaxMv = (uint16_t)_prefs.getUInt("spm", 150);
 
     _prefs.end();
 }
@@ -138,6 +143,18 @@ void WebDashboard::saveConfig(AsyncWebServerRequest *request)
     {
         _cfg->vSamples = request->getParam("vs")->value().toInt();
         _prefs.putInt("vs", _cfg->vSamples);
+    }
+
+    if (request->hasParam("sps"))
+    {
+        _cfg->spreadStartMv = (uint16_t)request->getParam("sps")->value().toInt();
+        _prefs.putUInt("sps", _cfg->spreadStartMv);
+    }
+
+    if (request->hasParam("spm"))
+    {
+        _cfg->spreadMaxMv = (uint16_t)request->getParam("spm")->value().toInt();
+        _prefs.putUInt("spm", _cfg->spreadMaxMv);
     }
 
     _prefs.end();
@@ -219,8 +236,10 @@ void WebDashboard::setupRoutes()
         h.replace("!!VAL_DVT!!", String(_cfg->cvStartDTaper, 3)); 
         h.replace("!!VAL_LAG!!", String(_cfg->cvLowAlarmGate, 3)); 
         h.replace("!!VAL_LIMP!!", String(_cfg->limpDischargeA, 0));
-        h.replace("!!VAL_MDV!!", String(_cfg->cvMinDischarge, 3)); 
+        h.replace("!!VAL_MDV!!", String(_cfg->cvMinDischarge, 3));
         h.replace("!!VAL_VS!!", String(_cfg->vSamples));
+        h.replace("!!VAL_SPS!!", String(_cfg->spreadStartMv));
+        h.replace("!!VAL_SPM!!", String(_cfg->spreadMaxMv));
         request->send(200, "text/html", h); });
 
     _server.on("/save", HTTP_GET, [this](AsyncWebServerRequest *request)

@@ -46,6 +46,7 @@ const char index_html[] PROGMEM = R"rawliteral(
   <div class="card"><div>SMA Status</div><div id="smastat" class="value">--</div></div>
   <div class="card"><div>Max Cell V</div><div id="maxCellV" class="value">--</div></div>
   <div class="card"><div>Min Cell V</div><div id="minCellV" class="value">--</div></div>
+  <div class="card"><div>Cell Spread</div><div id="spread" class="value">--</div></div>
 </div>
 
 <div class="cells-container">
@@ -90,6 +91,15 @@ const char index_html[] PROGMEM = R"rawliteral(
     // and alarm gate act on the raw value, not this smoothed one).
     document.getElementById('maxCellV').innerHTML = obj.maxC.toFixed(3) + " (raw " + obj.maxCellRaw.toFixed(3) + ")";
     document.getElementById('minCellV').innerHTML = obj.minC.toFixed(3) + " (raw " + obj.minCellRaw.toFixed(3) + ")";
+
+    // Cell spread (#24) - raw max-min cell voltage and the resulting
+    // current-limit derating factor (1.0 = no derating).
+    const spreadEl = document.getElementById('spread');
+    const deratePct = Math.round((1 - obj.derate) * 100);
+    spreadEl.innerHTML = obj.spreadMv + " mV (" + (deratePct > 0 ? "derating " + deratePct + "%" : "none") + ")";
+    if (deratePct > 0) spreadEl.classList.add('negative-val');
+    else spreadEl.classList.remove('negative-val');
+
     const curEl = document.getElementById('i');
     curEl.innerHTML = obj.i.toFixed(1) + " A";
     if (obj.i < -0.1) curEl.classList.add('negative-val');
@@ -135,6 +145,7 @@ const char config_html[] PROGMEM = R"rawliteral(
   .row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 1px solid #2a2a2a; padding-bottom: 8px; }
   .text-group { text-align: left; padding-right: 15px; }
   .desc { font-size: 0.8em; color: #888; display: block; margin-top: 2px; }
+  .hint { font-size: 0.75em; color: #666; display: block; margin-top: 2px; font-style: italic; }
   h2 { color: #4caf50; border-bottom: 2px solid #4caf50; padding-bottom: 5px; margin-top: 25px; }
   .winter-h { color: #ff9800 !important; border-bottom: 2px solid #ff9800 !important; }
   input { font-size: 1.1em; padding: 5px; width: 110px; text-align: center; background: #000; color: #0f0; border: 1px solid #444; border-radius: 4px; }
@@ -178,6 +189,12 @@ const char config_html[] PROGMEM = R"rawliteral(
     <h2>System Tuning</h2>
     <div class="row"><div class="text-group"><strong>Voltage Window</strong><span class="desc">Number of moving average samples (1-20).</span></div>
       <input type="number" name="vs" step="1" value="!!VAL_VS!!"></div>
+
+    <h2>Cell Spread Derating (#24)</h2>
+    <div class="row"><div class="text-group"><strong>Cell spread: start derating (mV)</strong><span class="desc">Below this spread the current limits are untouched. Above it they are reduced linearly, reaching trickle/limp current at the 'full derating' value below. Spread = highest raw cell voltage minus lowest.</span><span class="hint">default 60, typical 40&ndash;100</span></div>
+      <input type="number" name="sps" step="5" value="!!VAL_SPS!!"></div>
+    <div class="row"><div class="text-group"><strong>Cell spread: full derating (mV)</strong><span class="desc">At or above this spread the current limits are held at trickle/limp current, same floor as the voltage alarm gate. Below it, derating eases back off toward the 'start derating' value above. Spread = highest raw cell voltage minus lowest.</span><span class="hint">default 150, typical 120&ndash;200</span></div>
+      <input type="number" name="spm" step="5" value="!!VAL_SPM!!"></div>
 
     <button type="submit" class="save">SAVE & APPLY ALL CHANGES</button>
   </form>

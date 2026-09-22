@@ -145,14 +145,14 @@ bool bmsDataFresh()
          Glideslope::isFresh(haveCellData, now, lastCellRead, cfg.bmsTimeout);
 }
 
-uint16_t calculateCCL(float smoothedMaxV, float rawMaxV)
+uint16_t calculateCCL(float smoothedMaxV, float rawMaxV, uint16_t spreadMv)
 {
-  return Glideslope::calculateCCL(cfg, smoothedMaxV, rawMaxV, bmsDataFresh(), currentData.maintenanceActive);
+  return Glideslope::calculateCCL(cfg, smoothedMaxV, rawMaxV, spreadMv, bmsDataFresh(), currentData.maintenanceActive);
 }
 
-uint16_t calculateDCL(float smoothedMinV, float rawMinV)
+uint16_t calculateDCL(float smoothedMinV, float rawMinV, uint16_t spreadMv)
 {
-  return Glideslope::calculateDCL(cfg, smoothedMinV, rawMinV, bmsDataFresh(), currentData.maintenanceActive);
+  return Glideslope::calculateDCL(cfg, smoothedMinV, rawMinV, spreadMv, bmsDataFresh(), currentData.maintenanceActive);
 }
 
 // --- UI EVENT HANDLER ---
@@ -308,6 +308,9 @@ void bmsTask(void *pvParameters)
         currentData.maxCellVoltage = localMax;
         currentData.minCellVoltageRaw = rawMin;
         currentData.maxCellVoltageRaw = rawMax;
+        // Raw spread (#24), from the same unsmoothed read as rawMin/rawMax
+        // above - drives Glideslope::spreadFactor() in canTask.
+        currentData.cellSpreadRawMv = (uint16_t)round((rawMax - rawMin) * 1000.0f);
         currentData.cellVoltages = smoothedCellVolts;
         lastCellRead = millis();
         haveCellData = true;
@@ -578,6 +581,9 @@ void canTask(void *pvParameters)
       bool resetFinished = false;
       bool fresh = false;
       int bmsTimeoutCopy = 0;
+      uint16_t spreadMvCopy = 0;
+      uint16_t spreadStartCopy = 0;
+      float derateFactorCopy = 1.0f;
 
       if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
         // Send nothing until the BMS has delivered basic info AND cell
@@ -624,11 +630,20 @@ void canTask(void *pvParameters)
           tx.maintenanceActive = currentData.maintenanceActive;
           tx.isResetting = currentData.isResetting;
 
-          tx.ccl = calculateCCL(currentData.maxCellVoltage, currentData.maxCellVoltageRaw);
+          tx.ccl = calculateCCL(currentData.maxCellVoltage, currentData.maxCellVoltageRaw, currentData.cellSpreadRawMv);
           currentData.requestedCurrent = tx.ccl / 10.0f;
-          tx.dcl = calculateDCL(currentData.minCellVoltage, currentData.minCellVoltageRaw);
+          tx.dcl = calculateDCL(currentData.minCellVoltage, currentData.minCellVoltageRaw, currentData.cellSpreadRawMv);
           tx.cvl = currentData.maintenanceActive ? 560 : (uint16_t)(cfg.cvMaxCharge * MAX_CELLS * 10);
           tx.dvl = (uint16_t)(cfg.cvMinDischarge * MAX_CELLS * 10);
+
+          // Derating factor (#24), for the dashboard - not consumed by
+          // calculateCCL()/calculateDCL() above (they derive it internally
+          // from cellSpreadRawMv), just mirrored here so the operator can
+          // see the setting act.
+          currentData.derateFactor = Glideslope::spreadFactor(currentData.cellSpreadRawMv, cfg.spreadStartMv, cfg.spreadMaxMv);
+          spreadMvCopy = currentData.cellSpreadRawMv;
+          spreadStartCopy = cfg.spreadStartMv;
+          derateFactorCopy = currentData.derateFactor;
 
           inverter.sendStatus(tx);
 
@@ -663,6 +678,29 @@ void canTask(void *pvParameters)
           netLog("[BMS] Data fresh again - limits restored\n");
         }
         wasFresh = fresh;
+      }
+
+      // Edge-triggered cell-spread derating log (#24), with hysteresis on
+      // the "ended" side so it doesn't chatter right at the boundary: only
+      // reported once derateFactorCopy is back at 1.0 AND the spread has
+      // fallen at least 10mV below spreadStartCopy, not merely back under
+      // it. Only meaningful once frames are enabled, same gate as the
+      // staleness log above.
+      static bool wasDerated = false;
+      if (framesEnabled)
+      {
+        if (!wasDerated && derateFactorCopy < 1.0f)
+        {
+          netLog("[BMS] Cell spread %u mV - limits derated to %u %%\n",
+                 (unsigned)spreadMvCopy, (unsigned)round(derateFactorCopy * 100.0f));
+          wasDerated = true;
+        }
+        else if (wasDerated && derateFactorCopy >= 1.0f &&
+                 (int)spreadMvCopy <= (int)spreadStartCopy - 10)
+        {
+          netLog("[BMS] Cell spread %u mV - derating ended\n", (unsigned)spreadMvCopy);
+          wasDerated = false;
+        }
       }
     }
 
@@ -836,6 +874,8 @@ void setup()
   currentData.smaChargeMode = "Unknown";
   currentData.minCellVoltageRaw = 0;
   currentData.maxCellVoltageRaw = 0;
+  currentData.cellSpreadRawMv = 0;
+  currentData.derateFactor = 1.0f; // no derating until canTask's first cycle computes the real factor
 
   // BMS and CAN come up before the network: setupNetwork() can block for up
   // to ~15s (WiFi + NTP), and the SMA should get frames as soon as real BMS

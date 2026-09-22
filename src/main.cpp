@@ -533,6 +533,8 @@ void canTask(void *pvParameters)
       lastSmaTx = now;
       bool firstFrames = false;
       bool resetFinished = false;
+      bool fresh = false;
+      int bmsTimeoutCopy = 0;
 
       if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
         // Send nothing until the BMS has delivered basic info AND cell
@@ -559,6 +561,12 @@ void canTask(void *pvParameters)
           currentData.maintenanceActive = manualMaintForce || autoMaint;
           currentData.forceCharge = currentData.maintenanceActive;
           currentData.isResetting = isResetting;
+
+          // Same freshness check calculateCCL()/calculateDCL() use below -
+          // captured here so the edge-triggered log after this lock can
+          // report a stale->0A transition without re-deriving it unlocked.
+          fresh = bmsDataFresh();
+          bmsTimeoutCopy = cfg.bmsTimeout;
 
           SMATxData tx;
           tx.packVoltage = currentData.packVoltage;
@@ -589,6 +597,25 @@ void canTask(void *pvParameters)
         netLog("[CAN] First BMS data at %lu ms uptime - SMA frames enabled.\n", now);
       if (resetFinished)
         netLog("[SYS] Recovery cycle finished.\n");
+
+      // Edge-triggered, and only meaningful once real BMS data has started
+      // flowing (framesEnabled) - staleBaseline gates the "fresh again" log
+      // so the very first-ever fresh reading isn't reported as a recovery.
+      static bool staleBaseline = false;
+      static bool wasFresh = false;
+      if (framesEnabled)
+      {
+        if (wasFresh && !fresh)
+        {
+          netLog("[BMS] Data stale (both reads older than %d s) - CCL/DCL forced to 0 A\n", bmsTimeoutCopy);
+          staleBaseline = true;
+        }
+        else if (!wasFresh && fresh && staleBaseline)
+        {
+          netLog("[BMS] Data fresh again - limits restored\n");
+        }
+        wasFresh = fresh;
+      }
     }
 
     vTaskDelay(pdMS_TO_TICKS(10));

@@ -33,6 +33,13 @@ namespace Glideslope
         if (!bmsFresh)
             return 0;
 
+        // A NaN voltage (e.g. a corrupted BMS read) or a NaN threshold (e.g.
+        // a corrupted NVS float) makes every comparison below false, which
+        // would otherwise fall through to the final `return maxChargeA` -
+        // full current instead of the fail-safe 0A. Catch it explicitly.
+        if (isnan(maxCellV) || isnan(cfg.cvMaxCharge) || isnan(cfg.cvHighAlarmGate) || isnan(cfg.cvStartTaper))
+            return 0;
+
         if (maintenanceActive)
             return (uint16_t)round(cfg.maintAmps * 10.0f);
 
@@ -63,6 +70,12 @@ namespace Glideslope
     inline uint16_t calculateDCL(const SystemConfig &cfg, float minCellV, bool bmsFresh, bool maintenanceActive)
     {
         if (!bmsFresh)
+            return 0;
+
+        // See the matching check in calculateCCL(): NaN fails every
+        // comparison below, which would otherwise fall through to the
+        // final `return maxDischargeA` instead of the fail-safe 0A.
+        if (isnan(minCellV) || isnan(cfg.cvMinDischarge) || isnan(cfg.cvLowAlarmGate) || isnan(cfg.cvStartDTaper))
             return 0;
 
         if (maintenanceActive)

@@ -56,6 +56,24 @@ void test_dcl_mid_taper(void)
 void test_dcl_zero_at_hard_min(void) { TEST_ASSERT_EQUAL(0, calculateDCL(cfg, 3.0f, true, false)); }
 void test_dcl_zero_in_maintenance(void) { TEST_ASSERT_EQUAL(0, calculateDCL(cfg, 3.3f, true, true)); }
 
+// --- Fail-safe: NaN voltage or threshold forces 0A ---
+
+void test_nan_voltage_is_zero(void)
+{
+    float nanV = NAN;
+    TEST_ASSERT_EQUAL(0, calculateCCL(cfg, nanV, true, false));
+    TEST_ASSERT_EQUAL(0, calculateDCL(cfg, nanV, true, false));
+}
+
+void test_nan_threshold_is_zero(void)
+{
+    cfg.cvHighAlarmGate = NAN;
+    TEST_ASSERT_EQUAL(0, calculateCCL(cfg, 3.3f, true, false));
+
+    cfg.cvLowAlarmGate = NAN;
+    TEST_ASSERT_EQUAL(0, calculateDCL(cfg, 3.15f, true, false));
+}
+
 // --- Fail-safe: no data / stale data forces 0A (#10) ---
 
 void test_limits_zero_when_not_fresh(void)
@@ -102,6 +120,8 @@ int main(int, char **)
     RUN_TEST(test_dcl_mid_taper);
     RUN_TEST(test_dcl_zero_at_hard_min);
     RUN_TEST(test_dcl_zero_in_maintenance);
+    RUN_TEST(test_nan_voltage_is_zero);
+    RUN_TEST(test_nan_threshold_is_zero);
     RUN_TEST(test_limits_zero_when_not_fresh);
     RUN_TEST(test_never_read_is_stale_right_after_boot);
     RUN_TEST(test_fresh_within_timeout);

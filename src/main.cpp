@@ -53,10 +53,14 @@ TaskHandle_t canTaskHandle = NULL;
 uint16_t cellBuffers[MAX_CELLS][MAX_SAMPLES] = {0};
 int bufferIndex = 0;
 
-// Written by handleUIAction() on the web server's task, read by canTask.
-volatile unsigned long resetHoldStartTime = 0;
-volatile bool manualMaintForce = false;
-volatile bool isResetting = false;
+// Written by handleUIAction() on the web server's task, read/written by
+// canTask - guarded by dataMutex like the rest of the cross-task state, so
+// canTask always sees resetHoldStartTime and isResetting set together
+// (previously unlocked, isResetting could be observed with a stale/zero
+// resetHoldStartTime and cancel a fresh reset instantly).
+unsigned long resetHoldStartTime = 0;
+bool manualMaintForce = false;
+bool isResetting = false;
 bool autoMaint = false; // canTask only
 
 // BMS data freshness - guarded by dataMutex. Nothing is sent to the SMA
@@ -148,14 +152,35 @@ void handleUIAction(const char *action)
 {
   if (strcmp(action, "toggleMaint") == 0)
   {
-    manualMaintForce = !manualMaintForce;
-    netLog("[USER] Manual Force Charge: %s\n", manualMaintForce ? "ON" : "OFF");
+    bool newState = false;
+    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE)
+    {
+      manualMaintForce = !manualMaintForce;
+      newState = manualMaintForce;
+      xSemaphoreGive(dataMutex);
+      netLog("[USER] Manual Force Charge: %s\n", newState ? "ON" : "OFF");
+    }
+    else
+    {
+      netLog("[USER] %s ignored: state busy\n", action);
+    }
   }
   else if (strcmp(action, "resetSMA") == 0)
   {
-    isResetting = true;
-    resetHoldStartTime = millis();
-    netLog("[USER] Manual Cluster Reset Triggered.\n");
+    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE)
+    {
+      // Set the timestamp before the flag: canTask (holding the same
+      // mutex) must never observe isResetting true with a stale/zero
+      // resetHoldStartTime, or it would cancel the reset immediately.
+      resetHoldStartTime = millis();
+      isResetting = true;
+      xSemaphoreGive(dataMutex);
+      netLog("[USER] Manual Cluster Reset Triggered.\n");
+    }
+    else
+    {
+      netLog("[USER] %s ignored: state busy\n", action);
+    }
   }
   else if (strcmp(action, "configSaved") == 0)
   {
@@ -487,16 +512,11 @@ void canTask(void *pvParameters)
       }
     }
 
-    if (isResetting && (now - resetHoldStartTime > 5500))
-    {
-      isResetting = false;
-      netLog("[SYS] Recovery cycle finished.\n");
-    }
-
     if (now - lastSmaTx > 250)
     {
       lastSmaTx = now;
       bool firstFrames = false;
+      bool resetFinished = false;
 
       if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
         // Send nothing until the BMS has delivered basic info AND cell
@@ -505,6 +525,16 @@ void canTask(void *pvParameters)
         // every reboot - better than made-up SOC/voltage/limits.
         if (haveBasicInfo && haveCellData)
         {
+          // isResetting/resetHoldStartTime are set together by
+          // handleUIAction() under this same mutex, so this always sees a
+          // consistent pair - it can't observe the flag with a stale
+          // timestamp and cancel a fresh reset instantly.
+          if (isResetting && (now - resetHoldStartTime > 5500))
+          {
+            isResetting = false;
+            resetFinished = true;
+          }
+
           if (!autoMaint && currentData.packVoltage > 0 && currentData.packVoltage < (cfg.cvMaintStart * MAX_CELLS))
             autoMaint = true;
           else if (autoMaint && currentData.packVoltage > (cfg.cvMaintStop * MAX_CELLS))
@@ -541,6 +571,8 @@ void canTask(void *pvParameters)
 
       if (firstFrames)
         netLog("[CAN] First BMS data at %lu ms uptime - SMA frames enabled.\n", now);
+      if (resetFinished)
+        netLog("[SYS] Recovery cycle finished.\n");
     }
 
     vTaskDelay(pdMS_TO_TICKS(10));

@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <cstring>
+#include <cmath>
 #include <WiFi.h>
 #include <ArduinoOTA.h>
 #include <TelnetStream.h>
@@ -205,6 +206,17 @@ void bmsTask(void *pvParameters)
     DalyBasicInfo info;
     if (bms.readBasicInfo(info))
     {
+      // A Daly BMS recalibrates SOC to 100% on a "charge full" condition
+      // (or occasionally jumps for other reasons); flag that as an event so
+      // an abrupt CCL drop at the SMA can be lined up against it. Logged
+      // outside dataMutex, before the mutex-protected store below.
+      static float lastSoc = -1;
+      float soc = info.packSOC;
+      if (lastSoc >= 0 &&
+          (fabsf(soc - lastSoc) > 10.0f || (soc >= 99.9f && lastSoc < 95.0f)))
+        netLog("[BMS] SOC jumped %.1f -> %.1f %% (Daly recalibration?)\n", lastSoc, soc);
+      lastSoc = soc;
+
       if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
         currentData.packVoltage = info.packVoltage;
         currentData.packCurrent = info.packCurrent;

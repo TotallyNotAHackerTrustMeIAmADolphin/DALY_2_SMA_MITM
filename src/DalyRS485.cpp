@@ -6,44 +6,11 @@
 DalyRS485::DalyRS485(HardwareSerial &serial)
     : _serial(&serial), _debugCb(nullptr) {}
 
-// Name table for the 0x98 "Alarm Info" payload, bytes 0-6 - see the
-// layout comment in readAlarmStatus() below for provenance. nullptr marks
-// bits not defined in the documented protocol.
-const char *const DalyRS485::kAlarmBitNames[7][8] = {
-    // byte 0: cell/pack over/undervoltage
-    {"Cell overvoltage Level 1", "Cell overvoltage Level 2",
-     "Cell undervoltage Level 1", "Cell undervoltage Level 2",
-     "Pack overvoltage Level 1", "Pack overvoltage Level 2",
-     "Pack undervoltage Level 1", "Pack undervoltage Level 2"},
-    // byte 1: charge/discharge over/undertemperature
-    {"Charge overtemperature Level 1", "Charge overtemperature Level 2",
-     "Charge undertemperature Level 1", "Charge undertemperature Level 2",
-     "Discharge overtemperature Level 1", "Discharge overtemperature Level 2",
-     "Discharge undertemperature Level 1", "Discharge undertemperature Level 2"},
-    // byte 2: charge/discharge overcurrent, SOC high/low
-    {"Charge overcurrent Level 1", "Charge overcurrent Level 2",
-     "Discharge overcurrent Level 1", "Discharge overcurrent Level 2",
-     "SOC high Level 1", "SOC high Level 2",
-     "SOC low Level 1", "SOC low Level 2"},
-    // byte 3: cell voltage difference, temperature difference
-    {"Cell voltage difference Level 1", "Cell voltage difference Level 2",
-     "Temperature difference Level 1", "Temperature difference Level 2",
-     nullptr, nullptr, nullptr, nullptr},
-    // byte 4: MOSFET temperature/adhesion/open circuit
-    {"Charge MOSFET overtemperature", "Discharge MOSFET overtemperature",
-     "Charge MOSFET temperature sensor fault", "Discharge MOSFET temperature sensor fault",
-     "Charge MOSFET adhesion (stuck on)", "Discharge MOSFET adhesion (stuck on)",
-     "Charge MOSFET open circuit", "Discharge MOSFET open circuit"},
-    // byte 5: AFE/sampling/EEPROM/RTC/precharge/communication faults
-    {"AFE chip fault", "Voltage sampling dropped",
-     "Cell temperature sensor fault", "EEPROM fault",
-     "RTC fault", "Precharge failure",
-     "Communication failure", "Internal communication failure"},
-    // byte 6: current module/pack voltage/short circuit/low-voltage charging
-    {"Current module fault", "Pack voltage detection fault",
-     "Short circuit protection", "Low-voltage charging forbidden",
-     nullptr, nullptr, nullptr, nullptr},
-};
+// Defined out-of-class (required for a non-constexpr reference static data
+// member): binds to the single table owned by DalyFrames::kAlarmBitNames()
+// (#30). See the declaration in DalyRS485.h for why this stays a static
+// member instead of just pointing callers at DalyFrames directly.
+const char *const (&DalyRS485::kAlarmBitNames)[7][8] = DalyFrames::kAlarmBitNames();
 
 void DalyRS485::debugLog(const char *format, ...)
 {
@@ -123,11 +90,7 @@ bool DalyRS485::receiveSingleFrame(uint8_t expectedCmd, uint8_t *dataOut, unsign
             buf[idx++] = c;
             if (idx == 13)
             {
-                uint8_t checksum = 0;
-                for (int i = 0; i < 12; i++)
-                    checksum += buf[i];
-
-                if (checksum == buf[12] && buf[2] == expectedCmd)
+                if (DalyFrames::checksumOk(buf) && buf[2] == expectedCmd)
                 {
                     std::memcpy(dataOut, &buf[4], 8);
                     return true;
@@ -150,13 +113,7 @@ bool DalyRS485::readBasicInfo(DalyBasicInfo &info)
     uint8_t data[8];
 
     if (receiveSingleFrame(0x90, data, 150))
-    {
-        info.packVoltage = ((data[0] << 8) | data[1]) / 10.0f;
-        uint16_t currentOffset = (data[4] << 8) | data[5];
-        info.packCurrent = (currentOffset - 30000) / 10.0f;
-        info.packSOC = ((data[6] << 8) | data[7]) / 10.0f;
-        return true;
-    }
+        return DalyFrames::parseBasicInfo(data, info);
     return false;
 }
 
@@ -194,13 +151,11 @@ bool DalyRS485::readCellVoltages(uint8_t expectedCells, std::vector<float> &cell
                 buf[idx++] = c;
                 if (idx == 13)
                 {
-                    uint8_t checksum = 0;
-                    for (int i = 0; i < 12; i++)
-                        checksum += buf[i];
-
-                    if (checksum == buf[12] && buf[2] == 0x95)
+                    if (DalyFrames::checksumOk(buf) && buf[2] == 0x95)
                     {
-                        uint8_t frameNum = buf[4];
+                        uint8_t frameNum;
+                        uint16_t mv[3];
+                        DalyFrames::parseCellFrame(&buf[4], frameNum, mv);
 
                         if (frameNum > 0 && frameNum <= expectedFrames)
                         {
@@ -214,15 +169,12 @@ bool DalyRS485::readCellVoltages(uint8_t expectedCells, std::vector<float> &cell
                                 {
                                     int cellIdx = (frameNum - 1) * 3 + i;
                                     if (cellIdx < expectedCells)
-                                    {
-                                        uint16_t mv = (buf[5 + i * 2] << 8) | buf[6 + i * 2];
-                                        cellVoltages[cellIdx] = mv / 1000.0f;
-                                    }
+                                        cellVoltages[cellIdx] = mv[i] / 1000.0f;
                                 }
                             }
                         }
                     }
-                    else if (checksum != buf[12])
+                    else if (!DalyFrames::checksumOk(buf))
                     {
                         debugLog("[DALY-LIB] Stream checksum failed. Continuing...\n");
                     }
@@ -247,19 +199,17 @@ bool DalyRS485::readCellVoltages(uint8_t expectedCells, std::vector<float> &cell
             // LiFePO4 range; the caller's stale-data fail-safe then drops
             // limits to 0A instead of trusting the value.
             static bool rejecting = false;
-            for (uint8_t i = 0; i < expectedCells; i++)
+            int badIndex;
+            if (!DalyFrames::cellVoltagesPlausible(cellVoltages.data(), expectedCells, badIndex))
             {
-                uint16_t mv = (uint16_t)(cellVoltages[i] * 1000.0f + 0.5f);
-                if (mv < kCellMinPlausibleMv || mv > kCellMaxPlausibleMv)
+                if (!rejecting)
                 {
-                    if (!rejecting)
-                    {
-                        debugLog("[BMS] Rejected cell frame: cell %d = %u mV outside 1.5-4.5 V\n", i + 1, mv);
-                        rejecting = true;
-                    }
-                    cellVoltages.assign(expectedCells, 0.0f);
-                    return false;
+                    uint16_t mv = (uint16_t)(cellVoltages[badIndex] * 1000.0f + 0.5f);
+                    debugLog("[BMS] Rejected cell frame: cell %d = %u mV outside 1.5-4.5 V\n", badIndex + 1, mv);
+                    rejecting = true;
                 }
+                cellVoltages.assign(expectedCells, 0.0f);
+                return false;
             }
 
             if (rejecting)
@@ -285,27 +235,13 @@ bool DalyRS485::readMosfetStatus(DalyMosfetStatus &status)
     if (!receiveSingleFrame(0x93, data, 150))
         return false;
 
-    // Daly UART "Status Info 2" (cmd 0x93) payload layout, from the same
-    // community-documented protocol family as the 0x90/0x95 frames above
-    // (e.g. syssi/esphome-daly-bms, patman15 Daly UART docs):
-    //   [0] charge/discharge status (0=stall, 1=charge, 2=discharge)
-    //   [1] charge MOSFET state (0=off, 1=on)
-    //   [2] discharge MOSFET state (0=off, 1=on)
-    //   [3] BMS life cycle count
-    //   [4..7] remaining capacity, Ah*1000
-    // NOT yet verified byte-for-byte against this specific pack's firmware -
-    // sanity-check against a serial monitor / known MOSFET state after
-    // flashing. Defensive: MOSFET bytes must be 0 or 1; anything else means
-    // this frame isn't what we think it is, so report failure instead of
-    // guessing.
-    if (data[1] > 1 || data[2] > 1)
+    // See DalyFrames::parseMosfetStatus() for the 0x93 byte layout this
+    // rejects on and its provenance/caveats.
+    if (!DalyFrames::parseMosfetStatus(data, status))
     {
         debugLog("[DALY-LIB] 0x93 MOSFET bytes out of expected range (%d,%d). Ignoring frame.\n", data[1], data[2]);
         return false;
     }
-
-    status.chargeMosOn = (data[1] == 1);
-    status.dischargeMosOn = (data[2] == 1);
     return true;
 }
 
@@ -317,46 +253,7 @@ bool DalyRS485::readAlarmStatus(DalyAlarmStatus &status)
     if (!receiveSingleFrame(0x98, data, 150))
         return false;
 
-    // Daly UART "Alarm Info" (cmd 0x98) payload layout, same documented
-    // protocol family as above:
-    //   [0] bit0/1 = cell overvolt level1/2, bit2/3 = cell undervolt level1/2,
-    //       bit4/5 = pack overvolt level1/2, bit6/7 = pack undervolt level1/2
-    //   [1] bit0/1 = charge overtemp L1/L2, bit2/3 = charge undertemp L1/L2,
-    //       bit4/5 = discharge overtemp L1/L2, bit6/7 = discharge undertemp L1/L2
-    //   [2] bit0/1 = charge overcurrent L1/L2, bit2/3 = discharge overcurrent L1/L2,
-    //       bit4/5 = SOC high L1/L2, bit6/7 = SOC low L1/L2
-    //   [3] bit0/1 = cell voltage difference L1/L2, bit2/3 = temperature difference L1/L2
-    //   [4] bit0 = charge MOS overtemp, bit1 = discharge MOS overtemp,
-    //       bit2/3 = charge/discharge MOS temp sensor fault,
-    //       bit4/5 = charge/discharge MOS adhesion (stuck on),
-    //       bit6/7 = charge/discharge MOS open circuit
-    //   [5] bit0 = AFE chip fault, bit1 = voltage sampling dropped,
-    //       bit2 = cell temp sensor fault, bit3 = EEPROM fault, bit4 = RTC fault,
-    //       bit5 = precharge failure, bit6 = communication failure,
-    //       bit7 = internal communication failure
-    //   [6] bit0 = current module fault, bit1 = pack voltage detection fault,
-    //       bit2 = short circuit protection, bit3 = low-voltage charging forbidden
-    //   [7] numeric fault code
-    // See DalyRS485::kAlarmBitNames for the byte/bit -> name table this
-    // mirrors. NOT yet verified byte-for-byte against this specific pack's
-    // firmware - sanity-check against a serial monitor after flashing, e.g.
-    // by temporarily lowering cvMaxCharge below the pack's real voltage and
-    // confirming bit0 of byte 0 sets.
-    memcpy(status.rawBytes, data, sizeof(status.rawBytes));
-
-    status.cellOvervoltLevel1 = data[0] & 0x01;
-    status.cellOvervoltLevel2 = data[0] & 0x02;
-    status.packOvervoltLevel1 = data[0] & 0x10;
-    status.packOvervoltLevel2 = data[0] & 0x20;
-
-    status.anyProtectionActive = false;
-    for (int i = 0; i < 7; i++)
-    {
-        if (data[i] != 0)
-        {
-            status.anyProtectionActive = true;
-            break;
-        }
-    }
-    return true;
+    // See DalyFrames::parseAlarmStatus() for the 0x98 byte layout this
+    // decodes and its provenance/caveats.
+    return DalyFrames::parseAlarmStatus(data, status);
 }

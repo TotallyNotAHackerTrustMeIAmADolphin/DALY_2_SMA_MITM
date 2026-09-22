@@ -92,6 +92,8 @@ void WebDashboard::loadConfig(SystemConfig &configOut)
     _cfg->cvMaintStart = _prefs.getFloat("cmsv", 3.030);
     _cfg->cvMaintStop = _prefs.getFloat("cmpp", 3.220);
     _cfg->maintAmps = _prefs.getFloat("mam", 20.0);
+    _cfg->spreadStartMv = (uint16_t)_prefs.getUInt("sps", 60);
+    _cfg->spreadMaxMv = (uint16_t)_prefs.getUInt("spm", 150);
 
     _prefs.end();
 }
@@ -138,6 +140,18 @@ void WebDashboard::saveConfig(AsyncWebServerRequest *request)
     {
         _cfg->vSamples = request->getParam("vs")->value().toInt();
         _prefs.putInt("vs", _cfg->vSamples);
+    }
+
+    if (request->hasParam("sps"))
+    {
+        _cfg->spreadStartMv = (uint16_t)request->getParam("sps")->value().toInt();
+        _prefs.putUInt("sps", _cfg->spreadStartMv);
+    }
+
+    if (request->hasParam("spm"))
+    {
+        _cfg->spreadMaxMv = (uint16_t)request->getParam("spm")->value().toInt();
+        _prefs.putUInt("spm", _cfg->spreadMaxMv);
     }
 
     _prefs.end();

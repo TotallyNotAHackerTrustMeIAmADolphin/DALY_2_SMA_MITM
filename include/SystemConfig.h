@@ -1,4 +1,5 @@
 #pragma once
+#include <stdint.h>
 
 // NVS-persisted settings (loaded/saved by WebDashboard). Kept free of
 // Arduino/FreeRTOS includes so the pure glideslope math in Glideslope.h,
@@ -19,4 +20,12 @@ struct SystemConfig {
     float cvMaintStart;
     float cvMaintStop;
     float maintAmps;
+
+    // Raw (max-min) cell spread, in mV, at which current-limit derating
+    // starts (#24) - below this the taper/full-current result is untouched.
+    uint16_t spreadStartMv = 60;
+    // Raw cell spread, in mV, at which derating bottoms out: the taper/
+    // full-current result is forced down to trickle/limp current. Linear
+    // in between spreadStartMv and spreadMaxMv.
+    uint16_t spreadMaxMv = 150;
 };

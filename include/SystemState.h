@@ -23,6 +23,14 @@ struct DashboardData {
     float minCellVoltageRaw;
     float maxCellVoltageRaw;
     std::vector<float> cellVoltages;
+
+    // Raw max-min cell spread (#24), in mV, from the same latest read as
+    // minCellVoltageRaw/maxCellVoltageRaw above - drives Glideslope's
+    // spreadFactor() derating. derateFactor is that factor (1.0 = no
+    // derating), stored for the dashboard so the operator can see the
+    // setting act, not consumed by calculateCCL/DCL directly.
+    uint16_t cellSpreadRawMv;
+    float derateFactor;
     
     float packCurrent;
     int16_t packTemp;

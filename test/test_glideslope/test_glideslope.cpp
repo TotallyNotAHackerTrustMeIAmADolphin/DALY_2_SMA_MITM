@@ -214,6 +214,20 @@ void test_nan_threshold_is_zero(void)
     TEST_ASSERT_EQUAL(0, calculateDCL(cfg, 3.15f, true, false));
 }
 
+void test_nan_current_setpoint_is_zero(void)
+{
+    // round(NaN * 10) cast to uint16_t is undefined; the guard must catch
+    // a NaN current setpoint too, including in maintenance mode.
+    cfg.maxChargeA = NAN;
+    TEST_ASSERT_EQUAL(0, calculateCCL(cfg, 3.0f, true, false));
+    cfg = SystemConfig{}; setUp();
+    cfg.maintAmps = NAN;
+    TEST_ASSERT_EQUAL(0, calculateCCL(cfg, 3.0f, true, true));
+    cfg = SystemConfig{}; setUp();
+    cfg.limpDischargeA = NAN;
+    TEST_ASSERT_EQUAL(0, calculateDCL(cfg, 3.05f, true, false));
+}
+
 // --- Fail-safe: no data / stale data forces 0A (#10) ---
 
 void test_limits_zero_when_not_fresh(void)
@@ -277,6 +291,7 @@ int main(int, char **)
     RUN_TEST(test_fresh_at_boot_time_zero);
     RUN_TEST(test_nan_voltage_is_zero);
     RUN_TEST(test_nan_threshold_is_zero);
+    RUN_TEST(test_nan_current_setpoint_is_zero);
     RUN_TEST(test_limits_zero_when_not_fresh);
     RUN_TEST(test_never_read_is_stale_right_after_boot);
     RUN_TEST(test_fresh_within_timeout);

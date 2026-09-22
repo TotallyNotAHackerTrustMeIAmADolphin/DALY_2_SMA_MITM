@@ -36,8 +36,10 @@ namespace Glideslope
         // A NaN voltage (e.g. a corrupted BMS read) or a NaN threshold (e.g.
         // a corrupted NVS float) makes every comparison below false, which
         // would otherwise fall through to the final `return maxChargeA` -
-        // full current instead of the fail-safe 0A. Catch it explicitly.
-        if (isnan(maxCellV) || isnan(cfg.cvMaxCharge) || isnan(cfg.cvHighAlarmGate) || isnan(cfg.cvStartTaper))
+        // full current instead of the fail-safe 0A. A NaN current setpoint
+        // would make round(NaN) -> uint16_t undefined. Catch both explicitly.
+        if (isnan(maxCellV) || isnan(cfg.cvMaxCharge) || isnan(cfg.cvHighAlarmGate) || isnan(cfg.cvStartTaper) ||
+            isnan(cfg.maxChargeA) || isnan(cfg.trickleA) || isnan(cfg.maintAmps))
             return 0;
 
         if (maintenanceActive)
@@ -75,7 +77,8 @@ namespace Glideslope
         // See the matching check in calculateCCL(): NaN fails every
         // comparison below, which would otherwise fall through to the
         // final `return maxDischargeA` instead of the fail-safe 0A.
-        if (isnan(minCellV) || isnan(cfg.cvMinDischarge) || isnan(cfg.cvLowAlarmGate) || isnan(cfg.cvStartDTaper))
+        if (isnan(minCellV) || isnan(cfg.cvMinDischarge) || isnan(cfg.cvLowAlarmGate) || isnan(cfg.cvStartDTaper) ||
+            isnan(cfg.maxDischargeA) || isnan(cfg.limpDischargeA))
             return 0;
 
         if (maintenanceActive)

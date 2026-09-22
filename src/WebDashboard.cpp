@@ -2,15 +2,14 @@
 #include "WebPages.h"
 #include "SDLogger.h"
 #include <SD.h>
+#include "esp_core_dump.h"
+#include "esp_flash.h"
 
 WebDashboard::WebDashboard(uint16_t port)
     : _server(port), _events("/events"), _actionCb(nullptr), _cfg(nullptr) {}
 
-void WebDashboard::begin(SystemConfig &configOut)
+void WebDashboard::begin()
 {
-    _cfg = &configOut;
-
-    loadConfig();
     setupRoutes();
 
     _server.addHandler(&_events);
@@ -53,10 +52,12 @@ void WebDashboard::broadcastTelemetry(const DashboardData &data)
     _events.send(json, "data", millis());
 }
 
-void WebDashboard::loadConfig()
+void WebDashboard::loadConfig(SystemConfig &configOut)
 {
+    _cfg = &configOut;
+
     // No dataMutex needed here: this runs once from setup(), before bmsTask
-    // or loop() exist, so there is no concurrent reader yet.
+    // or canTask exist, so there is no concurrent reader yet.
     _prefs.begin("bms-bridge", false);
 
     // Read from NVS or set defaults
@@ -278,6 +279,35 @@ void WebDashboard::setupRoutes()
         request->onDisconnect([mtx]() { xSemaphoreGive(mtx); });
 
         request->send(SD, "/" + name, contentTypeForLogFile(name), true /* download */); });
+
+    // Raw core dump image from the flash "coredump" partition, written by
+    // ESP-IDF on the last panic (ELF format, CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH
+    // is on in this Arduino core's prebuilt sdkconfig). Decode on a PC with
+    // the ELF of the firmware that crashed:
+    //   espcoredump.py info_corefile -t raw -c coredump.bin firmware.elf
+    // Streamed straight from flash in small chunks - no 64KB heap buffer.
+    _server.on("/api/coredump", HTTP_GET, [](AsyncWebServerRequest *request)
+               {
+        size_t addr = 0, size = 0;
+        if (esp_core_dump_image_get(&addr, &size) != ESP_OK || size == 0) {
+            request->send(404, "text/plain", "No core dump stored");
+            return;
+        }
+
+        AsyncWebServerResponse *response = request->beginResponse(
+            "application/octet-stream", size,
+            [addr, size](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
+                if (index >= size)
+                    return 0;
+                size_t n = size - index;
+                if (n > maxLen)
+                    n = maxLen;
+                if (esp_flash_read(NULL, buffer, addr + index, n) != ESP_OK)
+                    return 0;
+                return n;
+            });
+        response->addHeader("Content-Disposition", "attachment; filename=\"coredump.bin\"");
+        request->send(response); });
 
     _server.on("/graphs", HTTP_GET, [](AsyncWebServerRequest *request)
                { request->send(200, "text/html", graphs_html); });

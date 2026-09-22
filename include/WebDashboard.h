@@ -11,8 +11,14 @@ class WebDashboard
 public:
     WebDashboard(uint16_t port = 80);
 
-    // Initializes the server, loads NVS config, and attaches to WiFi
-    void begin(SystemConfig &configOut);
+    // Loads the NVS config into configOut and keeps a pointer to it for the
+    // /config page and /save. Needs no network, so setup() calls it first -
+    // the CAN/BMS tasks start before WiFi and need the setpoints right away.
+    void loadConfig(SystemConfig &configOut);
+
+    // Registers routes and starts the server. Call once WiFi is up: the
+    // async TCP stack must not be touched before the network is initialized.
+    void begin();
 
     // Attach an action listener for the buttons
     void setActionCallback(ActionCallback cb);
@@ -30,7 +36,6 @@ private:
     SystemConfig *_cfg; // Pointer to the main app's config struct
     ActionCallback _actionCb;
 
-    void loadConfig();
     void saveConfig(AsyncWebServerRequest *request);
     void setupRoutes();
 

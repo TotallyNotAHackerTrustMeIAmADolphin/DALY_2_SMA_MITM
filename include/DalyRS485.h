@@ -45,6 +45,17 @@ public:
     bool readMosfetStatus(DalyMosfetStatus &status);
     bool readAlarmStatus(DalyAlarmStatus &status);
 
+    // Plausible cell-voltage envelope for a LiFePO4 cell. Anything outside
+    // 1.5-4.5 V is either a wiring/parse fault or a pack that must not be
+    // charged/discharged anyway, so readCellVoltages() rejects the whole
+    // read rather than feed the value into bmsTask's moving-average filter
+    // (which seeds its entire window from the first successful reading -
+    // one bad checksum-passing value would get full weight for a whole
+    // window). Rejecting makes the data go stale, which drops the glideslope
+    // limits to 0 A (fail-safe).
+    static constexpr uint16_t kCellMinPlausibleMv = 1500;
+    static constexpr uint16_t kCellMaxPlausibleMv = 4500;
+
 private:
     HardwareSerial *_serial;
     DalyDebugCallback _debugCb; // Stores the callback function

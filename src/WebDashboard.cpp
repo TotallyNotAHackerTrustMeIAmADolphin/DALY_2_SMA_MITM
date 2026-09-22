@@ -3,11 +3,69 @@
 #include "SDLogger.h"
 #include <SD.h>
 #include <cstdarg>
+#include <cstddef>
 #include <cstdio>
 #include "esp_core_dump.h"
 #include "esp_flash.h"
 #include "esp_system.h"
 #include "esp_ota_ops.h"
+
+namespace
+{
+    // One row per NVS-persisted setting (issue #34). `key` is both the NVS
+    // storage key and the /save HTTP GET parameter name for every field
+    // below (they've always been the same string). `placeholder` is the
+    // !!VAL_XXX!! token substituted into config_html by the /config route;
+    // nullptr means the field has no UI representation.
+    //
+    // KIND_UINT16 exists (rather than folding sps/spm into KIND_INT) because
+    // they're stored via Preferences::getUInt/putUInt, not getInt/putInt -
+    // NVS enforces the stored type, so reading a UInt-written key with
+    // getInt would fail against a device's existing NVS content.
+    //
+    // Keys as of #34 (unchanged from before this refactor):
+    //   ca cvt cag ta cmv cmsv cmpp mam da cdvt clag ld_v2 cmdv vs to sps spm
+    // `to` (bmsTimeout) is loaded from NVS but was never wired to /save or
+    // the /config page even before this change - see the note in
+    // saveConfig() below. Preserved as-is: placeholder = nullptr, and it's
+    // simply never present in a /save request.
+    struct ConfigField
+    {
+        const char *key;
+        enum Kind
+        {
+            KIND_FLOAT,
+            KIND_INT,
+            KIND_UINT16
+        } kind;
+        size_t offset; // offsetof(SystemConfig, <member>)
+        float defF;
+        int defI; // also holds the default for KIND_UINT16 fields
+        const char *placeholder;
+        uint8_t decimals; // String(float, decimals) formatting for /config; KIND_INT/KIND_UINT16 ignore this
+    };
+
+    const ConfigField kConfigFields[] = {
+        // key      kind                       offset                                    defF    defI  placeholder      decimals
+        {"ca", ConfigField::KIND_FLOAT, offsetof(SystemConfig, maxChargeA), 250.0f, 0, "!!VAL_CA!!", 0},
+        {"cvt", ConfigField::KIND_FLOAT, offsetof(SystemConfig, cvStartTaper), 3.375f, 0, "!!VAL_VT!!", 3},
+        {"cag", ConfigField::KIND_FLOAT, offsetof(SystemConfig, cvHighAlarmGate), 3.425f, 0, "!!VAL_AG!!", 3},
+        {"ta", ConfigField::KIND_FLOAT, offsetof(SystemConfig, trickleA), 2.0f, 0, "!!VAL_TA!!", 1},
+        {"cmv", ConfigField::KIND_FLOAT, offsetof(SystemConfig, cvMaxCharge), 3.450f, 0, "!!VAL_MV!!", 3},
+        {"cmsv", ConfigField::KIND_FLOAT, offsetof(SystemConfig, cvMaintStart), 3.030f, 0, "!!VAL_MSV!!", 3},
+        {"cmpp", ConfigField::KIND_FLOAT, offsetof(SystemConfig, cvMaintStop), 3.220f, 0, "!!VAL_MPP!!", 3},
+        {"mam", ConfigField::KIND_FLOAT, offsetof(SystemConfig, maintAmps), 20.0f, 0, "!!VAL_MAM!!", 0},
+        {"da", ConfigField::KIND_FLOAT, offsetof(SystemConfig, maxDischargeA), 500.0f, 0, "!!VAL_DA!!", 0},
+        {"cdvt", ConfigField::KIND_FLOAT, offsetof(SystemConfig, cvStartDTaper), 3.100f, 0, "!!VAL_DVT!!", 3},
+        {"clag", ConfigField::KIND_FLOAT, offsetof(SystemConfig, cvLowAlarmGate), 3.065f, 0, "!!VAL_LAG!!", 3},
+        {"ld_v2", ConfigField::KIND_FLOAT, offsetof(SystemConfig, limpDischargeA), 15.0f, 0, "!!VAL_LIMP!!", 0},
+        {"cmdv", ConfigField::KIND_FLOAT, offsetof(SystemConfig, cvMinDischarge), 3.000f, 0, "!!VAL_MDV!!", 3},
+        {"vs", ConfigField::KIND_INT, offsetof(SystemConfig, vSamples), 0, 12, "!!VAL_VS!!", 0},
+        {"to", ConfigField::KIND_INT, offsetof(SystemConfig, bmsTimeout), 0, 60, nullptr, 0},
+        {"sps", ConfigField::KIND_UINT16, offsetof(SystemConfig, spreadStartMv), 0, 60, "!!VAL_SPS!!", 0},
+        {"spm", ConfigField::KIND_UINT16, offsetof(SystemConfig, spreadMaxMv), 0, 150, "!!VAL_SPM!!", 0},
+    };
+}
 
 WebDashboard::WebDashboard(uint16_t port)
     : _server(port), _events("/events"), _actionCb(nullptr), _debugCb(nullptr), _cfg(nullptr) {}
@@ -104,24 +162,24 @@ void WebDashboard::loadConfig(SystemConfig &configOut)
     // or canTask exist, so there is no concurrent reader yet.
     _prefs.begin("bms-bridge", false);
 
-    // Read from NVS or set defaults
-    _cfg->maxChargeA = _prefs.getFloat("ca", 250.0);
-    _cfg->maxDischargeA = _prefs.getFloat("da", 500.0);
-    _cfg->cvStartTaper = _prefs.getFloat("cvt", 3.375);
-    _cfg->cvMaxCharge = _prefs.getFloat("cmv", 3.450);
-    _cfg->cvStartDTaper = _prefs.getFloat("cdvt", 3.100);
-    _cfg->cvMinDischarge = _prefs.getFloat("cmdv", 3.000);
-    _cfg->cvHighAlarmGate = _prefs.getFloat("cag", 3.425);
-    _cfg->cvLowAlarmGate = _prefs.getFloat("clag", 3.065);
-    _cfg->trickleA = _prefs.getFloat("ta", 2.0);
-    _cfg->limpDischargeA = _prefs.getFloat("ld_v2", 15.0);
-    _cfg->vSamples = _prefs.getInt("vs", 12);
-    _cfg->bmsTimeout = _prefs.getInt("to", 60);
-    _cfg->cvMaintStart = _prefs.getFloat("cmsv", 3.030);
-    _cfg->cvMaintStop = _prefs.getFloat("cmpp", 3.220);
-    _cfg->maintAmps = _prefs.getFloat("mam", 20.0);
-    _cfg->spreadStartMv = (uint16_t)_prefs.getUInt("sps", 60);
-    _cfg->spreadMaxMv = (uint16_t)_prefs.getUInt("spm", 150);
+    // Read from NVS or set defaults - see kConfigFields above for the key/
+    // default list.
+    for (const ConfigField &f : kConfigFields)
+    {
+        uint8_t *member = reinterpret_cast<uint8_t *>(_cfg) + f.offset;
+        switch (f.kind)
+        {
+        case ConfigField::KIND_FLOAT:
+            *reinterpret_cast<float *>(member) = _prefs.getFloat(f.key, f.defF);
+            break;
+        case ConfigField::KIND_INT:
+            *reinterpret_cast<int *>(member) = _prefs.getInt(f.key, f.defI);
+            break;
+        case ConfigField::KIND_UINT16:
+            *reinterpret_cast<uint16_t *>(member) = (uint16_t)_prefs.getUInt(f.key, (uint32_t)f.defI);
+            break;
+        }
+    }
 
     _prefs.end();
 }
@@ -142,45 +200,40 @@ void WebDashboard::saveConfig(AsyncWebServerRequest *request)
 
     _prefs.begin("bms-bridge", false);
 
-    auto saveFloat = [&](const char *param, float &val)
+    // "to" (bmsTimeout) has no form field in config_html, so hasParam(f.key)
+    // is always false for it here - it just never gets touched, same as
+    // before this refactor.
+    for (const ConfigField &f : kConfigFields)
     {
-        if (request->hasParam(param))
+        if (!request->hasParam(f.key))
+            continue;
+
+        const String &val = request->getParam(f.key)->value();
+        uint8_t *member = reinterpret_cast<uint8_t *>(_cfg) + f.offset;
+        switch (f.kind)
         {
-            val = request->getParam(param)->value().toFloat();
-            _prefs.putFloat(param, val);
+        case ConfigField::KIND_FLOAT:
+        {
+            float v = val.toFloat();
+            *reinterpret_cast<float *>(member) = v;
+            _prefs.putFloat(f.key, v);
+            break;
         }
-    };
-
-    saveFloat("ca", _cfg->maxChargeA);
-    saveFloat("cvt", _cfg->cvStartTaper);
-    saveFloat("cag", _cfg->cvHighAlarmGate);
-    saveFloat("ta", _cfg->trickleA);
-    saveFloat("cmv", _cfg->cvMaxCharge);
-    saveFloat("cmsv", _cfg->cvMaintStart);
-    saveFloat("cmpp", _cfg->cvMaintStop);
-    saveFloat("mam", _cfg->maintAmps);
-    saveFloat("da", _cfg->maxDischargeA);
-    saveFloat("cdvt", _cfg->cvStartDTaper);
-    saveFloat("clag", _cfg->cvLowAlarmGate);
-    saveFloat("ld_v2", _cfg->limpDischargeA);
-    saveFloat("cmdv", _cfg->cvMinDischarge);
-
-    if (request->hasParam("vs"))
-    {
-        _cfg->vSamples = request->getParam("vs")->value().toInt();
-        _prefs.putInt("vs", _cfg->vSamples);
-    }
-
-    if (request->hasParam("sps"))
-    {
-        _cfg->spreadStartMv = (uint16_t)request->getParam("sps")->value().toInt();
-        _prefs.putUInt("sps", _cfg->spreadStartMv);
-    }
-
-    if (request->hasParam("spm"))
-    {
-        _cfg->spreadMaxMv = (uint16_t)request->getParam("spm")->value().toInt();
-        _prefs.putUInt("spm", _cfg->spreadMaxMv);
+        case ConfigField::KIND_INT:
+        {
+            int v = val.toInt();
+            *reinterpret_cast<int *>(member) = v;
+            _prefs.putInt(f.key, v);
+            break;
+        }
+        case ConfigField::KIND_UINT16:
+        {
+            uint16_t v = (uint16_t)val.toInt();
+            *reinterpret_cast<uint16_t *>(member) = v;
+            _prefs.putUInt(f.key, v);
+            break;
+        }
+        }
     }
 
     _prefs.end();
@@ -250,22 +303,21 @@ void WebDashboard::setupRoutes()
     _server.on("/config", HTTP_GET, [this](AsyncWebServerRequest *request)
                {
         String h = String(config_html);
-        h.replace("!!VAL_CA!!", String(_cfg->maxChargeA, 0)); 
-        h.replace("!!VAL_VT!!", String(_cfg->cvStartTaper, 3)); 
-        h.replace("!!VAL_AG!!", String(_cfg->cvHighAlarmGate, 3));
-        h.replace("!!VAL_TA!!", String(_cfg->trickleA, 1)); 
-        h.replace("!!VAL_MV!!", String(_cfg->cvMaxCharge, 3)); 
-        h.replace("!!VAL_MSV!!", String(_cfg->cvMaintStart, 3));
-        h.replace("!!VAL_MPP!!", String(_cfg->cvMaintStop, 3)); 
-        h.replace("!!VAL_MAM!!", String(_cfg->maintAmps, 0)); 
-        h.replace("!!VAL_DA!!", String(_cfg->maxDischargeA, 0));
-        h.replace("!!VAL_DVT!!", String(_cfg->cvStartDTaper, 3)); 
-        h.replace("!!VAL_LAG!!", String(_cfg->cvLowAlarmGate, 3)); 
-        h.replace("!!VAL_LIMP!!", String(_cfg->limpDischargeA, 0));
-        h.replace("!!VAL_MDV!!", String(_cfg->cvMinDischarge, 3));
-        h.replace("!!VAL_VS!!", String(_cfg->vSamples));
-        h.replace("!!VAL_SPS!!", String(_cfg->spreadStartMv));
-        h.replace("!!VAL_SPM!!", String(_cfg->spreadMaxMv));
+        for (const ConfigField &f : kConfigFields) {
+            if (!f.placeholder) continue; // e.g. "to"/bmsTimeout - no UI field
+            const uint8_t *member = reinterpret_cast<const uint8_t *>(_cfg) + f.offset;
+            switch (f.kind) {
+            case ConfigField::KIND_FLOAT:
+                h.replace(f.placeholder, String(*reinterpret_cast<const float *>(member), (unsigned int)f.decimals));
+                break;
+            case ConfigField::KIND_INT:
+                h.replace(f.placeholder, String(*reinterpret_cast<const int *>(member)));
+                break;
+            case ConfigField::KIND_UINT16:
+                h.replace(f.placeholder, String(*reinterpret_cast<const uint16_t *>(member)));
+                break;
+            }
+        }
         request->send(200, "text/html", h); });
 
     _server.on("/save", HTTP_GET, [this](AsyncWebServerRequest *request)

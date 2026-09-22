@@ -16,8 +16,9 @@ public:
     // the CAN/BMS tasks start before WiFi and need the setpoints right away.
     void loadConfig(SystemConfig &configOut);
 
-    // Registers routes and starts the server. Call once WiFi is up: the
-    // async TCP stack must not be touched before the network is initialized.
+    // Registers routes and starts the server. Call after setupNetwork(): the
+    // async TCP stack must be initialised (connected or not). Refuses to
+    // start if loadConfig() hasn't run.
     void begin();
 
     // Attach an action listener for the buttons

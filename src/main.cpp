@@ -3,6 +3,10 @@
 #include <ArduinoOTA.h>
 #include <TelnetStream.h>
 #include <time.h>
+#include "esp_system.h"
+#include "esp_core_dump.h"
+#include "esp_ota_ops.h"
+#include "rom/rtc.h"
 
 #include "pin_config.h"
 #include "SystemState.h"
@@ -31,15 +35,18 @@ DashboardData currentData;
 SemaphoreHandle_t dataMutex;
 
 // Serializes netLog()'s network sinks (TelnetStream, SSE log channel) and
-// the SSE telemetry push. TelnetStream is not safe to call from several
-// tasks at once (its write() also accepts new clients), and netLog now runs
-// from bmsTask, canTask and loop() - introducing canTask below is what
-// makes this necessary; before, only bmsTask and loop() ever logged.
-// Innermost lock: never take another one while holding it.
+// the SSE telemetry push. Neither TelnetStream (its write() also accepts
+// new clients) nor me-no-dev's AsyncEventSource is safe to call from
+// several tasks at once, and netLog runs from bmsTask, canTask, loop() and
+// the web server's task. Innermost lock: never take another one while
+// holding it.
 SemaphoreHandle_t netOutMutex;
 // Set once WiFi, Telnet and the web server are up. Before that, netLog()
 // only writes to Serial and the SD card.
 volatile bool netReady = false;
+
+TaskHandle_t bmsTaskHandle = NULL;
+TaskHandle_t canTaskHandle = NULL;
 
 // Global filter buffers (bmsTask only)
 uint16_t cellBuffers[MAX_CELLS][MAX_SAMPLES] = {0};
@@ -445,6 +452,106 @@ void canTask(void *pvParameters)
   }
 }
 
+// --- OTA ROLLBACK SAFETY NET ---
+// The bootloader supports app rollback (CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE),
+// but Arduino's default marks every new image valid right at startup, which
+// defeats it. Returning true here defers that: loop() confirms the image only
+// after kConfirmAfterMs of uptime with WiFi connected. If a freshly OTA'd
+// image crashes (or is reset) before then, the bootloader falls back to the
+// previous firmware - so a crash-looping build can't lock us out of OTA.
+extern "C" bool verifyRollbackLater() { return true; }
+constexpr unsigned long kConfirmAfterMs = 2UL * 60UL * 1000UL;
+
+const char *otaStateName(esp_ota_img_states_t s)
+{
+  switch (s)
+  {
+  case ESP_OTA_IMG_NEW: return "new";
+  case ESP_OTA_IMG_PENDING_VERIFY: return "pending-verify (rollback armed)";
+  case ESP_OTA_IMG_VALID: return "valid";
+  case ESP_OTA_IMG_INVALID: return "invalid";
+  case ESP_OTA_IMG_ABORTED: return "aborted";
+  default: return "undefined (no rollback info, e.g. USB-flashed)";
+  }
+}
+
+// --- DIAGNOSTICS ---
+const char *resetReasonName(esp_reset_reason_t r)
+{
+  switch (r)
+  {
+  case ESP_RST_POWERON: return "power-on";
+  case ESP_RST_EXT: return "external pin";
+  case ESP_RST_SW: return "software restart (e.g. OTA)";
+  case ESP_RST_PANIC: return "PANIC (crash)";
+  case ESP_RST_INT_WDT: return "interrupt watchdog";
+  case ESP_RST_TASK_WDT: return "task watchdog";
+  case ESP_RST_WDT: return "other watchdog";
+  case ESP_RST_DEEPSLEEP: return "deep sleep wake";
+  case ESP_RST_BROWNOUT: return "BROWNOUT (supply dip)";
+  case ESP_RST_SDIO: return "SDIO";
+  default: return "unknown";
+  }
+}
+
+void logHealth()
+{
+  TaskHandle_t asyncTcp = xTaskGetHandle("async_tcp");
+  TaskHandle_t sdTask = xTaskGetHandle("SD_LogTask");
+  // On ESP-IDF the stack high-water mark is in bytes.
+  netLog("[DIAG] Heap free %u, min %u, max block %u | stack left: loop %u, bms %u, can %u, sd %u, async_tcp %u\n",
+         (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap(), (unsigned)ESP.getMaxAllocHeap(),
+         (unsigned)uxTaskGetStackHighWaterMark(NULL),
+         bmsTaskHandle ? (unsigned)uxTaskGetStackHighWaterMark(bmsTaskHandle) : 0u,
+         canTaskHandle ? (unsigned)uxTaskGetStackHighWaterMark(canTaskHandle) : 0u,
+         sdTask ? (unsigned)uxTaskGetStackHighWaterMark(sdTask) : 0u,
+         asyncTcp ? (unsigned)uxTaskGetStackHighWaterMark(asyncTcp) : 0u);
+}
+
+// Why did we (re)boot, and what does the last stored core dump say? Logged
+// once the clock is set (so it lands in the dated SD .log file).
+void logBootDiagnostics()
+{
+  esp_reset_reason_t reason = esp_reset_reason();
+  netLog("[DIAG] Reset reason: %s (%d), core0 %d, core1 %d\n",
+         resetReasonName(reason), (int)reason,
+         (int)rtc_get_reset_reason(0), (int)rtc_get_reset_reason(1));
+
+  char elfSha[17] = {0};
+  esp_ota_get_app_elf_sha256(elfSha, sizeof(elfSha));
+  const esp_partition_t *running = esp_ota_get_running_partition();
+  esp_ota_img_states_t otaState = ESP_OTA_IMG_UNDEFINED;
+  esp_ota_get_state_partition(running, &otaState);
+  netLog("[DIAG] Running firmware ELF sha256: %s, partition %s, image state: %s\n",
+         elfSha, running ? running->label : "?", otaStateName(otaState));
+
+  // A dump stays in flash until the next crash overwrites it, so it can be
+  // from an earlier crash than the one that caused this boot - compare its
+  // ELF sha with the running one, and the reset reason above.
+  static esp_core_dump_summary_t summary;
+  if (esp_core_dump_image_check() == ESP_OK && esp_core_dump_get_summary(&summary) == ESP_OK)
+  {
+    netLog("[DIAG] Stored core dump: task '%s', PC 0x%08x, cause %u, vaddr 0x%08x, ELF %s\n",
+           summary.exc_task, (unsigned)summary.exc_pc,
+           (unsigned)summary.ex_info.exc_cause, (unsigned)summary.ex_info.exc_vaddr,
+           (const char *)summary.app_elf_sha256);
+
+    char bt[200];
+    size_t len = 0;
+    bt[0] = '\0';
+    for (uint32_t i = 0; i < summary.exc_bt_info.depth && i < 16 && len < sizeof(bt); i++)
+      len += snprintf(bt + len, sizeof(bt) - len, " 0x%08x", (unsigned)summary.exc_bt_info.bt[i]);
+    netLog("[DIAG] Backtrace%s:%s\n", summary.exc_bt_info.corrupted ? " (corrupted)" : "", bt);
+    netLog("[DIAG] Full dump: GET /api/coredump\n");
+  }
+  else
+  {
+    netLog("[DIAG] No core dump stored.\n");
+  }
+
+  logHealth();
+}
+
 void setup()
 {
   Serial.begin(115200);
@@ -473,8 +580,8 @@ void setup()
   inverter.setDebugCallback(libraryLogger);
   inverter.begin((gpio_num_t)CAN_TX, (gpio_num_t)CAN_RX, (gpio_num_t)CAN_SE);
 
-  xTaskCreatePinnedToCore(bmsTask, "BMS_Task", 6144, NULL, 1, NULL, 0);
-  xTaskCreatePinnedToCore(canTask, "CAN_Task", 6144, NULL, 2, NULL, 1);
+  xTaskCreatePinnedToCore(bmsTask, "BMS_Task", 6144, NULL, 1, &bmsTaskHandle, 0);
+  xTaskCreatePinnedToCore(canTask, "CAN_Task", 6144, NULL, 2, &canTaskHandle, 1);
 
   setupNetwork();
 
@@ -505,6 +612,29 @@ void loop()
         SDLogger::logTelemetry(currentData);
       xSemaphoreGive(dataMutex);
     }
+  }
+
+  static bool bootDiagDone = false;
+  if (!bootDiagDone && (time(nullptr) > 1000000000L || millis() > 60000))
+  {
+    bootDiagDone = true;
+    logBootDiagnostics();
+  }
+
+  static bool imageConfirmed = false;
+  if (!imageConfirmed && millis() > kConfirmAfterMs && WiFi.status() == WL_CONNECTED)
+  {
+    imageConfirmed = true;
+    esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+    netLog("[SYS] Firmware confirmed after %lus with WiFi up (rollback cancelled): %s\n",
+           kConfirmAfterMs / 1000, esp_err_to_name(err));
+  }
+
+  static unsigned long lastHealth = 0;
+  if (millis() - lastHealth > 10UL * 60UL * 1000UL)
+  {
+    lastHealth = millis();
+    logHealth();
   }
 
   delay(1);

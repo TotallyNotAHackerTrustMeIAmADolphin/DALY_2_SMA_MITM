@@ -6,11 +6,8 @@
 WebDashboard::WebDashboard(uint16_t port)
     : _server(port), _events("/events"), _actionCb(nullptr), _cfg(nullptr) {}
 
-void WebDashboard::begin(SystemConfig &configOut)
+void WebDashboard::begin()
 {
-    _cfg = &configOut;
-
-    loadConfig();
     setupRoutes();
 
     _server.addHandler(&_events);
@@ -53,10 +50,12 @@ void WebDashboard::broadcastTelemetry(const DashboardData &data)
     _events.send(json, "data", millis());
 }
 
-void WebDashboard::loadConfig()
+void WebDashboard::loadConfig(SystemConfig &configOut)
 {
+    _cfg = &configOut;
+
     // No dataMutex needed here: this runs once from setup(), before bmsTask
-    // or loop() exist, so there is no concurrent reader yet.
+    // or canTask exist, so there is no concurrent reader yet.
     _prefs.begin("bms-bridge", false);
 
     // Read from NVS or set defaults

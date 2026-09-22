@@ -65,6 +65,15 @@ Use `netLog(fmt, ...)` (defined in `src/main.cpp`) for all application-level log
 - Prioritize technical accuracy and directness over conversational filler; if a proposed change is technically flawed, say so and explain why.
 - Keep responses focused on code/logs/logic.
 
+### Model split: plan and review with the expensive model, delegate grunt work to cheap models
+
+- **Planning, briefs, review: the most capable model** (the main session, currently Fable-class). Investigation, root-causing, deciding what to change, writing the worker briefs, and reviewing the workers' diffs before anything is committed all stay here. Don't delegate judgment.
+- **Grunt work: cheap subagents** (Sonnet-class, `model: "sonnet"`). Well-specified edits, builds, running tests, scraping logs, mechanical verification, worktree builds of each PR tip. Dispatch independent workers in parallel, in one message.
+- **Review: the capable model again.** Read the worker's diff yourself (or spawn `model: "fable"` reviewers by angle for a big diff) and verify each finding against the code before acting on it. Workers report; they don't self-approve.
+- **Every brief is self-contained.** The worker has no conversation context: give it the repo path, the exact scope, the required report format, and the hard rules verbatim - never `pio run -t upload`, never `pio test` without `-e native` (the device env OTA-flashes the live bridge), no commits or pushes unless the brief says so, don't touch `include/secrets.h` contents.
+- Firmware flashes are never delegated and never autonomous: the main session asks the user before each OTA upload.
+- **Code review before merge: the `mattpocock-skills:code-review` skill** (`/code-review <fixed-point>`, e.g. `main`). It runs two parallel sub-agents and reports them side by side: *Standards* (this file's conventions plus its Fowler smell baseline) and *Spec* (does the diff do what the referenced issues asked; issues resolve via `docs/agents/issue-tracker.md`, so reference them in commit messages). For firmware diffs that touch tasks, mutexes, the glideslope or CAN output, add expensive-model angle reviewers on top (concurrency, safety-critical behaviour, web/diagnostics), since the two axes don't cover runtime correctness. Verify every finding against the code before writing a fix brief.
+
 ## Agent skills
 
 ### Issue tracker

@@ -175,10 +175,10 @@ void handleUIAction(const char *action)
   {
     if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE)
     {
-      // Set the timestamp before the flag: canTask (holding the same
-      // mutex) must never observe isResetting true with a stale/zero
-      // resetHoldStartTime, or it would cancel the reset immediately.
-      resetHoldStartTime = millis();
+      // 0 = "not armed yet": canTask starts the 5.5 s hold from the first
+      // status frame it actually sends with the reset bit, so a request
+      // made while the BMS is still silent isn't consumed by the wait.
+      resetHoldStartTime = 0;
       isResetting = true;
       xSemaphoreGive(dataMutex);
       netLog("[USER] Manual Cluster Reset Triggered.\n");
@@ -543,14 +543,19 @@ void canTask(void *pvParameters)
         // every reboot - better than made-up SOC/voltage/limits.
         if (haveBasicInfo && haveCellData)
         {
-          // isResetting/resetHoldStartTime are set together by
-          // handleUIAction() under this same mutex, so this always sees a
-          // consistent pair - it can't observe the flag with a stale
-          // timestamp and cancel a fresh reset instantly.
-          if (isResetting && (now - resetHoldStartTime > 5500))
+          // The reset hold is measured from the first frame sent with the
+          // reset bit (handleUIAction() arms it with resetHoldStartTime = 0
+          // under this same mutex), not from the click, so a request made
+          // while no frames go out still gets its full 5.5 s on the bus.
+          if (isResetting)
           {
-            isResetting = false;
-            resetFinished = true;
+            if (resetHoldStartTime == 0)
+              resetHoldStartTime = now ? now : 1;
+            else if (now - resetHoldStartTime > 5500)
+            {
+              isResetting = false;
+              resetFinished = true;
+            }
           }
 
           if (!autoMaint && currentData.packVoltage > 0 && currentData.packVoltage < (cfg.cvMaintStart * MAX_CELLS))

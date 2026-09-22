@@ -159,6 +159,16 @@ void SDLogger::logTelemetry(const DashboardData &data)
             written += n;
     }
 
+    // Raw cell spread and derating factor (#24) - appended strictly after
+    // MaxCellRaw, same append-only rule as above.
+    if (written > 0 && written < (int)sizeof(msg.data))
+    {
+        int n = snprintf(msg.data + written, sizeof(msg.data) - written, ",%u,%.2f",
+                          (unsigned)data.cellSpreadRawMv, data.derateFactor);
+        if (n > 0)
+            written += n;
+    }
+
     // Queue is sized generously for the ~1 sample/10s telemetry rate; if a
     // write is genuinely stuck (e.g. card removed mid-session) we drop the
     // sample rather than block the caller.
@@ -218,6 +228,7 @@ void SDLogger::writeCSVHeaderIfMissing(const String &path)
     }
     file.print(",ChargeMOS,DischargeMOS,BmsProtection,CellOV1,CellOV2,PackOV1,PackOV2");
     file.print(",MinCellRaw,MaxCellRaw");
+    file.print(",RawSpreadMv,Derate");
     file.println();
     file.close();
 }

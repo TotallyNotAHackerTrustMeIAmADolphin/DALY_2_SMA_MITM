@@ -35,11 +35,12 @@ DashboardData currentData;
 SemaphoreHandle_t dataMutex;
 
 // Serializes netLog()'s network sinks (TelnetStream, SSE log channel) and
-// the SSE telemetry push. Neither TelnetStream (its write() also accepts
-// new clients) nor me-no-dev's AsyncEventSource is safe to call from
-// several tasks at once, and netLog runs from bmsTask, canTask, loop() and
-// the web server's task. Innermost lock: never take another one while
-// holding it.
+// the SSE telemetry push. TelnetStream is not safe to call from several
+// tasks at once (its write() also accepts new clients), and netLog runs
+// from bmsTask, canTask, loop() and the web server's task. AsyncEventSource
+// locks internally since ESPAsyncWebServer 3.x; keeping it behind the same
+// mutex also stops log lines from interleaving. Innermost lock: never take
+// another one while holding it.
 SemaphoreHandle_t netOutMutex;
 // Set once WiFi, Telnet and the web server are up. Before that, netLog()
 // only writes to Serial and the SD card.

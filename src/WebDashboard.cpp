@@ -12,6 +12,16 @@ WebDashboard::WebDashboard(uint16_t port)
 
 void WebDashboard::begin()
 {
+    // /config and /save (registered by setupRoutes() below) dereference
+    // _cfg; it's only set by loadConfig(), which setup() must call before
+    // begin(). Refuse to start rather than serve routes that would crash on
+    // a null deref if that ordering is ever broken.
+    if (_cfg == nullptr)
+    {
+        Serial.println("[WEB] begin() called before loadConfig() - server not started");
+        return;
+    }
+
     setupRoutes();
 
     _server.addHandler(&_events);
@@ -367,8 +377,26 @@ void WebDashboard::setupRoutes()
     // the ELF of the firmware that crashed:
     //   espcoredump.py info_corefile -t raw -c coredump.bin firmware.elf
     // Streamed straight from flash in small chunks - no 64KB heap buffer.
+    //
+    // esp_core_dump_image_check() runs first (not just image_get()) so a
+    // dump that's present-sized but fails its CRC (e.g. brownout mid-panic,
+    // writing cut off partway) is refused with 409 instead of being streamed
+    // as bytes espcoredump.py will reject anyway while the boot log claims
+    // "no core dump".
     _server.on("/api/coredump", HTTP_GET, [](AsyncWebServerRequest *request)
                {
+        esp_err_t checkErr = esp_core_dump_image_check();
+        if (checkErr == ESP_ERR_NOT_FOUND || checkErr == ESP_ERR_INVALID_SIZE) {
+            request->send(404, "text/plain", "No core dump stored");
+            return;
+        }
+        if (checkErr != ESP_OK) {
+            char msg[96];
+            snprintf(msg, sizeof(msg), "core dump present but corrupt: %.64s", esp_err_to_name(checkErr));
+            request->send(409, "text/plain", msg);
+            return;
+        }
+
         size_t addr = 0, size = 0;
         if (esp_core_dump_image_get(&addr, &size) != ESP_OK || size == 0) {
             request->send(404, "text/plain", "No core dump stored");

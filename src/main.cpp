@@ -25,6 +25,12 @@
 #define MAX_CELLS 16
 #define MAX_SAMPLES 20
 
+// Single source of truth for the local time zone - used both by setup()'s
+// early setenv("TZ", ...) (before NTP has run) and setupNetwork()'s
+// configTzTime() (which drives the actual NTP sync), so the two can't drift
+// apart.
+constexpr const char *kTimeZone = "CET-1CEST,M3.5.0,M10.5.0/3";
+
 // --- GLOBAL INSTANCES ---
 DalyRS485 bms(Serial2);
 SMA_CAN inverter;
@@ -483,7 +489,7 @@ void setupNetwork()
   {
     netLog("[WIFI] Connected, IP %s\n", WiFi.localIP().toString().c_str());
 
-    configTzTime("CET-1CEST,M3.5.0,M10.5.0/3", "pool.ntp.org", "ptbtime1.ptb.de");
+    configTzTime(kTimeZone, "pool.ntp.org", "ptbtime1.ptb.de");
 
     // Wait for NTP sync (up to 5 seconds)
     netLog("[SYS] Waiting for NTP sync...\n");
@@ -730,7 +736,7 @@ void setup()
   // WiFi connects used local time, so the same boot showed two different
   // clocks depending on how far setup() had gotten. configTzTime() (called
   // later, once WiFi is up) still does the actual NTP sync.
-  setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3", 1);
+  setenv("TZ", kTimeZone, 1);
   tzset();
 
   dataMutex = xSemaphoreCreateMutex();

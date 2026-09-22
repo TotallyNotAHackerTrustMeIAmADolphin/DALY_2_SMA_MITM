@@ -1,6 +1,7 @@
 #include "WebDashboard.h"
 #include "WebPages.h"
 #include "SDLogger.h"
+#include "TelemetrySchema.h"
 #include <SD.h>
 #include <cstdarg>
 #include <cstddef>
@@ -122,6 +123,15 @@ void WebDashboard::broadcastLog(const char *msg)
     _events.send(msg, "log", millis());
 }
 
+// A change to TelemetrySchema::kColumns (#32) that adds/removes a column is
+// exactly the kind of change broadcastTelemetry()'s hand-written JSON below
+// needs a human to look at (its key set is meant to track the schema's
+// jsonKey-bearing columns) - this fails the build as a nudge to check it,
+// rather than silently drifting the way CSV header/row/JSON used to before
+// TelemetrySchema.h existed.
+static_assert(sizeof(TelemetrySchema::kColumns) / sizeof(TelemetrySchema::kColumns[0]) == 38,
+              "TelemetrySchema column count changed - check broadcastTelemetry()'s hand-written JSON still matches");
+
 void WebDashboard::broadcastTelemetry(const DashboardData &data)
 {
     // Build the cell array safely using char arrays instead of String concatenation
@@ -142,13 +152,30 @@ void WebDashboard::broadcastTelemetry(const DashboardData &data)
     // cellsStr buffer itself (256) ~264 bytes, spreadMv (5-digit uint16)
     // ~16 bytes and derate (0.00-1.00) ~13 bytes, plus punctuation - comes
     // to ~490 bytes. json[1024] keeps comfortable headroom above that.
+    //
+    // Kept hand-written rather than built field-by-field from
+    // TelemetrySchema::kColumns (#32): most of these keys DO map onto a
+    // CSV column with identical formatting (v/PackV, minC/MinCellV,
+    // maxC/MaxCellV, minCellRaw/MinCellRaw, maxCellRaw/MaxCellRaw,
+    // reqI/ReqI, soc/SOC, smam/Mode, maint/MaintenanceActive,
+    // force/ForceCharge, spreadMv/RawSpreadMv, derate/Derate - see each
+    // column's jsonKey in TelemetrySchema.h), but "i" is the one field that
+    // doesn't: it's PackCurrent formatted to one decimal place here vs. two
+    // in the CSV's PackI column, a genuine pre-existing difference between
+    // the two outputs. cv/avgCellVoltage, isR/isResetting and the cells
+    // array aren't CSV columns at all, and this object's key ORDER (part of
+    // the byte-identical contract - see #32) doesn't match kColumns' CSV
+    // order either. Reusing the column formatters here would either bake in
+    // the wrong precision for "i" or require reordering these keys, so the
+    // dedup stops at "same table defines which keys exist" (the static_assert
+    // above) rather than "same code formats every value".
     char json[1024];
     snprintf(json, sizeof(json),
              "{\"v\":%.2f,\"cv\":%.3f,\"minC\":%.3f,\"maxC\":%.3f,\"minCellRaw\":%.3f,\"maxCellRaw\":%.3f,\"i\":%.1f,\"reqI\":%.1f,\"soc\":%.1f,\"smam\":\"%s\",\"maint\":%d,\"force\":%d,\"isR\":%d,\"spreadMv\":%u,\"derate\":%.2f,\"cells\":%s}",
              data.packVoltage, data.avgCellVoltage, data.minCellVoltage, data.maxCellVoltage,
              data.minCellVoltageRaw, data.maxCellVoltageRaw,
              data.packCurrent, data.requestedCurrent, data.packSOC,
-             data.smaChargeMode.c_str(), (int)data.maintenanceActive, (int)data.forceCharge,
+             data.smaChargeMode, (int)data.maintenanceActive, (int)data.forceCharge,
              (int)data.isResetting, (unsigned)data.cellSpreadRawMv, data.derateFactor, cellsStr);
 
     _events.send(json, "data", millis());

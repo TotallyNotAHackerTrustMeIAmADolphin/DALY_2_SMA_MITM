@@ -13,9 +13,16 @@ extern SemaphoreHandle_t dataMutex;
 struct DashboardData {
     float packVoltage;
     float avgCellVoltage;
-    float minCellVoltage; 
-    float maxCellVoltage; 
-    std::vector<float> cellVoltages; 
+    float minCellVoltage;
+    float maxCellVoltage;
+    // Latest BMS read, unsmoothed (no moving average). The smoothed pair
+    // above drives the glideslope taper; these drive the hard cutoff/alarm
+    // gate so a fast per-cell spike isn't hidden behind the ~48s filter
+    // (see #9 - Cell 16 rose to ~3.5V under a 222A step while the smoothed
+    // value only reached 3.416V).
+    float minCellVoltageRaw;
+    float maxCellVoltageRaw;
+    std::vector<float> cellVoltages;
     
     float packCurrent;
     int16_t packTemp;

@@ -12,8 +12,8 @@
 
 #include "pin_config.h"
 #include "SystemState.h"
-#include "Glideslope.h"
 #include "CellSmoother.h"
+#include "StatusFrame.h"
 #include "DalyRS485.h"
 #include "SMA_CAN.h"
 #include "WebDashboard.h"
@@ -65,18 +65,20 @@ TaskHandle_t canTaskHandle = NULL;
 CellSmoother cellSmoother;
 
 // Written by handleUIAction() on the web server's task, read/written by
-// canTask - guarded by dataMutex like the rest of the cross-task state, so
-// canTask always sees resetHoldStartTime and isResetting set together
-// (previously unlocked, isResetting could be observed with a stale/zero
-// resetHoldStartTime and cancel a fresh reset instantly).
+// canTask (via StatusFrame::Snapshot/Decision - see include/StatusFrame.h)
+// - guarded by dataMutex like the rest of the cross-task state, so canTask
+// always sees resetHoldStartTime and isResetting set together (previously
+// unlocked, isResetting could be observed with a stale/zero
+// resetHoldStartTime and cancel a fresh reset instantly). autoMaint used to
+// live here too; it's now inside canTask's local StatusFrame::ControlState,
+// since nothing outside canTask reads or writes it.
 unsigned long resetHoldStartTime = 0;
 bool manualMaintForce = false;
 bool isResetting = false;
-bool autoMaint = false; // canTask only
 
 // BMS data freshness - guarded by dataMutex. Nothing is sent to the SMA
-// until both have succeeded once (see canTask), and the glideslope treats
-// "never read" as stale (Glideslope::isFresh).
+// until both have succeeded once (see canTask), and StatusFrame::decide()
+// (include/StatusFrame.h) treats "never read" as stale (Glideslope::isFresh).
 bool haveBasicInfo = false;
 bool haveCellData = false;
 unsigned long lastBasicInfoRead = 0;
@@ -132,30 +134,6 @@ void pushTelemetry(const DashboardData &data)
     webUI.broadcastTelemetry(data);
     xSemaphoreGive(netOutMutex);
   }
-}
-
-// --- GLIDESLOPE LOGIC ---
-// The math lives in include/Glideslope.h (natively unit-tested); these
-// wrappers feed in live state. Caller must hold dataMutex.
-
-// Both BMS reads must have succeeded at least once and be within
-// cfg.bmsTimeout - the limits depend on the cell voltages, so fresh basic
-// info alone must not keep them alive.
-bool bmsDataFresh()
-{
-  unsigned long now = millis();
-  return Glideslope::isFresh(haveBasicInfo, now, lastBasicInfoRead, cfg.bmsTimeout) &&
-         Glideslope::isFresh(haveCellData, now, lastCellRead, cfg.bmsTimeout);
-}
-
-uint16_t calculateCCL(float smoothedMaxV, float rawMaxV, uint16_t spreadMv)
-{
-  return Glideslope::calculateCCL(cfg, smoothedMaxV, rawMaxV, spreadMv, bmsDataFresh(), currentData.maintenanceActive);
-}
-
-uint16_t calculateDCL(float smoothedMinV, float rawMinV, uint16_t spreadMv)
-{
-  return Glideslope::calculateDCL(cfg, smoothedMinV, rawMinV, spreadMv, bmsDataFresh(), currentData.maintenanceActive);
 }
 
 // --- UI EVENT HANDLER ---
@@ -508,7 +486,7 @@ void canTask(void *pvParameters)
 {
   unsigned long lastCanCheck = 0;
   unsigned long lastSmaTx = 0;
-  bool framesEnabled = false;
+  StatusFrame::ControlState ctrl;
 
   while (true)
   {
@@ -527,131 +505,75 @@ void canTask(void *pvParameters)
     if (now - lastSmaTx > 250)
     {
       lastSmaTx = now;
-      bool firstFrames = false;
-      bool resetFinished = false;
-      bool fresh = false;
-      int bmsTimeoutCopy = 0;
-      uint16_t spreadMvCopy = 0;
-      uint16_t spreadStartCopy = 0;
-      float derateFactorCopy = 1.0f;
+      StatusFrame::Decision dec;
 
       if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
-        // Send nothing until the BMS has delivered basic info AND cell
-        // voltages once. Before that currentData holds no real values, and
-        // the SMA already rides through a few seconds of CAN silence on
-        // every reboot - better than made-up SOC/voltage/limits.
-        if (haveBasicInfo && haveCellData)
+        StatusFrame::Snapshot snap;
+        snap.nowMs = now;
+        snap.haveBasicInfo = haveBasicInfo;
+        snap.haveCellData = haveCellData;
+        snap.lastBasicInfoReadMs = lastBasicInfoRead;
+        snap.lastCellReadMs = lastCellRead;
+        snap.packVoltage = currentData.packVoltage;
+        snap.packCurrent = currentData.packCurrent;
+        snap.packSOC = currentData.packSOC;
+        snap.packTemp = currentData.packTemp;
+        snap.maxCellSmoothedV = currentData.maxCellVoltage;
+        snap.maxCellRawV = currentData.maxCellVoltageRaw;
+        snap.minCellSmoothedV = currentData.minCellVoltage;
+        snap.minCellRawV = currentData.minCellVoltageRaw;
+        snap.cellSpreadMv = currentData.cellSpreadRawMv;
+        snap.manualMaintForce = manualMaintForce;
+        snap.resetRequested = isResetting;
+        snap.resetHoldStartMs = resetHoldStartTime;
+
+        dec = StatusFrame::decide(cfg, snap, ctrl);
+
+        // Written back regardless of sendFrames (a no-op copy-back when
+        // decide() didn't touch them - see its comment).
+        isResetting = dec.isResetting;
+        resetHoldStartTime = dec.resetHoldStartMs;
+
+        if (dec.sendFrames)
         {
-          // The reset hold is measured from the first frame sent with the
-          // reset bit (handleUIAction() arms it with resetHoldStartTime = 0
-          // under this same mutex), not from the click, so a request made
-          // while no frames go out still gets its full 5.5 s on the bus.
-          if (isResetting)
-          {
-            if (resetHoldStartTime == 0)
-              resetHoldStartTime = now ? now : 1;
-            else if (now - resetHoldStartTime > 5500)
-            {
-              isResetting = false;
-              resetFinished = true;
-            }
-          }
-
-          if (!autoMaint && currentData.packVoltage > 0 && currentData.packVoltage < (cfg.cvMaintStart * MAX_CELLS))
-            autoMaint = true;
-          else if (autoMaint && currentData.packVoltage > (cfg.cvMaintStop * MAX_CELLS))
-            autoMaint = false;
-
-          currentData.maintenanceActive = manualMaintForce || autoMaint;
-          currentData.forceCharge = currentData.maintenanceActive;
-          currentData.isResetting = isResetting;
-
-          // Same freshness check calculateCCL()/calculateDCL() use below -
-          // captured here so the edge-triggered log after this lock can
-          // report a stale->0A transition without re-deriving it unlocked.
-          fresh = bmsDataFresh();
-          bmsTimeoutCopy = cfg.bmsTimeout;
+          currentData.maintenanceActive = dec.maintenanceActive;
+          currentData.forceCharge = dec.values.forceCharge;
+          currentData.isResetting = dec.isResetting;
+          currentData.derateFactor = dec.derateFactor;
+          currentData.requestedCurrent = dec.values.ccl / 10.0f;
 
           SMATxData tx;
-          tx.packVoltage = currentData.packVoltage;
-          tx.packCurrent = currentData.packCurrent;
-          tx.packTemp = currentData.packTemp;
-          tx.packSOC = currentData.packSOC;
-          tx.maintenanceActive = currentData.maintenanceActive;
-          tx.isResetting = currentData.isResetting;
-
-          tx.ccl = calculateCCL(currentData.maxCellVoltage, currentData.maxCellVoltageRaw, currentData.cellSpreadRawMv);
-          currentData.requestedCurrent = tx.ccl / 10.0f;
-          tx.dcl = calculateDCL(currentData.minCellVoltage, currentData.minCellVoltageRaw, currentData.cellSpreadRawMv);
-          tx.cvl = currentData.maintenanceActive ? 560 : (uint16_t)(cfg.cvMaxCharge * MAX_CELLS * 10);
-          tx.dvl = (uint16_t)(cfg.cvMinDischarge * MAX_CELLS * 10);
-
-          // Derating factor (#24), for the dashboard - not consumed by
-          // calculateCCL()/calculateDCL() above (they derive it internally
-          // from cellSpreadRawMv), just mirrored here so the operator can
-          // see the setting act.
-          currentData.derateFactor = Glideslope::spreadFactor(currentData.cellSpreadRawMv, cfg.spreadStartMv, cfg.spreadMaxMv);
-          spreadMvCopy = currentData.cellSpreadRawMv;
-          spreadStartCopy = cfg.spreadStartMv;
-          derateFactorCopy = currentData.derateFactor;
+          tx.packVoltage = dec.values.packVoltage;
+          tx.packCurrent = dec.values.packCurrent;
+          tx.packTemp = dec.values.packTemp;
+          tx.packSOC = dec.values.packSOC;
+          tx.maintenanceActive = dec.values.maintenanceActive;
+          tx.isResetting = dec.values.isResetting;
+          tx.ccl = dec.values.ccl;
+          tx.dcl = dec.values.dcl;
+          tx.cvl = dec.values.cvl;
+          tx.dvl = dec.values.dvl;
 
           inverter.sendStatus(tx);
-
-          if (!framesEnabled)
-          {
-            framesEnabled = true;
-            firstFrames = true;
-          }
         }
         xSemaphoreGive(dataMutex);
       }
 
-      if (firstFrames)
+      // Log lines for whichever events decide() flagged, outside the lock -
+      // same wording as before the StatusFrame extraction (#29).
+      if (dec.events.firstFrames)
         netLog("[CAN] First BMS data at %lu ms uptime - SMA frames enabled.\n", now);
-      if (resetFinished)
+      if (dec.events.resetFinished)
         netLog("[SYS] Recovery cycle finished.\n");
-
-      // Edge-triggered, and only meaningful once real BMS data has started
-      // flowing (framesEnabled) - staleBaseline gates the "fresh again" log
-      // so the very first-ever fresh reading isn't reported as a recovery.
-      static bool staleBaseline = false;
-      static bool wasFresh = false;
-      if (framesEnabled)
-      {
-        if (wasFresh && !fresh)
-        {
-          netLog("[BMS] Data stale (both reads older than %d s) - CCL/DCL forced to 0 A\n", bmsTimeoutCopy);
-          staleBaseline = true;
-        }
-        else if (!wasFresh && fresh && staleBaseline)
-        {
-          netLog("[BMS] Data fresh again - limits restored\n");
-        }
-        wasFresh = fresh;
-      }
-
-      // Edge-triggered cell-spread derating log (#24), with hysteresis on
-      // the "ended" side so it doesn't chatter right at the boundary: only
-      // reported once derateFactorCopy is back at 1.0 AND the spread has
-      // fallen at least 10mV below spreadStartCopy, not merely back under
-      // it. Only meaningful once frames are enabled, same gate as the
-      // staleness log above.
-      static bool wasDerated = false;
-      if (framesEnabled)
-      {
-        if (!wasDerated && derateFactorCopy < 1.0f)
-        {
-          netLog("[BMS] Cell spread %u mV - limits derated to %u %%\n",
-                 (unsigned)spreadMvCopy, (unsigned)round(derateFactorCopy * 100.0f));
-          wasDerated = true;
-        }
-        else if (wasDerated && derateFactorCopy >= 1.0f &&
-                 (int)spreadMvCopy <= (int)spreadStartCopy - 10)
-        {
-          netLog("[BMS] Cell spread %u mV - derating ended\n", (unsigned)spreadMvCopy);
-          wasDerated = false;
-        }
-      }
+      if (dec.events.wentStale)
+        netLog("[BMS] Data stale (both reads older than %d s) - CCL/DCL forced to 0 A\n", dec.events.bmsTimeoutS);
+      if (dec.events.freshAgain)
+        netLog("[BMS] Data fresh again - limits restored\n");
+      if (dec.events.deratingStarted)
+        netLog("[BMS] Cell spread %u mV - limits derated to %u %%\n",
+               (unsigned)dec.events.spreadMv, (unsigned)dec.events.deratePercent);
+      if (dec.events.deratingEnded)
+        netLog("[BMS] Cell spread %u mV - derating ended\n", (unsigned)dec.events.spreadMv);
     }
 
     vTaskDelay(pdMS_TO_TICKS(10));

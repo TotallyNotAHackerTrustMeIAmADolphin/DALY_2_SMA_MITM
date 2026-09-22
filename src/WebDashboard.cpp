@@ -2,13 +2,33 @@
 #include "WebPages.h"
 #include "SDLogger.h"
 #include <SD.h>
+#include <cstdarg>
+#include <cstdio>
 #include "esp_core_dump.h"
 #include "esp_flash.h"
 #include "esp_system.h"
 #include "esp_ota_ops.h"
 
 WebDashboard::WebDashboard(uint16_t port)
-    : _server(port), _events("/events"), _actionCb(nullptr), _cfg(nullptr) {}
+    : _server(port), _events("/events"), _actionCb(nullptr), _debugCb(nullptr), _cfg(nullptr) {}
+
+void WebDashboard::debugLog(const char *format, ...)
+{
+    if (!_debugCb)
+        return;
+
+    char loc_res[256];
+    va_list arg;
+    va_start(arg, format);
+    vsnprintf(loc_res, sizeof(loc_res), format, arg);
+    va_end(arg);
+
+    // "%s" as the format string, loc_res as its argument - not
+    // _debugCb(loc_res) - so a log line containing a literal '%' (e.g. a
+    // percentage) isn't reinterpreted as a format specifier by netLog's own
+    // vsnprintf. Same guard as main.cpp's libraryLogger(): netLog("%s", msg).
+    _debugCb("%s", loc_res);
+}
 
 void WebDashboard::begin()
 {
@@ -18,7 +38,7 @@ void WebDashboard::begin()
     // a null deref if that ordering is ever broken.
     if (_cfg == nullptr)
     {
-        Serial.println("[WEB] begin() called before loadConfig() - server not started");
+        debugLog("[WEB] begin() called before loadConfig() - server not started\n");
         return;
     }
 
@@ -31,6 +51,11 @@ void WebDashboard::begin()
 void WebDashboard::setActionCallback(ActionCallback cb)
 {
     _actionCb = cb;
+}
+
+void WebDashboard::setDebugCallback(WebDebugCallback cb)
+{
+    _debugCb = cb;
 }
 
 void WebDashboard::broadcastLog(const char *msg)
@@ -110,6 +135,7 @@ void WebDashboard::saveConfig(AsyncWebServerRequest *request)
     // mid-save.
     if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(300)) != pdTRUE)
     {
+        debugLog("[WEB] /save refused: config busy\n");
         request->send(503, "text/plain", "Device busy, please try Save again");
         return;
     }

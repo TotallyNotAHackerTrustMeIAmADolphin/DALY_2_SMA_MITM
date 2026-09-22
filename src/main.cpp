@@ -858,6 +858,7 @@ void setup()
   // Config and SD need no network - load them before the BMS/CAN tasks,
   // which need the setpoints (and a place to log) right away.
   webUI.setActionCallback(handleUIAction);
+  webUI.setDebugCallback(netLog);
   webUI.loadConfig(cfg);
 
   SDLogger::setDebugCallback(libraryLogger);

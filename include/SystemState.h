@@ -7,24 +7,7 @@
 // that touches either struct is started.
 extern SemaphoreHandle_t dataMutex;
 
-// Holds all NVS saved settings
-struct SystemConfig {
-    float maxChargeA;
-    float maxDischargeA;
-    float cvStartTaper;
-    float cvMaxCharge;
-    float cvStartDTaper;
-    float cvMinDischarge;
-    float cvHighAlarmGate;
-    float cvLowAlarmGate;
-    float trickleA;
-    float limpDischargeA;
-    int vSamples;
-    int bmsTimeout;
-    float cvMaintStart;
-    float cvMaintStop;
-    float maintAmps;
-};
+#include "SystemConfig.h"
 
 // Holds live data to be pushed to the web dashboard and CAN bus
 struct DashboardData {

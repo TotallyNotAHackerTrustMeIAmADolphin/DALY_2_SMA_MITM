@@ -411,6 +411,7 @@ volatile bool wifiEverConnected = false;
 volatile uint32_t wifiDownSince = 0;
 volatile bool wifiPendingDisconnect = false;
 volatile bool wifiPendingReconnect = false;
+volatile bool wifiPendingFirstConnect = false; // connect that arrived after setupNetwork() gave up waiting
 volatile bool wifiPendingLostIp = false;
 volatile uint8_t wifiLastDisconnectReason = 0;
 
@@ -431,8 +432,8 @@ void wifiEventHandler(WiFiEvent_t event, WiFiEventInfo_t info)
   {
     if (wifiEverConnected && !wifiConnected)
       wifiPendingReconnect = true;
-    // The very first connect is logged by setupNetwork() itself (it already
-    // polls WiFi.status() synchronously), so no pending flag for it here.
+    else if (!wifiEverConnected)
+      wifiPendingFirstConnect = true; // cleared by setupNetwork() if it logged the connect itself
     wifiConnected = true;
     wifiEverConnected = true;
   }
@@ -460,6 +461,11 @@ void drainWifiEvents()
     netLog("[WIFI] Lost IP address (still associated)\n");
   }
 
+  if (wifiPendingFirstConnect)
+  {
+    wifiPendingFirstConnect = false;
+    netLog("[WIFI] Connected, IP %s\n", WiFi.localIP().toString().c_str());
+  }
   if (wifiPendingReconnect)
   {
     wifiPendingReconnect = false;
@@ -487,6 +493,7 @@ void setupNetwork()
 
   if (WiFi.status() == WL_CONNECTED)
   {
+    wifiPendingFirstConnect = false; // logged here, don't repeat it from drainWifiEvents()
     netLog("[WIFI] Connected, IP %s\n", WiFi.localIP().toString().c_str());
 
     configTzTime(kTimeZone, "pool.ntp.org", "ptbtime1.ptb.de");

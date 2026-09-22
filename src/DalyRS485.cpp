@@ -6,6 +6,45 @@
 DalyRS485::DalyRS485(HardwareSerial &serial)
     : _serial(&serial), _debugCb(nullptr) {}
 
+// Name table for the 0x98 "Alarm Info" payload, bytes 0-6 - see the
+// layout comment in readAlarmStatus() below for provenance. nullptr marks
+// bits not defined in the documented protocol.
+const char *const DalyRS485::kAlarmBitNames[7][8] = {
+    // byte 0: cell/pack over/undervoltage
+    {"Cell overvoltage Level 1", "Cell overvoltage Level 2",
+     "Cell undervoltage Level 1", "Cell undervoltage Level 2",
+     "Pack overvoltage Level 1", "Pack overvoltage Level 2",
+     "Pack undervoltage Level 1", "Pack undervoltage Level 2"},
+    // byte 1: charge/discharge over/undertemperature
+    {"Charge overtemperature Level 1", "Charge overtemperature Level 2",
+     "Charge undertemperature Level 1", "Charge undertemperature Level 2",
+     "Discharge overtemperature Level 1", "Discharge overtemperature Level 2",
+     "Discharge undertemperature Level 1", "Discharge undertemperature Level 2"},
+    // byte 2: charge/discharge overcurrent, SOC high/low
+    {"Charge overcurrent Level 1", "Charge overcurrent Level 2",
+     "Discharge overcurrent Level 1", "Discharge overcurrent Level 2",
+     "SOC high Level 1", "SOC high Level 2",
+     "SOC low Level 1", "SOC low Level 2"},
+    // byte 3: cell voltage difference, temperature difference
+    {"Cell voltage difference Level 1", "Cell voltage difference Level 2",
+     "Temperature difference Level 1", "Temperature difference Level 2",
+     nullptr, nullptr, nullptr, nullptr},
+    // byte 4: MOSFET temperature/adhesion/open circuit
+    {"Charge MOSFET overtemperature", "Discharge MOSFET overtemperature",
+     "Charge MOSFET temperature sensor fault", "Discharge MOSFET temperature sensor fault",
+     "Charge MOSFET adhesion (stuck on)", "Discharge MOSFET adhesion (stuck on)",
+     "Charge MOSFET open circuit", "Discharge MOSFET open circuit"},
+    // byte 5: AFE/sampling/EEPROM/RTC/precharge/communication faults
+    {"AFE chip fault", "Voltage sampling dropped",
+     "Cell temperature sensor fault", "EEPROM fault",
+     "RTC fault", "Precharge failure",
+     "Communication failure", "Internal communication failure"},
+    // byte 6: current module/pack voltage/short circuit/low-voltage charging
+    {"Current module fault", "Pack voltage detection fault",
+     "Short circuit protection", "Low-voltage charging forbidden",
+     nullptr, nullptr, nullptr, nullptr},
+};
+
 void DalyRS485::debugLog(const char *format, ...)
 {
     if (!_debugCb)
@@ -279,15 +318,32 @@ bool DalyRS485::readAlarmStatus(DalyAlarmStatus &status)
         return false;
 
     // Daly UART "Alarm Info" (cmd 0x98) payload layout, same documented
-    // protocol family as above. Byte 0 carries cell/pack voltage alarm
-    // bits (bytes 1-6 carry temperature/current/SOC/other protection bits,
-    // not decoded here since they're not relevant to this investigation):
+    // protocol family as above:
     //   [0] bit0/1 = cell overvolt level1/2, bit2/3 = cell undervolt level1/2,
     //       bit4/5 = pack overvolt level1/2, bit6/7 = pack undervolt level1/2
-    // NOT yet verified byte-for-byte against this specific pack's firmware -
-    // sanity-check against a serial monitor after flashing, e.g. by
-    // temporarily lowering cvMaxCharge below the pack's real voltage and
-    // confirming bit0 sets.
+    //   [1] bit0/1 = charge overtemp L1/L2, bit2/3 = charge undertemp L1/L2,
+    //       bit4/5 = discharge overtemp L1/L2, bit6/7 = discharge undertemp L1/L2
+    //   [2] bit0/1 = charge overcurrent L1/L2, bit2/3 = discharge overcurrent L1/L2,
+    //       bit4/5 = SOC high L1/L2, bit6/7 = SOC low L1/L2
+    //   [3] bit0/1 = cell voltage difference L1/L2, bit2/3 = temperature difference L1/L2
+    //   [4] bit0 = charge MOS overtemp, bit1 = discharge MOS overtemp,
+    //       bit2/3 = charge/discharge MOS temp sensor fault,
+    //       bit4/5 = charge/discharge MOS adhesion (stuck on),
+    //       bit6/7 = charge/discharge MOS open circuit
+    //   [5] bit0 = AFE chip fault, bit1 = voltage sampling dropped,
+    //       bit2 = cell temp sensor fault, bit3 = EEPROM fault, bit4 = RTC fault,
+    //       bit5 = precharge failure, bit6 = communication failure,
+    //       bit7 = internal communication failure
+    //   [6] bit0 = current module fault, bit1 = pack voltage detection fault,
+    //       bit2 = short circuit protection, bit3 = low-voltage charging forbidden
+    //   [7] numeric fault code
+    // See DalyRS485::kAlarmBitNames for the byte/bit -> name table this
+    // mirrors. NOT yet verified byte-for-byte against this specific pack's
+    // firmware - sanity-check against a serial monitor after flashing, e.g.
+    // by temporarily lowering cvMaxCharge below the pack's real voltage and
+    // confirming bit0 of byte 0 sets.
+    memcpy(status.rawBytes, data, sizeof(status.rawBytes));
+
     status.cellOvervoltLevel1 = data[0] & 0x01;
     status.cellOvervoltLevel2 = data[0] & 0x02;
     status.packOvervoltLevel1 = data[0] & 0x10;

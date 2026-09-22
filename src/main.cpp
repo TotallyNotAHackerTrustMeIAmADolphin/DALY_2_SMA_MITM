@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <cstring>
 #include <WiFi.h>
 #include <ArduinoOTA.h>
 #include <TelnetStream.h>
@@ -323,10 +324,10 @@ void bmsTask(void *pvParameters)
     // against the BMS's own MOSFET/alarm timeline to the second.
     static bool lastChargeMosOn = true;
     static bool lastDischargeMosOn = true;
-    static bool lastCellOV1 = false, lastCellOV2 = false;
-    static bool lastPackOV1 = false, lastPackOV2 = false;
+    static uint8_t lastAlarmBytes[7] = {0};
+    static uint8_t lastFaultCode = 0;
     static bool haveMosfetBaseline = false;
-    static bool haveAlarmBaseline = false;
+    static bool alarmBaseline = false;
 
     DalyMosfetStatus mosStatus;
     if (bms.readMosfetStatus(mosStatus))
@@ -354,22 +355,35 @@ void bmsTask(void *pvParameters)
     DalyAlarmStatus alarmStatus;
     if (bms.readAlarmStatus(alarmStatus))
     {
-      if (haveAlarmBaseline)
+      // Edge-triggered, one line per changed bit (undefined bits still log,
+      // by byte.bit position, so an unexpected fault isn't silently
+      // swallowed) - baseline flag so the first read after boot doesn't log
+      // every bit as "SET"/"CLEARED" from an all-zero starting point.
+      if (alarmBaseline)
       {
-        if (alarmStatus.cellOvervoltLevel1 != lastCellOV1)
-          netLog("[BMS] Alarm: Cell overvoltage Level 1 %s\n", alarmStatus.cellOvervoltLevel1 ? "SET" : "CLEARED");
-        if (alarmStatus.cellOvervoltLevel2 != lastCellOV2)
-          netLog("[BMS] Alarm: Cell overvoltage Level 2 %s\n", alarmStatus.cellOvervoltLevel2 ? "SET" : "CLEARED");
-        if (alarmStatus.packOvervoltLevel1 != lastPackOV1)
-          netLog("[BMS] Alarm: Pack overvoltage Level 1 %s\n", alarmStatus.packOvervoltLevel1 ? "SET" : "CLEARED");
-        if (alarmStatus.packOvervoltLevel2 != lastPackOV2)
-          netLog("[BMS] Alarm: Pack overvoltage Level 2 %s\n", alarmStatus.packOvervoltLevel2 ? "SET" : "CLEARED");
+        for (int b = 0; b < 7; b++)
+        {
+          uint8_t changed = alarmStatus.rawBytes[b] ^ lastAlarmBytes[b];
+          if (!changed)
+            continue;
+          for (int bit = 0; bit < 8; bit++)
+          {
+            if (!(changed & (1 << bit)))
+              continue;
+            bool set = alarmStatus.rawBytes[b] & (1 << bit);
+            const char *name = DalyRS485::kAlarmBitNames[b][bit];
+            if (name)
+              netLog("[BMS] Alarm: %s %s\n", name, set ? "SET" : "CLEARED");
+            else
+              netLog("[BMS] Alarm: bit %d.%d %s\n", b, bit, set ? "SET" : "CLEARED");
+          }
+        }
+        if (alarmBaseline && alarmStatus.rawBytes[7] != lastFaultCode)
+          netLog("[BMS] Fault code %u -> %u\n", lastFaultCode, alarmStatus.rawBytes[7]);
       }
-      lastCellOV1 = alarmStatus.cellOvervoltLevel1;
-      lastCellOV2 = alarmStatus.cellOvervoltLevel2;
-      lastPackOV1 = alarmStatus.packOvervoltLevel1;
-      lastPackOV2 = alarmStatus.packOvervoltLevel2;
-      haveAlarmBaseline = true;
+      memcpy(lastAlarmBytes, alarmStatus.rawBytes, sizeof(lastAlarmBytes));
+      lastFaultCode = alarmStatus.rawBytes[7];
+      alarmBaseline = true;
 
       if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
         currentData.bmsProtectionActive = alarmStatus.anyProtectionActive;

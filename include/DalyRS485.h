@@ -18,16 +18,19 @@ struct DalyMosfetStatus
     bool dischargeMosOn;
 };
 
-// Subset of the Daly "Alarm Info" (cmd 0x98) protection bitfield - only the
-// bits relevant to diagnosing an SMA-side "battery voltage out of range"
-// fault are decoded (see readAlarmStatus() for the byte layout/provenance).
+// Daly "Alarm Info" (cmd 0x98) protection bitfield. cellOvervoltLevel1/2 and
+// packOvervoltLevel1/2 are kept as named fields since the CSV log and web
+// dashboard read them directly; rawBytes carries the full 8-byte payload so
+// every bit (named via kAlarmBitNames below) can be decoded and logged
+// (see readAlarmStatus() for the byte layout/provenance).
 struct DalyAlarmStatus
 {
     bool cellOvervoltLevel1;
     bool cellOvervoltLevel2;
     bool packOvervoltLevel1;
     bool packOvervoltLevel2;
-    bool anyProtectionActive; // true if any byte in the alarm frame is nonzero
+    bool anyProtectionActive; // true if any bit in bytes 0-6 of the alarm frame is set
+    uint8_t rawBytes[8];      // full 0x98 payload; rawBytes[7] is the numeric fault code
 };
 
 class DalyRS485
@@ -44,6 +47,12 @@ public:
     bool readCellVoltages(uint8_t expectedCells, std::vector<float> &cellVoltages);
     bool readMosfetStatus(DalyMosfetStatus &status);
     bool readAlarmStatus(DalyAlarmStatus &status);
+
+    // Name table for the 0x98 alarm payload, bytes 0-6 (byte 7 is the
+    // numeric fault code, not a bitfield). Indexed [byte][bit]; nullptr for
+    // bits not defined in the documented protocol. See readAlarmStatus()
+    // for the byte layout this mirrors.
+    static const char *const kAlarmBitNames[7][8];
 
     // Plausible cell-voltage envelope for a LiFePO4 cell. Anything outside
     // 1.5-4.5 V is either a wiring/parse fault or a pack that must not be

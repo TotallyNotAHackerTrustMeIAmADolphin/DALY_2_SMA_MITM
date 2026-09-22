@@ -516,10 +516,12 @@ void canTask(void *pvParameters)
 // --- OTA ROLLBACK SAFETY NET ---
 // The bootloader supports app rollback (CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE),
 // but Arduino's default marks every new image valid right at startup, which
-// defeats it. Returning true here defers that: loop() confirms the image only
-// after kConfirmAfterMs of uptime with WiFi connected. If a freshly OTA'd
-// image crashes (or is reset) before then, the bootloader falls back to the
-// previous firmware - so a crash-looping build can't lock us out of OTA.
+// defeats it. Returning true here defers that: loop() confirms the image
+// only after kConfirmAfterMs of uptime with WiFi connected AND real BMS data
+// flowing (haveBasicInfo && haveCellData) - WiFi alone would confirm a build
+// with a broken RS485/CAN path. If a freshly OTA'd image crashes (or is
+// reset) before that, the bootloader falls back to the previous firmware -
+// so a crash-looping (or BMS-link-broken) build can't lock us out of OTA.
 extern "C" bool verifyRollbackLater() { return true; }
 constexpr unsigned long kConfirmAfterMs = 2UL * 60UL * 1000UL;
 
@@ -720,12 +722,37 @@ void loop()
   }
 
   static bool imageConfirmed = false;
-  if (!imageConfirmed && millis() > kConfirmAfterMs && WiFi.status() == WL_CONNECTED)
+  static bool unconfirmedWarned = false;
+  if (!imageConfirmed && millis() > kConfirmAfterMs)
   {
-    imageConfirmed = true;
-    esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
-    netLog("[SYS] Firmware confirmed after %lus with WiFi up (rollback cancelled): %s\n",
-           kConfirmAfterMs / 1000, esp_err_to_name(err));
+    bool wifiUp = WiFi.status() == WL_CONNECTED;
+    bool bmsUp = false;
+    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(20)) == pdTRUE)
+    {
+      bmsUp = haveBasicInfo && haveCellData;
+      xSemaphoreGive(dataMutex);
+    }
+    // If the mutex take fails, bmsUp stays false for this pass and the
+    // check is simply retried next loop() iteration.
+
+    if (wifiUp && bmsUp)
+    {
+      imageConfirmed = true;
+      esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+      netLog("[SYS] Firmware confirmed after %lus uptime with WiFi up and BMS data flowing (rollback cancelled): %s\n",
+             millis() / 1000, esp_err_to_name(err));
+    }
+    else if (!unconfirmedWarned)
+    {
+      esp_ota_img_states_t st = ESP_OTA_IMG_UNDEFINED;
+      esp_ota_get_state_partition(esp_ota_get_running_partition(), &st);
+      if (st == ESP_OTA_IMG_PENDING_VERIFY)
+      {
+        unconfirmedWarned = true;
+        netLog("[SYS] Firmware NOT confirmed at %lus: %s%s- a reset now boots the previous firmware\n",
+               millis() / 1000, wifiUp ? "" : "WiFi down ", bmsUp ? "" : "no BMS data ");
+      }
+    }
   }
 
   static unsigned long lastHealth = 0;

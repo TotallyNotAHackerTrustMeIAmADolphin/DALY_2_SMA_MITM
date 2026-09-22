@@ -13,6 +13,7 @@
 #include "pin_config.h"
 #include "SystemState.h"
 #include "Glideslope.h"
+#include "CellSmoother.h"
 #include "DalyRS485.h"
 #include "SMA_CAN.h"
 #include "WebDashboard.h"
@@ -24,8 +25,11 @@
 // secrets_example.h for the template.
 #include "secrets.h"
 
-#define MAX_CELLS 16
-#define MAX_SAMPLES 20
+// Single source of truth is CellSmoother.h (#31); kept as plain constants
+// here too since canTask and other code below still reference MAX_CELLS
+// well outside bmsTask/CellSmoother's own scope (pack voltage, CVL/DVL).
+constexpr int MAX_CELLS = CellSmoother::MAX_CELLS;
+constexpr int MAX_SAMPLES = CellSmoother::MAX_SAMPLES;
 
 // Single source of truth for the local time zone - used both by setup()'s
 // early setenv("TZ", ...) (before NTP has run) and setupNetwork()'s
@@ -57,9 +61,8 @@ volatile bool netReady = false;
 TaskHandle_t bmsTaskHandle = NULL;
 TaskHandle_t canTaskHandle = NULL;
 
-// Global filter buffers (bmsTask only)
-uint16_t cellBuffers[MAX_CELLS][MAX_SAMPLES] = {0};
-int bufferIndex = 0;
+// Per-cell moving-average smoother (bmsTask only) - see CellSmoother.h.
+CellSmoother cellSmoother;
 
 // Written by handleUIAction() on the web server's task, read/written by
 // canTask - guarded by dataMutex like the rest of the cross-task state, so
@@ -232,14 +235,6 @@ void bmsTask(void *pvParameters)
     std::vector<float> cellVolts;
     if (bms.readCellVoltages(MAX_CELLS, cellVolts))
     {
-      float sum = 0;
-      float localMin = 10.0f;
-      float localMax = 0.0f;
-      float rawMin = 10.0f;
-      float rawMax = 0.0f;
-      std::vector<float> smoothedCellVolts;
-      smoothedCellVolts.reserve(MAX_CELLS);
-
       static int lastKnownVSamples = 12; // falls back to this if the lock is briefly contended
       if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
         lastKnownVSamples = cfg.vSamples;
@@ -247,81 +242,36 @@ void bmsTask(void *pvParameters)
       }
       int windowSize = max(1, min(MAX_SAMPLES, lastKnownVSamples));
 
-      // Fill the whole moving-average window from the current reading
-      // whenever the window size changes - including the very first
-      // reading, since lastWindowSize starts at -1 and never matches a
-      // real windowSize. Without this, slots [windowSize..MAX_SAMPLES)
-      // keep whatever was last written there; raising cfg.vSamples at
-      // runtime would then average stale (e.g. boot-time) voltages back in
-      // for a whole window. (It used to be pre-filled with cvMaxCharge,
-      // which made the smoothed max start near the hard limit and swung
-      // the CCL 500A -> trickle -> 500A after every boot.)
-      static int lastWindowSize = -1;
-      bool reseeded = false;
-      if (windowSize != lastWindowSize)
-      {
-        for (int i = 0; i < (int)cellVolts.size() && i < MAX_CELLS; i++)
-        {
-          uint16_t mv = (uint16_t)(cellVolts[i] * 1000.0f);
-          for (int j = 0; j < MAX_SAMPLES; j++)
-            cellBuffers[i][j] = mv;
-        }
-        bufferIndex = 0;
-        lastWindowSize = windowSize;
-        reseeded = true;
-      }
+      // The moving-average/reseed-on-window-change logic (and the
+      // documented boot-swing regression it guards against - CCL
+      // 500A -> trickle -> 500A after boot from stale ring-buffer slots)
+      // now lives in CellSmoother.h, with its own native test.
+      CellSmoother::Result r = cellSmoother.update(cellVolts.data(), (int)cellVolts.size(), windowSize);
+
       // bmsTask isn't holding dataMutex here.
-      if (reseeded)
+      if (r.reseeded)
         netLog("[BMS] Cell filter seeded from current reading (window %d samples)\n", windowSize);
-
-      for (int i = 0; i < (int)cellVolts.size() && i < MAX_CELLS; i++)
-      {
-        // Update per-cell buffer
-        cellBuffers[i][bufferIndex] = (uint16_t)(cellVolts[i] * 1000.0f);
-
-        // Calculate smoothed average for this cell
-        uint32_t cellSumMV = 0;
-        for (int j = 0; j < windowSize; j++) {
-          cellSumMV += cellBuffers[i][j];
-        }
-
-        float smoothedV = (float)(cellSumMV / windowSize) / 1000.0f;
-        smoothedCellVolts.push_back(smoothedV);
-
-        sum += smoothedV;
-        if (smoothedV < localMin) localMin = smoothedV;
-        if (smoothedV > localMax) localMax = smoothedV;
-
-        // Raw (unsmoothed) min/max from this latest read - drives the
-        // glideslope hard cutoff/alarm gate (#9), independent of the
-        // smoothed values above which drive the taper.
-        if (cellVolts[i] < rawMin) rawMin = cellVolts[i];
-        if (cellVolts[i] > rawMax) rawMax = cellVolts[i];
-      }
 
       DashboardData broadcastCopy;
       bool shouldBroadcast = false;
 
       if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-        currentData.avgCellVoltage = sum / MAX_CELLS;
-        currentData.minCellVoltage = localMin;
-        currentData.maxCellVoltage = localMax;
-        currentData.minCellVoltageRaw = rawMin;
-        currentData.maxCellVoltageRaw = rawMax;
+        currentData.avgCellVoltage = r.avgV;
+        currentData.minCellVoltage = r.minV;
+        currentData.maxCellVoltage = r.maxV;
+        currentData.minCellVoltageRaw = r.rawMinV;
+        currentData.maxCellVoltageRaw = r.rawMaxV;
         // Raw spread (#24), from the same unsmoothed read as rawMin/rawMax
         // above - drives Glideslope::spreadFactor() in canTask.
-        currentData.cellSpreadRawMv = (uint16_t)round((rawMax - rawMin) * 1000.0f);
-        currentData.cellVoltages = smoothedCellVolts;
+        currentData.cellSpreadRawMv = r.rawSpreadMv;
+        currentData.cellVoltages.assign(r.smoothedV, r.smoothedV + r.cells);
         lastCellRead = millis();
         haveCellData = true;
-
-        // Increment circular buffer index AFTER processing all cells
-        bufferIndex = (bufferIndex + 1) % windowSize;
 
         // Copy for broadcast outside mutex
         broadcastCopy = currentData;
         shouldBroadcast = true;
-        
+
         xSemaphoreGive(dataMutex);
       }
 

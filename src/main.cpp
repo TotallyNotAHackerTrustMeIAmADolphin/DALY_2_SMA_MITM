@@ -25,6 +25,12 @@
 #define MAX_CELLS 16
 #define MAX_SAMPLES 20
 
+// Single source of truth for the local time zone - used both by setup()'s
+// early setenv("TZ", ...) (before NTP has run) and setupNetwork()'s
+// configTzTime() (which drives the actual NTP sync), so the two can't drift
+// apart.
+constexpr const char *kTimeZone = "CET-1CEST,M3.5.0,M10.5.0/3";
+
 // --- GLOBAL INSTANCES ---
 DalyRS485 bms(Serial2);
 SMA_CAN inverter;
@@ -53,10 +59,14 @@ TaskHandle_t canTaskHandle = NULL;
 uint16_t cellBuffers[MAX_CELLS][MAX_SAMPLES] = {0};
 int bufferIndex = 0;
 
-// Written by handleUIAction() on the web server's task, read by canTask.
-volatile unsigned long resetHoldStartTime = 0;
-volatile bool manualMaintForce = false;
-volatile bool isResetting = false;
+// Written by handleUIAction() on the web server's task, read/written by
+// canTask - guarded by dataMutex like the rest of the cross-task state, so
+// canTask always sees resetHoldStartTime and isResetting set together
+// (previously unlocked, isResetting could be observed with a stale/zero
+// resetHoldStartTime and cancel a fresh reset instantly).
+unsigned long resetHoldStartTime = 0;
+bool manualMaintForce = false;
+bool isResetting = false;
 bool autoMaint = false; // canTask only
 
 // BMS data freshness - guarded by dataMutex. Nothing is sent to the SMA
@@ -148,14 +158,35 @@ void handleUIAction(const char *action)
 {
   if (strcmp(action, "toggleMaint") == 0)
   {
-    manualMaintForce = !manualMaintForce;
-    netLog("[USER] Manual Force Charge: %s\n", manualMaintForce ? "ON" : "OFF");
+    bool newState = false;
+    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE)
+    {
+      manualMaintForce = !manualMaintForce;
+      newState = manualMaintForce;
+      xSemaphoreGive(dataMutex);
+      netLog("[USER] Manual Force Charge: %s\n", newState ? "ON" : "OFF");
+    }
+    else
+    {
+      netLog("[USER] %s ignored: state busy\n", action);
+    }
   }
   else if (strcmp(action, "resetSMA") == 0)
   {
-    isResetting = true;
-    resetHoldStartTime = millis();
-    netLog("[USER] Manual Cluster Reset Triggered.\n");
+    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE)
+    {
+      // 0 = "not armed yet": canTask starts the 5.5 s hold from the first
+      // status frame it actually sends with the reset bit, so a request
+      // made while the BMS is still silent isn't consumed by the wait.
+      resetHoldStartTime = 0;
+      isResetting = true;
+      xSemaphoreGive(dataMutex);
+      netLog("[USER] Manual Cluster Reset Triggered.\n");
+    }
+    else
+    {
+      netLog("[USER] %s ignored: state busy\n", action);
+    }
   }
   else if (strcmp(action, "configSaved") == 0)
   {
@@ -201,13 +232,18 @@ void bmsTask(void *pvParameters)
       }
       int windowSize = max(1, min(MAX_SAMPLES, lastKnownVSamples));
 
-      // Fill the whole moving-average window from the first real reading,
-      // so the filter starts at the actual cell voltages. (It used to be
-      // pre-filled with cvMaxCharge, which made the smoothed max start near
-      // the hard limit and swung the CCL 500A -> trickle -> 500A after
-      // every boot.)
-      static bool filterSeeded = false;
-      if (!filterSeeded)
+      // Fill the whole moving-average window from the current reading
+      // whenever the window size changes - including the very first
+      // reading, since lastWindowSize starts at -1 and never matches a
+      // real windowSize. Without this, slots [windowSize..MAX_SAMPLES)
+      // keep whatever was last written there; raising cfg.vSamples at
+      // runtime would then average stale (e.g. boot-time) voltages back in
+      // for a whole window. (It used to be pre-filled with cvMaxCharge,
+      // which made the smoothed max start near the hard limit and swung
+      // the CCL 500A -> trickle -> 500A after every boot.)
+      static int lastWindowSize = -1;
+      bool reseeded = false;
+      if (windowSize != lastWindowSize)
       {
         for (int i = 0; i < (int)cellVolts.size() && i < MAX_CELLS; i++)
         {
@@ -215,8 +251,13 @@ void bmsTask(void *pvParameters)
           for (int j = 0; j < MAX_SAMPLES; j++)
             cellBuffers[i][j] = mv;
         }
-        filterSeeded = true;
+        bufferIndex = 0;
+        lastWindowSize = windowSize;
+        reseeded = true;
       }
+      // bmsTask isn't holding dataMutex here.
+      if (reseeded)
+        netLog("[BMS] Cell filter seeded from current reading (window %d samples)\n", windowSize);
 
       for (int i = 0; i < (int)cellVolts.size() && i < MAX_CELLS; i++)
       {
@@ -358,41 +399,79 @@ const char *wifiDisconnectReasonName(uint8_t reason)
   }
 }
 
-// Guarded only by being called from the WiFi event task and read/written
-// nowhere else - no cross-task access, so no mutex needed.
-static bool s_wifiConnected = false;
-static bool s_wifiEverConnected = false;
-static unsigned long s_wifiDownSince = 0;
+// Written only by the WiFi event task (arduino_events, 4KB stack), read only
+// by loop() via drainWifiEvents() below - exactly one writer and one reader,
+// never touched by bmsTask/canTask, so no dataMutex is needed; volatile is
+// enough to keep the compiler from caching stale values across that
+// producer/consumer boundary. The event handler itself must stay allocation-
+// and lock-free (no netLog(), no WiFi.localIP()) - it runs on the WiFi
+// event task, and netLog() takes netOutMutex and can push to SSE.
+volatile bool wifiConnected = false;
+volatile bool wifiEverConnected = false;
+volatile uint32_t wifiDownSince = 0;
+volatile bool wifiPendingDisconnect = false;
+volatile bool wifiPendingReconnect = false;
+volatile bool wifiPendingFirstConnect = false; // connect that arrived after setupNetwork() gave up waiting
+volatile bool wifiPendingLostIp = false;
+volatile uint8_t wifiLastDisconnectReason = 0;
 
 void wifiEventHandler(WiFiEvent_t event, WiFiEventInfo_t info)
 {
   if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED)
   {
-    if (s_wifiConnected)
+    if (wifiConnected)
     {
-      s_wifiConnected = false;
-      s_wifiDownSince = millis();
-      uint8_t reason = info.wifi_sta_disconnected.reason;
-      netLog("[WIFI] Disconnected (reason %u: %s)\n", (unsigned)reason, wifiDisconnectReasonName(reason));
+      wifiConnected = false;
+      wifiDownSince = millis();
+      wifiLastDisconnectReason = info.wifi_sta_disconnected.reason;
+      wifiPendingDisconnect = true;
     }
     // else: still trying to (re)connect - don't log every retry.
   }
   else if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP)
   {
-    if (!s_wifiConnected)
-    {
-      s_wifiConnected = true;
-      if (s_wifiEverConnected)
-      {
-        unsigned long downMs = millis() - s_wifiDownSince;
-        netLog("[WIFI] Reconnected (%s), was down for %lus\n", WiFi.localIP().toString().c_str(), downMs / 1000);
-      }
-      else
-      {
-        s_wifiEverConnected = true;
-        netLog("[WIFI] Connected, IP %s\n", WiFi.localIP().toString().c_str());
-      }
-    }
+    if (wifiEverConnected && !wifiConnected)
+      wifiPendingReconnect = true;
+    else if (!wifiEverConnected)
+      wifiPendingFirstConnect = true; // cleared by setupNetwork() if it logged the connect itself
+    wifiConnected = true;
+    wifiEverConnected = true;
+  }
+  else if (event == ARDUINO_EVENT_WIFI_STA_LOST_IP)
+  {
+    wifiPendingLostIp = true;
+  }
+}
+
+// Emits the [WIFI] log lines wifiEventHandler() could only flag, from
+// loop() instead of the WiFi event task. Order: disconnect, lost-IP,
+// reconnect - matches the order those conditions actually occur in.
+void drainWifiEvents()
+{
+  if (wifiPendingDisconnect)
+  {
+    wifiPendingDisconnect = false;
+    uint8_t reason = wifiLastDisconnectReason;
+    netLog("[WIFI] Disconnected (reason %u: %s)\n", (unsigned)reason, wifiDisconnectReasonName(reason));
+  }
+
+  if (wifiPendingLostIp)
+  {
+    wifiPendingLostIp = false;
+    netLog("[WIFI] Lost IP address (still associated)\n");
+  }
+
+  if (wifiPendingFirstConnect)
+  {
+    wifiPendingFirstConnect = false;
+    netLog("[WIFI] Connected, IP %s\n", WiFi.localIP().toString().c_str());
+  }
+  if (wifiPendingReconnect)
+  {
+    wifiPendingReconnect = false;
+    unsigned long downMs = millis() - wifiDownSince;
+    netLog("[WIFI] Reconnected (%s), RSSI %d dBm, was down for %lus\n",
+           WiFi.localIP().toString().c_str(), (int)WiFi.RSSI(), downMs / 1000);
   }
 }
 
@@ -414,7 +493,10 @@ void setupNetwork()
 
   if (WiFi.status() == WL_CONNECTED)
   {
-    configTzTime("CET-1CEST,M3.5.0,M10.5.0/3", "pool.ntp.org", "ptbtime1.ptb.de");
+    wifiPendingFirstConnect = false; // logged here, don't repeat it from drainWifiEvents()
+    netLog("[WIFI] Connected, IP %s\n", WiFi.localIP().toString().c_str());
+
+    configTzTime(kTimeZone, "pool.ntp.org", "ptbtime1.ptb.de");
 
     // Wait for NTP sync (up to 5 seconds)
     netLog("[SYS] Waiting for NTP sync...\n");
@@ -453,16 +535,13 @@ void canTask(void *pvParameters)
       }
     }
 
-    if (isResetting && (now - resetHoldStartTime > 5500))
-    {
-      isResetting = false;
-      netLog("[SYS] Recovery cycle finished.\n");
-    }
-
     if (now - lastSmaTx > 250)
     {
       lastSmaTx = now;
       bool firstFrames = false;
+      bool resetFinished = false;
+      bool fresh = false;
+      int bmsTimeoutCopy = 0;
 
       if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
         // Send nothing until the BMS has delivered basic info AND cell
@@ -471,6 +550,21 @@ void canTask(void *pvParameters)
         // every reboot - better than made-up SOC/voltage/limits.
         if (haveBasicInfo && haveCellData)
         {
+          // The reset hold is measured from the first frame sent with the
+          // reset bit (handleUIAction() arms it with resetHoldStartTime = 0
+          // under this same mutex), not from the click, so a request made
+          // while no frames go out still gets its full 5.5 s on the bus.
+          if (isResetting)
+          {
+            if (resetHoldStartTime == 0)
+              resetHoldStartTime = now ? now : 1;
+            else if (now - resetHoldStartTime > 5500)
+            {
+              isResetting = false;
+              resetFinished = true;
+            }
+          }
+
           if (!autoMaint && currentData.packVoltage > 0 && currentData.packVoltage < (cfg.cvMaintStart * MAX_CELLS))
             autoMaint = true;
           else if (autoMaint && currentData.packVoltage > (cfg.cvMaintStop * MAX_CELLS))
@@ -479,6 +573,12 @@ void canTask(void *pvParameters)
           currentData.maintenanceActive = manualMaintForce || autoMaint;
           currentData.forceCharge = currentData.maintenanceActive;
           currentData.isResetting = isResetting;
+
+          // Same freshness check calculateCCL()/calculateDCL() use below -
+          // captured here so the edge-triggered log after this lock can
+          // report a stale->0A transition without re-deriving it unlocked.
+          fresh = bmsDataFresh();
+          bmsTimeoutCopy = cfg.bmsTimeout;
 
           SMATxData tx;
           tx.packVoltage = currentData.packVoltage;
@@ -507,6 +607,27 @@ void canTask(void *pvParameters)
 
       if (firstFrames)
         netLog("[CAN] First BMS data at %lu ms uptime - SMA frames enabled.\n", now);
+      if (resetFinished)
+        netLog("[SYS] Recovery cycle finished.\n");
+
+      // Edge-triggered, and only meaningful once real BMS data has started
+      // flowing (framesEnabled) - staleBaseline gates the "fresh again" log
+      // so the very first-ever fresh reading isn't reported as a recovery.
+      static bool staleBaseline = false;
+      static bool wasFresh = false;
+      if (framesEnabled)
+      {
+        if (wasFresh && !fresh)
+        {
+          netLog("[BMS] Data stale (both reads older than %d s) - CCL/DCL forced to 0 A\n", bmsTimeoutCopy);
+          staleBaseline = true;
+        }
+        else if (!wasFresh && fresh && staleBaseline)
+        {
+          netLog("[BMS] Data fresh again - limits restored\n");
+        }
+        wasFresh = fresh;
+      }
     }
 
     vTaskDelay(pdMS_TO_TICKS(10));
@@ -516,10 +637,12 @@ void canTask(void *pvParameters)
 // --- OTA ROLLBACK SAFETY NET ---
 // The bootloader supports app rollback (CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE),
 // but Arduino's default marks every new image valid right at startup, which
-// defeats it. Returning true here defers that: loop() confirms the image only
-// after kConfirmAfterMs of uptime with WiFi connected. If a freshly OTA'd
-// image crashes (or is reset) before then, the bootloader falls back to the
-// previous firmware - so a crash-looping build can't lock us out of OTA.
+// defeats it. Returning true here defers that: loop() confirms the image
+// only after kConfirmAfterMs of uptime with WiFi connected AND real BMS data
+// flowing (haveBasicInfo && haveCellData) - WiFi alone would confirm a build
+// with a broken RS485/CAN path. If a freshly OTA'd image crashes (or is
+// reset) before that, the bootloader falls back to the previous firmware -
+// so a crash-looping (or BMS-link-broken) build can't lock us out of OTA.
 extern "C" bool verifyRollbackLater() { return true; }
 constexpr unsigned long kConfirmAfterMs = 2UL * 60UL * 1000UL;
 
@@ -559,19 +682,30 @@ void logHealth()
 {
   TaskHandle_t asyncTcp = xTaskGetHandle("async_tcp");
   TaskHandle_t sdTask = xTaskGetHandle("SD_LogTask");
+  TaskHandle_t evt = xTaskGetHandle("arduino_events");
+
+  char rssi[16];
+  if (WiFi.status() == WL_CONNECTED)
+    snprintf(rssi, sizeof(rssi), "%d dBm", (int)WiFi.RSSI());
+  else
+    strlcpy(rssi, "n/a", sizeof(rssi));
+
   // On ESP-IDF the stack high-water mark is in bytes.
-  netLog("[DIAG] Heap free %u, min %u, max block %u | stack left: loop %u, bms %u, can %u, sd %u, async_tcp %u | WiFi RSSI %d dBm\n",
+  netLog("[DIAG] Heap free %u, min %u, max block %u | stack left: loop %u, bms %u, can %u, sd %u, async_tcp %u, events %u | WiFi RSSI %s\n",
          (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap(), (unsigned)ESP.getMaxAllocHeap(),
          (unsigned)uxTaskGetStackHighWaterMark(NULL),
          bmsTaskHandle ? (unsigned)uxTaskGetStackHighWaterMark(bmsTaskHandle) : 0u,
          canTaskHandle ? (unsigned)uxTaskGetStackHighWaterMark(canTaskHandle) : 0u,
          sdTask ? (unsigned)uxTaskGetStackHighWaterMark(sdTask) : 0u,
          asyncTcp ? (unsigned)uxTaskGetStackHighWaterMark(asyncTcp) : 0u,
-         WiFi.status() == WL_CONNECTED ? (int)WiFi.RSSI() : 0);
+         evt ? (unsigned)uxTaskGetStackHighWaterMark(evt) : 0u,
+         rssi);
 }
 
-// Why did we (re)boot, and what does the last stored core dump say? Logged
-// once the clock is set (so it lands in the dated SD .log file).
+// Why did we (re)boot, and what does the last stored core dump say? Called
+// directly from setup() right after SD init, so even a reset within the
+// first 60s of a cold boot (or a crash loop) still gets its reason onto the
+// SD log - it no longer waits for loop()'s clock-ready gate.
 void logBootDiagnostics()
 {
   esp_reset_reason_t reason = esp_reset_reason();
@@ -587,11 +721,23 @@ void logBootDiagnostics()
   netLog("[DIAG] Running firmware ELF sha256: %s, partition %s, image state: %s\n",
          elfSha, running ? running->label : "?", otaStateName(otaState));
 
+  const esp_partition_t *bad = esp_ota_get_last_invalid_partition();
+  if (bad)
+  {
+    netLog("[DIAG] ROLLED BACK: partition %s is invalid/aborted - running the previous firmware\n", bad->label);
+  }
+
+  if (otaState == ESP_OTA_IMG_PENDING_VERIFY)
+  {
+    netLog("[DIAG] Image pending verification: OTA is refused until it is confirmed (needs >= 120 s uptime with WiFi up and BMS data); a reset before that boots the previous firmware.\n");
+  }
+
   // A dump stays in flash until the next crash overwrites it, so it can be
   // from an earlier crash than the one that caused this boot - compare its
   // ELF sha with the running one, and the reset reason above.
   static esp_core_dump_summary_t summary;
-  if (esp_core_dump_image_check() == ESP_OK && esp_core_dump_get_summary(&summary) == ESP_OK)
+  esp_err_t chk = esp_core_dump_image_check();
+  if (chk == ESP_OK && esp_core_dump_get_summary(&summary) == ESP_OK)
   {
     netLog("[DIAG] Stored core dump: task '%s', PC 0x%08x, cause %u, vaddr 0x%08x, ELF %s\n",
            summary.exc_task, (unsigned)summary.exc_pc,
@@ -606,12 +752,14 @@ void logBootDiagnostics()
     netLog("[DIAG] Backtrace%s:%s\n", summary.exc_bt_info.corrupted ? " (corrupted)" : "", bt);
     netLog("[DIAG] Full dump: GET /api/coredump\n");
   }
-  else
+  else if (chk == ESP_ERR_NOT_FOUND || chk == ESP_ERR_INVALID_SIZE)
   {
     netLog("[DIAG] No core dump stored.\n");
   }
-
-  logHealth();
+  else
+  {
+    netLog("[DIAG] Core dump present but unreadable (%s).\n", esp_err_to_name(chk));
+  }
 }
 
 void setup()
@@ -627,7 +775,7 @@ void setup()
   // WiFi connects used local time, so the same boot showed two different
   // clocks depending on how far setup() had gotten. configTzTime() (called
   // later, once WiFi is up) still does the actual NTP sync.
-  setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3", 1);
+  setenv("TZ", kTimeZone, 1);
   tzset();
 
   dataMutex = xSemaphoreCreateMutex();
@@ -640,6 +788,13 @@ void setup()
 
   SDLogger::setDebugCallback(libraryLogger);
   bool sdOk = SDLogger::begin();
+  netLog(sdOk ? "[SYS] SD card logging initialized.\n"
+              : "[SYS] SD card logging unavailable (no card or mount failed).\n");
+
+  // Reset reason / rollback state / core dump summary, right after the SD
+  // log exists to receive it - not deferred to loop(), so a reset within
+  // the first 60s of a cold boot (or a crash loop) still gets logged.
+  logBootDiagnostics();
 
   currentData.packTemp = 220; // no temperature sensor is read - fixed 22.0C goes to the SMA
   currentData.smaChargeMode = "Unknown";
@@ -666,14 +821,13 @@ void setup()
   webUI.begin();
   netReady = true;
 
-  netLog(sdOk ? "[SYS] SD card logging initialized.\n"
-              : "[SYS] SD card logging unavailable (no card or mount failed).\n");
   netLog("[SYS] Boot sequence complete. Multithreading Active.\n");
 }
 
 void loop()
 {
   ArduinoOTA.handle();
+  drainWifiEvents();
 
   static unsigned long lastSdLog = 0;
   if (millis() - lastSdLog > 10000)
@@ -687,20 +841,49 @@ void loop()
     }
   }
 
-  static bool bootDiagDone = false;
-  if (!bootDiagDone && (time(nullptr) > 1000000000L || millis() > 60000))
+  // logBootDiagnostics() itself now runs from setup(), right after SD init,
+  // so even a reset in the first 60s (or a crash loop) gets logged. This
+  // just gets one logHealth() sample in once the clock/BMS data settle,
+  // ahead of the regular 10-minute cadence below.
+  static bool firstHealthDone = false;
+  if (!firstHealthDone && (time(nullptr) > 1000000000L || millis() > 60000))
   {
-    bootDiagDone = true;
-    logBootDiagnostics();
+    firstHealthDone = true;
+    logHealth();
   }
 
   static bool imageConfirmed = false;
-  if (!imageConfirmed && millis() > kConfirmAfterMs && WiFi.status() == WL_CONNECTED)
+  static bool unconfirmedWarned = false;
+  if (!imageConfirmed && millis() > kConfirmAfterMs)
   {
-    imageConfirmed = true;
-    esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
-    netLog("[SYS] Firmware confirmed after %lus with WiFi up (rollback cancelled): %s\n",
-           kConfirmAfterMs / 1000, esp_err_to_name(err));
+    bool wifiUp = WiFi.status() == WL_CONNECTED;
+    bool bmsUp = false;
+    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(20)) == pdTRUE)
+    {
+      bmsUp = haveBasicInfo && haveCellData;
+      xSemaphoreGive(dataMutex);
+    }
+    // If the mutex take fails, bmsUp stays false for this pass and the
+    // check is simply retried next loop() iteration.
+
+    if (wifiUp && bmsUp)
+    {
+      imageConfirmed = true;
+      esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+      netLog("[SYS] Firmware confirmed after %lus uptime with WiFi up and BMS data flowing (rollback cancelled): %s\n",
+             millis() / 1000, esp_err_to_name(err));
+    }
+    else if (!unconfirmedWarned)
+    {
+      esp_ota_img_states_t st = ESP_OTA_IMG_UNDEFINED;
+      esp_ota_get_state_partition(esp_ota_get_running_partition(), &st);
+      if (st == ESP_OTA_IMG_PENDING_VERIFY)
+      {
+        unconfirmedWarned = true;
+        netLog("[SYS] Firmware NOT confirmed at %lus: %s%s- a reset now boots the previous firmware\n",
+               millis() / 1000, wifiUp ? "" : "WiFi down ", bmsUp ? "" : "no BMS data ");
+      }
+    }
   }
 
   static unsigned long lastHealth = 0;

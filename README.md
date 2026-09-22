@@ -79,7 +79,7 @@ The exact same math applies in reverse for discharging, using the **Lowest Cell*
 
 ## 🖥️ Using the Web Dashboard
 
-Once booted, navigate to the device's IP address in your web browser (e.g., `http://192.168.178.56`).
+Once booted, navigate to the device's IP address in your web browser (e.g., `http://<device-ip>`).
 
 All four tabs share the same navigation bar, so every page is reachable from every other page.
 
@@ -95,7 +95,7 @@ All four tabs share the same navigation bar, so every page is reachable from eve
 
 If you need to debug the system, open a terminal and connect via Telnet:
 ```bash
-telnet 192.168.178.56
+telnet <device-ip>
 ```
 You will see a live feed of configuration changes, inverter state shifts, and any RS485/CAN hardware fault recoveries.
 

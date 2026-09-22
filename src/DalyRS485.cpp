@@ -199,6 +199,36 @@ bool DalyRS485::readCellVoltages(uint8_t expectedCells, std::vector<float> &cell
 
         if (framesReceivedCount == expectedFrames)
         {
+            // All frames parsed cleanly on the wire (checksums passed), but a
+            // checksum can still pass on a garbled value. bmsTask seeds its
+            // whole moving-average window from the first successful read, so
+            // one implausible cell here would get full weight for an entire
+            // smoothing window. Reject the whole read - same as a missed
+            // frame - if any cell falls outside a physically plausible
+            // LiFePO4 range; the caller's stale-data fail-safe then drops
+            // limits to 0A instead of trusting the value.
+            static bool rejecting = false;
+            for (uint8_t i = 0; i < expectedCells; i++)
+            {
+                uint16_t mv = (uint16_t)(cellVoltages[i] * 1000.0f + 0.5f);
+                if (mv < kCellMinPlausibleMv || mv > kCellMaxPlausibleMv)
+                {
+                    if (!rejecting)
+                    {
+                        debugLog("[BMS] Rejected cell frame: cell %d = %u mV outside 1.5-4.5 V\n", i + 1, mv);
+                        rejecting = true;
+                    }
+                    cellVoltages.assign(expectedCells, 0.0f);
+                    return false;
+                }
+            }
+
+            if (rejecting)
+            {
+                debugLog("[BMS] Cell frames plausible again\n");
+                rejecting = false;
+            }
+
             return true; // We got them all!
         }
 

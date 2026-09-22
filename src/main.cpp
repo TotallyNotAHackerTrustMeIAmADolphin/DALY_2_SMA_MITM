@@ -226,13 +226,18 @@ void bmsTask(void *pvParameters)
       }
       int windowSize = max(1, min(MAX_SAMPLES, lastKnownVSamples));
 
-      // Fill the whole moving-average window from the first real reading,
-      // so the filter starts at the actual cell voltages. (It used to be
-      // pre-filled with cvMaxCharge, which made the smoothed max start near
-      // the hard limit and swung the CCL 500A -> trickle -> 500A after
-      // every boot.)
-      static bool filterSeeded = false;
-      if (!filterSeeded)
+      // Fill the whole moving-average window from the current reading
+      // whenever the window size changes - including the very first
+      // reading, since lastWindowSize starts at -1 and never matches a
+      // real windowSize. Without this, slots [windowSize..MAX_SAMPLES)
+      // keep whatever was last written there; raising cfg.vSamples at
+      // runtime would then average stale (e.g. boot-time) voltages back in
+      // for a whole window. (It used to be pre-filled with cvMaxCharge,
+      // which made the smoothed max start near the hard limit and swung
+      // the CCL 500A -> trickle -> 500A after every boot.)
+      static int lastWindowSize = -1;
+      bool reseeded = false;
+      if (windowSize != lastWindowSize)
       {
         for (int i = 0; i < (int)cellVolts.size() && i < MAX_CELLS; i++)
         {
@@ -240,8 +245,13 @@ void bmsTask(void *pvParameters)
           for (int j = 0; j < MAX_SAMPLES; j++)
             cellBuffers[i][j] = mv;
         }
-        filterSeeded = true;
+        bufferIndex = 0;
+        lastWindowSize = windowSize;
+        reseeded = true;
       }
+      // bmsTask isn't holding dataMutex here.
+      if (reseeded)
+        netLog("[BMS] Cell filter seeded from current reading (window %d samples)\n", windowSize);
 
       for (int i = 0; i < (int)cellVolts.size() && i < MAX_CELLS; i++)
       {

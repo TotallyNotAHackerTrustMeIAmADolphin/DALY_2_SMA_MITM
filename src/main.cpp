@@ -143,14 +143,14 @@ bool bmsDataFresh()
          Glideslope::isFresh(haveCellData, now, lastCellRead, cfg.bmsTimeout);
 }
 
-uint16_t calculateCCL(float maxCellV)
+uint16_t calculateCCL(float smoothedMaxV, float rawMaxV)
 {
-  return Glideslope::calculateCCL(cfg, maxCellV, bmsDataFresh(), currentData.maintenanceActive);
+  return Glideslope::calculateCCL(cfg, smoothedMaxV, rawMaxV, bmsDataFresh(), currentData.maintenanceActive);
 }
 
-uint16_t calculateDCL(float minCellV)
+uint16_t calculateDCL(float smoothedMinV, float rawMinV)
 {
-  return Glideslope::calculateDCL(cfg, minCellV, bmsDataFresh(), currentData.maintenanceActive);
+  return Glideslope::calculateDCL(cfg, smoothedMinV, rawMinV, bmsDataFresh(), currentData.maintenanceActive);
 }
 
 // --- UI EVENT HANDLER ---
@@ -222,6 +222,8 @@ void bmsTask(void *pvParameters)
       float sum = 0;
       float localMin = 10.0f;
       float localMax = 0.0f;
+      float rawMin = 10.0f;
+      float rawMax = 0.0f;
       std::vector<float> smoothedCellVolts;
       smoothedCellVolts.reserve(MAX_CELLS);
 
@@ -263,19 +265,25 @@ void bmsTask(void *pvParameters)
       {
         // Update per-cell buffer
         cellBuffers[i][bufferIndex] = (uint16_t)(cellVolts[i] * 1000.0f);
-        
+
         // Calculate smoothed average for this cell
         uint32_t cellSumMV = 0;
         for (int j = 0; j < windowSize; j++) {
           cellSumMV += cellBuffers[i][j];
         }
-        
+
         float smoothedV = (float)(cellSumMV / windowSize) / 1000.0f;
         smoothedCellVolts.push_back(smoothedV);
-        
+
         sum += smoothedV;
         if (smoothedV < localMin) localMin = smoothedV;
         if (smoothedV > localMax) localMax = smoothedV;
+
+        // Raw (unsmoothed) min/max from this latest read - drives the
+        // glideslope hard cutoff/alarm gate (#9), independent of the
+        // smoothed values above which drive the taper.
+        if (cellVolts[i] < rawMin) rawMin = cellVolts[i];
+        if (cellVolts[i] > rawMax) rawMax = cellVolts[i];
       }
 
       DashboardData broadcastCopy;
@@ -285,6 +293,8 @@ void bmsTask(void *pvParameters)
         currentData.avgCellVoltage = sum / MAX_CELLS;
         currentData.minCellVoltage = localMin;
         currentData.maxCellVoltage = localMax;
+        currentData.minCellVoltageRaw = rawMin;
+        currentData.maxCellVoltageRaw = rawMax;
         currentData.cellVoltages = smoothedCellVolts;
         lastCellRead = millis();
         haveCellData = true;
@@ -588,9 +598,9 @@ void canTask(void *pvParameters)
           tx.maintenanceActive = currentData.maintenanceActive;
           tx.isResetting = currentData.isResetting;
 
-          tx.ccl = calculateCCL(currentData.maxCellVoltage);
+          tx.ccl = calculateCCL(currentData.maxCellVoltage, currentData.maxCellVoltageRaw);
           currentData.requestedCurrent = tx.ccl / 10.0f;
-          tx.dcl = calculateDCL(currentData.minCellVoltage);
+          tx.dcl = calculateDCL(currentData.minCellVoltage, currentData.minCellVoltageRaw);
           tx.cvl = currentData.maintenanceActive ? 560 : (uint16_t)(cfg.cvMaxCharge * MAX_CELLS * 10);
           tx.dvl = (uint16_t)(cfg.cvMinDischarge * MAX_CELLS * 10);
 
@@ -798,6 +808,8 @@ void setup()
 
   currentData.packTemp = 220; // no temperature sensor is read - fixed 22.0C goes to the SMA
   currentData.smaChargeMode = "Unknown";
+  currentData.minCellVoltageRaw = 0;
+  currentData.maxCellVoltageRaw = 0;
 
   // BMS and CAN come up before the network: setupNetwork() can block for up
   // to ~15s (WiFi + NTP), and the SMA should get frames as soon as real BMS

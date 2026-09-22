@@ -44,6 +44,8 @@ const char index_html[] PROGMEM = R"rawliteral(
   <div class="card"><div>Current</div><div id="i" class="value">--</div></div>
   <div class="card"><div>SOC</div><div id="soc" class="value">--</div></div>
   <div class="card"><div>SMA Status</div><div id="smastat" class="value">--</div></div>
+  <div class="card"><div>Max Cell V</div><div id="maxCellV" class="value">--</div></div>
+  <div class="card"><div>Min Cell V</div><div id="minCellV" class="value">--</div></div>
 </div>
 
 <div class="cells-container">
@@ -83,6 +85,11 @@ const char index_html[] PROGMEM = R"rawliteral(
     document.getElementById('v').innerHTML = obj.v.toFixed(2) + " V";
     document.getElementById('reqI').innerHTML = obj.reqI.toFixed(1) + " A";
     document.getElementById('cv').innerHTML = ((obj.maxC - obj.minC) * 1000).toFixed(0) + " mV";
+    // maxC/minC are the smoothed (~48s moving average) values; maxCellRaw/
+    // minCellRaw are the latest single BMS read - see #9 (the hard cutoff
+    // and alarm gate act on the raw value, not this smoothed one).
+    document.getElementById('maxCellV').innerHTML = obj.maxC.toFixed(3) + " (raw " + obj.maxCellRaw.toFixed(3) + ")";
+    document.getElementById('minCellV').innerHTML = obj.minC.toFixed(3) + " (raw " + obj.minCellRaw.toFixed(3) + ")";
     const curEl = document.getElementById('i');
     curEl.innerHTML = obj.i.toFixed(1) + " A";
     if (obj.i < -0.1) curEl.classList.add('negative-val');

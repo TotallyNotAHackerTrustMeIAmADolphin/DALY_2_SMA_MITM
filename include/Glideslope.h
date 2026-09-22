@@ -28,7 +28,19 @@ namespace Glideslope
 
     // Charge current limit. bmsFresh=false (comms timeout, or no BMS data
     // yet) forces 0A as a fail-safe, checked before anything else.
-    inline uint16_t calculateCCL(const SystemConfig &cfg, float maxCellV, bool bmsFresh, bool maintenanceActive)
+    //
+    // Two different cell-voltage inputs, by design (#9): the hard cutoff
+    // (cvMaxCharge -> 0A) and the alarm gate (cvHighAlarmGate -> trickle)
+    // use rawMaxV, the latest single BMS read - a fast per-cell spike (e.g.
+    // a weak cell's internal resistance under a sudden current step) must
+    // trip these immediately, not ~48s later once bmsTask's moving average
+    // catches up. The taper between cvStartTaper and cvHighAlarmGate keeps
+    // using smoothedMaxV so the CCL doesn't jitter with normal per-read
+    // noise. One consequence: if smoothedMaxV is already at/above the gate
+    // while rawMaxV has since dropped back below it, the taper's slope
+    // clamp still yields trickle (never more than trickle once the gate has
+    // been reached on the smoothed value) - that's intentional, not a bug.
+    inline uint16_t calculateCCL(const SystemConfig &cfg, float smoothedMaxV, float rawMaxV, bool bmsFresh, bool maintenanceActive)
     {
         if (!bmsFresh)
             return 0;
@@ -38,25 +50,30 @@ namespace Glideslope
         // would otherwise fall through to the final `return maxChargeA` -
         // full current instead of the fail-safe 0A. A NaN current setpoint
         // would make round(NaN) -> uint16_t undefined. Catch both explicitly.
-        if (isnan(maxCellV) || isnan(cfg.cvMaxCharge) || isnan(cfg.cvHighAlarmGate) || isnan(cfg.cvStartTaper) ||
+        if (isnan(smoothedMaxV) || isnan(rawMaxV) || isnan(cfg.cvMaxCharge) || isnan(cfg.cvHighAlarmGate) || isnan(cfg.cvStartTaper) ||
             isnan(cfg.maxChargeA) || isnan(cfg.trickleA) || isnan(cfg.maintAmps))
             return 0;
 
         if (maintenanceActive)
             return (uint16_t)round(cfg.maintAmps * 10.0f);
 
-        if (maxCellV >= cfg.cvMaxCharge)
+        if (rawMaxV >= cfg.cvMaxCharge)
             return 0;
-        if (maxCellV >= cfg.cvHighAlarmGate)
+        if (rawMaxV >= cfg.cvHighAlarmGate)
             return (uint16_t)round(cfg.trickleA * 10.0f);
 
-        if (maxCellV > cfg.cvStartTaper)
+        if (smoothedMaxV > cfg.cvStartTaper)
         {
             float div = cfg.cvHighAlarmGate - cfg.cvStartTaper;
             if (div <= 0.0001f)
                 return (uint16_t)round(cfg.trickleA * 10.0f);
 
-            float slope = (cfg.cvHighAlarmGate - maxCellV) / div;
+            // If smoothedMaxV is already at/above cvHighAlarmGate here (raw
+            // has since fallen back below the gate, or this cell's smoothed
+            // value simply lags above it), slope goes negative and clamps
+            // to 0 -> target == trickleA. Intended: see the function
+            // comment above.
+            float slope = (cfg.cvHighAlarmGate - smoothedMaxV) / div;
             if (slope < 0.0f)
                 slope = 0.0f;
             if (slope > 1.0f)
@@ -68,8 +85,10 @@ namespace Glideslope
         return (uint16_t)round(cfg.maxChargeA * 10.0f);
     }
 
-    // Discharge current limit - mirror image of calculateCCL.
-    inline uint16_t calculateDCL(const SystemConfig &cfg, float minCellV, bool bmsFresh, bool maintenanceActive)
+    // Discharge current limit - mirror image of calculateCCL. See its
+    // comment for why the cutoff/gate use rawMinV while the taper uses
+    // smoothedMinV.
+    inline uint16_t calculateDCL(const SystemConfig &cfg, float smoothedMinV, float rawMinV, bool bmsFresh, bool maintenanceActive)
     {
         if (!bmsFresh)
             return 0;
@@ -77,25 +96,29 @@ namespace Glideslope
         // See the matching check in calculateCCL(): NaN fails every
         // comparison below, which would otherwise fall through to the
         // final `return maxDischargeA` instead of the fail-safe 0A.
-        if (isnan(minCellV) || isnan(cfg.cvMinDischarge) || isnan(cfg.cvLowAlarmGate) || isnan(cfg.cvStartDTaper) ||
+        if (isnan(smoothedMinV) || isnan(rawMinV) || isnan(cfg.cvMinDischarge) || isnan(cfg.cvLowAlarmGate) || isnan(cfg.cvStartDTaper) ||
             isnan(cfg.maxDischargeA) || isnan(cfg.limpDischargeA))
             return 0;
 
         if (maintenanceActive)
             return 0;
 
-        if (minCellV <= cfg.cvMinDischarge)
+        if (rawMinV <= cfg.cvMinDischarge)
             return 0;
-        if (minCellV <= cfg.cvLowAlarmGate)
+        if (rawMinV <= cfg.cvLowAlarmGate)
             return (uint16_t)round(cfg.limpDischargeA * 10.0f);
 
-        if (minCellV < cfg.cvStartDTaper)
+        if (smoothedMinV < cfg.cvStartDTaper)
         {
             float div = cfg.cvStartDTaper - cfg.cvLowAlarmGate;
             if (div <= 0.0001f)
                 return (uint16_t)round(cfg.limpDischargeA * 10.0f);
 
-            float slope = (minCellV - cfg.cvLowAlarmGate) / div;
+            // Mirror of calculateCCL()'s slope clamp: smoothedMinV at/below
+            // cvLowAlarmGate here (raw has since risen back above it) makes
+            // slope negative, clamped to 0 -> target == limpDischargeA.
+            // Intended: see calculateCCL()'s comment above.
+            float slope = (smoothedMinV - cfg.cvLowAlarmGate) / div;
             if (slope < 0.0f)
                 slope = 0.0f;
             if (slope > 1.0f)

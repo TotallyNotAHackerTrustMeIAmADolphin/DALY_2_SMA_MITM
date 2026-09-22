@@ -53,10 +53,14 @@ void WebDashboard::broadcastTelemetry(const DashboardData &data)
     }
     strcat(cellsStr, "]");
 
+    // Worst-case length (verified: 99.99/9.999-valued fields, a 20-char
+    // smam string, 16 cells at "3.999," each) is ~290 bytes - json[1024]
+    // has plenty of headroom for the two extra raw fields below.
     char json[1024];
     snprintf(json, sizeof(json),
-             "{\"v\":%.2f,\"cv\":%.3f,\"minC\":%.3f,\"maxC\":%.3f,\"i\":%.1f,\"reqI\":%.1f,\"soc\":%.1f,\"smam\":\"%s\",\"maint\":%d,\"force\":%d,\"isR\":%d,\"cells\":%s}",
+             "{\"v\":%.2f,\"cv\":%.3f,\"minC\":%.3f,\"maxC\":%.3f,\"minCellRaw\":%.3f,\"maxCellRaw\":%.3f,\"i\":%.1f,\"reqI\":%.1f,\"soc\":%.1f,\"smam\":\"%s\",\"maint\":%d,\"force\":%d,\"isR\":%d,\"cells\":%s}",
              data.packVoltage, data.avgCellVoltage, data.minCellVoltage, data.maxCellVoltage,
+             data.minCellVoltageRaw, data.maxCellVoltageRaw,
              data.packCurrent, data.requestedCurrent, data.packSOC,
              data.smaChargeMode.c_str(), (int)data.maintenanceActive, (int)data.forceCharge,
              (int)data.isResetting, cellsStr);

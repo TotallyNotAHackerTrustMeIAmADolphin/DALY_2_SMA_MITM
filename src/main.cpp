@@ -358,41 +358,73 @@ const char *wifiDisconnectReasonName(uint8_t reason)
   }
 }
 
-// Guarded only by being called from the WiFi event task and read/written
-// nowhere else - no cross-task access, so no mutex needed.
-static bool s_wifiConnected = false;
-static bool s_wifiEverConnected = false;
-static unsigned long s_wifiDownSince = 0;
+// Written only by the WiFi event task (arduino_events, 4KB stack), read only
+// by loop() via drainWifiEvents() below - exactly one writer and one reader,
+// never touched by bmsTask/canTask, so no dataMutex is needed; volatile is
+// enough to keep the compiler from caching stale values across that
+// producer/consumer boundary. The event handler itself must stay allocation-
+// and lock-free (no netLog(), no WiFi.localIP()) - it runs on the WiFi
+// event task, and netLog() takes netOutMutex and can push to SSE.
+volatile bool wifiConnected = false;
+volatile bool wifiEverConnected = false;
+volatile uint32_t wifiDownSince = 0;
+volatile bool wifiPendingDisconnect = false;
+volatile bool wifiPendingReconnect = false;
+volatile bool wifiPendingLostIp = false;
+volatile uint8_t wifiLastDisconnectReason = 0;
 
 void wifiEventHandler(WiFiEvent_t event, WiFiEventInfo_t info)
 {
   if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED)
   {
-    if (s_wifiConnected)
+    if (wifiConnected)
     {
-      s_wifiConnected = false;
-      s_wifiDownSince = millis();
-      uint8_t reason = info.wifi_sta_disconnected.reason;
-      netLog("[WIFI] Disconnected (reason %u: %s)\n", (unsigned)reason, wifiDisconnectReasonName(reason));
+      wifiConnected = false;
+      wifiDownSince = millis();
+      wifiLastDisconnectReason = info.wifi_sta_disconnected.reason;
+      wifiPendingDisconnect = true;
     }
     // else: still trying to (re)connect - don't log every retry.
   }
   else if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP)
   {
-    if (!s_wifiConnected)
-    {
-      s_wifiConnected = true;
-      if (s_wifiEverConnected)
-      {
-        unsigned long downMs = millis() - s_wifiDownSince;
-        netLog("[WIFI] Reconnected (%s), was down for %lus\n", WiFi.localIP().toString().c_str(), downMs / 1000);
-      }
-      else
-      {
-        s_wifiEverConnected = true;
-        netLog("[WIFI] Connected, IP %s\n", WiFi.localIP().toString().c_str());
-      }
-    }
+    if (wifiEverConnected && !wifiConnected)
+      wifiPendingReconnect = true;
+    // The very first connect is logged by setupNetwork() itself (it already
+    // polls WiFi.status() synchronously), so no pending flag for it here.
+    wifiConnected = true;
+    wifiEverConnected = true;
+  }
+  else if (event == ARDUINO_EVENT_WIFI_STA_LOST_IP)
+  {
+    wifiPendingLostIp = true;
+  }
+}
+
+// Emits the [WIFI] log lines wifiEventHandler() could only flag, from
+// loop() instead of the WiFi event task. Order: disconnect, lost-IP,
+// reconnect - matches the order those conditions actually occur in.
+void drainWifiEvents()
+{
+  if (wifiPendingDisconnect)
+  {
+    wifiPendingDisconnect = false;
+    uint8_t reason = wifiLastDisconnectReason;
+    netLog("[WIFI] Disconnected (reason %u: %s)\n", (unsigned)reason, wifiDisconnectReasonName(reason));
+  }
+
+  if (wifiPendingLostIp)
+  {
+    wifiPendingLostIp = false;
+    netLog("[WIFI] Lost IP address (still associated)\n");
+  }
+
+  if (wifiPendingReconnect)
+  {
+    wifiPendingReconnect = false;
+    unsigned long downMs = millis() - wifiDownSince;
+    netLog("[WIFI] Reconnected (%s), RSSI %d dBm, was down for %lus\n",
+           WiFi.localIP().toString().c_str(), (int)WiFi.RSSI(), downMs / 1000);
   }
 }
 
@@ -414,6 +446,8 @@ void setupNetwork()
 
   if (WiFi.status() == WL_CONNECTED)
   {
+    netLog("[WIFI] Connected, IP %s\n", WiFi.localIP().toString().c_str());
+
     configTzTime("CET-1CEST,M3.5.0,M10.5.0/3", "pool.ntp.org", "ptbtime1.ptb.de");
 
     // Wait for NTP sync (up to 5 seconds)
@@ -561,15 +595,24 @@ void logHealth()
 {
   TaskHandle_t asyncTcp = xTaskGetHandle("async_tcp");
   TaskHandle_t sdTask = xTaskGetHandle("SD_LogTask");
+  TaskHandle_t evt = xTaskGetHandle("arduino_events");
+
+  char rssi[16];
+  if (WiFi.status() == WL_CONNECTED)
+    snprintf(rssi, sizeof(rssi), "%d dBm", (int)WiFi.RSSI());
+  else
+    strlcpy(rssi, "n/a", sizeof(rssi));
+
   // On ESP-IDF the stack high-water mark is in bytes.
-  netLog("[DIAG] Heap free %u, min %u, max block %u | stack left: loop %u, bms %u, can %u, sd %u, async_tcp %u | WiFi RSSI %d dBm\n",
+  netLog("[DIAG] Heap free %u, min %u, max block %u | stack left: loop %u, bms %u, can %u, sd %u, async_tcp %u, events %u | WiFi RSSI %s\n",
          (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap(), (unsigned)ESP.getMaxAllocHeap(),
          (unsigned)uxTaskGetStackHighWaterMark(NULL),
          bmsTaskHandle ? (unsigned)uxTaskGetStackHighWaterMark(bmsTaskHandle) : 0u,
          canTaskHandle ? (unsigned)uxTaskGetStackHighWaterMark(canTaskHandle) : 0u,
          sdTask ? (unsigned)uxTaskGetStackHighWaterMark(sdTask) : 0u,
          asyncTcp ? (unsigned)uxTaskGetStackHighWaterMark(asyncTcp) : 0u,
-         WiFi.status() == WL_CONNECTED ? (int)WiFi.RSSI() : 0);
+         evt ? (unsigned)uxTaskGetStackHighWaterMark(evt) : 0u,
+         rssi);
 }
 
 // Why did we (re)boot, and what does the last stored core dump say? Called
@@ -697,6 +740,7 @@ void setup()
 void loop()
 {
   ArduinoOTA.handle();
+  drainWifiEvents();
 
   static unsigned long lastSdLog = 0;
   if (millis() - lastSdLog > 10000)

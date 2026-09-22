@@ -558,6 +558,17 @@ void setup()
   Serial.begin(115200);
   Serial.println("\nStarting LilyGO T-CAN485 BMS Bridge...");
 
+  // Set the time zone before anything can log a timestamp. The ESP32 RTC
+  // keeps its time across a software/panic reset, so time(nullptr) can
+  // already be valid (tm_year > 70) right after such a reboot, well before
+  // setupNetwork()'s configTzTime() runs - without this, those early lines
+  // (e.g. the CAN driver start) were stamped in UTC while everything after
+  // WiFi connects used local time, so the same boot showed two different
+  // clocks depending on how far setup() had gotten. configTzTime() (called
+  // later, once WiFi is up) still does the actual NTP sync.
+  setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3", 1);
+  tzset();
+
   dataMutex = xSemaphoreCreateMutex();
   netOutMutex = xSemaphoreCreateMutex();
 

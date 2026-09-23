@@ -218,6 +218,21 @@ void WebDashboard::saveConfig(AsyncWebServerRequest *request)
     // the whole set of field updates atomic from loop()'s point of view,
     // instead of a reader potentially seeing a mix of old and new setpoints
     // mid-save.
+    //
+    // The NVS write itself (Preferences - flash erase/write, tens of ms) is
+    // deliberately done AFTER dataMutex is released (#21): canTask only
+    // takes dataMutex for up to 20ms per 250ms SMA-frame cycle, and used to
+    // time out and skip a frame if a save's flash write was still running
+    // under the same lock. So: parse every submitted field into a local
+    // SystemConfig copy (starting from *_cfg, so untouched fields keep
+    // their current value) under the lock, publish it to *_cfg, release the
+    // lock, then write only the submitted fields to NVS from that copy -
+    // `present[]` (parallel to kConfigFields, by index) remembers which
+    // fields were actually in the request, since a value in `copy` alone
+    // can't distinguish "submitted, same as before" from "not submitted".
+    constexpr size_t kNumFields = sizeof(kConfigFields) / sizeof(kConfigFields[0]);
+    bool present[kNumFields] = {false};
+
     if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(300)) != pdTRUE)
     {
         debugLog("[WEB] /save refused: config busy\n");
@@ -225,46 +240,59 @@ void WebDashboard::saveConfig(AsyncWebServerRequest *request)
         return;
     }
 
-    _prefs.begin("bms-bridge", false);
+    SystemConfig copy = *_cfg;
 
     // "to" (bmsTimeout) has no form field in config_html, so hasParam(f.key)
     // is always false for it here - it just never gets touched, same as
     // before this refactor.
-    for (const ConfigField &f : kConfigFields)
+    for (size_t i = 0; i < kNumFields; i++)
     {
+        const ConfigField &f = kConfigFields[i];
         if (!request->hasParam(f.key))
             continue;
+        present[i] = true;
 
         const String &val = request->getParam(f.key)->value();
-        uint8_t *member = reinterpret_cast<uint8_t *>(_cfg) + f.offset;
+        uint8_t *member = reinterpret_cast<uint8_t *>(&copy) + f.offset;
         switch (f.kind)
         {
         case ConfigField::KIND_FLOAT:
-        {
-            float v = val.toFloat();
-            *reinterpret_cast<float *>(member) = v;
-            _prefs.putFloat(f.key, v);
+            *reinterpret_cast<float *>(member) = val.toFloat();
             break;
-        }
         case ConfigField::KIND_INT:
-        {
-            int v = val.toInt();
-            *reinterpret_cast<int *>(member) = v;
-            _prefs.putInt(f.key, v);
+            *reinterpret_cast<int *>(member) = val.toInt();
             break;
-        }
         case ConfigField::KIND_UINT16:
-        {
-            uint16_t v = (uint16_t)val.toInt();
-            *reinterpret_cast<uint16_t *>(member) = v;
-            _prefs.putUInt(f.key, v);
+            *reinterpret_cast<uint16_t *>(member) = (uint16_t)val.toInt();
             break;
-        }
         }
     }
 
-    _prefs.end();
+    *_cfg = copy;
     xSemaphoreGive(dataMutex);
+
+    _prefs.begin("bms-bridge", false);
+    for (size_t i = 0; i < kNumFields; i++)
+    {
+        if (!present[i])
+            continue;
+
+        const ConfigField &f = kConfigFields[i];
+        const uint8_t *member = reinterpret_cast<const uint8_t *>(&copy) + f.offset;
+        switch (f.kind)
+        {
+        case ConfigField::KIND_FLOAT:
+            _prefs.putFloat(f.key, *reinterpret_cast<const float *>(member));
+            break;
+        case ConfigField::KIND_INT:
+            _prefs.putInt(f.key, *reinterpret_cast<const int *>(member));
+            break;
+        case ConfigField::KIND_UINT16:
+            _prefs.putUInt(f.key, *reinterpret_cast<const uint16_t *>(member));
+            break;
+        }
+    }
+    _prefs.end();
 
     if (_actionCb)
         _actionCb("configSaved");

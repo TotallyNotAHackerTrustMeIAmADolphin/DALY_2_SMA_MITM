@@ -3,7 +3,6 @@
 #include <cmath>
 #include <WiFi.h>
 #include <ArduinoOTA.h>
-#include <TelnetStream.h>
 #include <time.h>
 #include "esp_system.h"
 #include "esp_core_dump.h"
@@ -46,16 +45,14 @@ SystemConfig cfg;
 DashboardData currentData;
 SemaphoreHandle_t dataMutex;
 
-// Serializes netLog()'s network sinks (TelnetStream, SSE log channel) and
-// the SSE telemetry push. TelnetStream is not safe to call from several
-// tasks at once (its write() also accepts new clients), and netLog runs
-// from bmsTask, canTask, loop() and the web server's task. AsyncEventSource
-// locks internally since ESPAsyncWebServer 3.x; keeping it behind the same
-// mutex also stops log lines from interleaving. Innermost lock: never take
-// another one while holding it.
+// Serializes netLog()'s SSE log channel and the SSE telemetry push, since
+// netLog runs from bmsTask, canTask, loop() and the web server's task.
+// AsyncEventSource locks internally since ESPAsyncWebServer 3.x; keeping it
+// behind the same mutex also stops log lines from interleaving. Innermost
+// lock: never take another one while holding it.
 SemaphoreHandle_t netOutMutex;
-// Set once WiFi, Telnet and the web server are up. Before that, netLog()
-// only writes to Serial and the SD card.
+// Set once WiFi and the web server are up. Before that, netLog() only
+// writes to Serial and the SD card.
 volatile bool netReady = false;
 
 TaskHandle_t bmsTaskHandle = NULL;
@@ -113,9 +110,6 @@ void netLog(const char *format, ...)
   Serial.print(final_res);
   if (netReady && xSemaphoreTake(netOutMutex, pdMS_TO_TICKS(50)) == pdTRUE)
   {
-    if (TelnetStream.availableForWrite() > 0) {
-      TelnetStream.print(final_res);
-    }
     webUI.broadcastLog(final_res);
     xSemaphoreGive(netOutMutex);
   }
@@ -768,7 +762,6 @@ void setup()
   ArduinoOTA.setHostname("BMS-Bridge");
   ArduinoOTA.begin();
 
-  TelnetStream.begin();
   webUI.begin();
   netReady = true;
 

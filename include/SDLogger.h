@@ -4,7 +4,7 @@
 #include "SystemState.h"
 
 // Matches DalyRS485/SMA_CAN's existing setDebugCallback pattern, so SD
-// mount/init failures reach netLog() (Serial+Telnet+web console) instead of
+// mount/init failures reach netLog() (Serial+web console) instead of
 // only the USB serial port.
 typedef void (*SDDebugCallback)(const char *msg);
 

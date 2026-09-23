@@ -6,8 +6,10 @@
 #include <cstdarg>
 #include <cstddef>
 #include <cstdio>
+#include <cstring>
 #include "esp_core_dump.h"
-#include "esp_flash.h"
+#include "esp_partition.h"
+#include "esp_spi_flash.h"
 #include "esp_system.h"
 #include "esp_ota_ops.h"
 
@@ -532,7 +534,15 @@ void WebDashboard::setupRoutes()
     // is on in this Arduino core's prebuilt sdkconfig). Decode on a PC with
     // the ELF of the firmware that crashed:
     //   espcoredump.py info_corefile -t raw -c coredump.bin firmware.elf
-    // Streamed straight from flash in small chunks - no 64KB heap buffer.
+    //
+    // Mapped once via esp_partition_mmap() (#21) instead of a per-chunk
+    // esp_flash_read(): the previous filler's flash read disabled the cache
+    // and stalled the other core for every single chunk. The mapping is
+    // released exactly once - on normal completion AND on client abort -
+    // via onDisconnect, same single-release pattern as /api/logs/download's
+    // sdMutex release above (this library always closes non-keep-alive
+    // file-response connections, so onDisconnect is a reliable single
+    // release point).
     //
     // esp_core_dump_image_check() runs first (not just image_get()) so a
     // dump that's present-sized but fails its CRC (e.g. brownout mid-panic,
@@ -559,16 +569,32 @@ void WebDashboard::setupRoutes()
             return;
         }
 
+        const esp_partition_t *part = esp_partition_find_first(
+            ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_COREDUMP, NULL);
+        if (!part) {
+            request->send(404, "text/plain", "No core dump stored");
+            return;
+        }
+
+        const void *mapPtr = nullptr;
+        spi_flash_mmap_handle_t mapHandle = 0;
+        if (esp_partition_mmap(part, 0, size, SPI_FLASH_MMAP_DATA, &mapPtr, &mapHandle) != ESP_OK) {
+            request->send(500, "text/plain", "Failed to map core dump partition");
+            return;
+        }
+
+        const uint8_t *base = static_cast<const uint8_t *>(mapPtr);
+        request->onDisconnect([mapHandle]() { spi_flash_munmap(mapHandle); });
+
         AsyncWebServerResponse *response = request->beginResponse(
             "application/octet-stream", size,
-            [addr, size](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
+            [base, size](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
                 if (index >= size)
                     return 0;
                 size_t n = size - index;
                 if (n > maxLen)
                     n = maxLen;
-                if (esp_flash_read(NULL, buffer, addr + index, n) != ESP_OK)
-                    return 0;
+                memcpy(buffer, base + index, n);
                 return n;
             });
         response->addHeader("Content-Disposition", "attachment; filename=\"coredump.bin\"");

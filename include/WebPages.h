@@ -189,6 +189,8 @@ const char config_html[] PROGMEM = R"rawliteral(
     <h2>System Tuning</h2>
     <div class="row"><div class="text-group"><strong>Voltage Window</strong><span class="desc">Number of moving average samples (1-20).</span></div>
       <input type="number" name="vs" step="1" value="!!VAL_VS!!"></div>
+    <div class="row"><div class="text-group"><strong>BMS timeout (s)</strong><span class="desc">Seconds without a complete BMS read (basic info and cell voltages) before the charge and discharge limits drop to 0 A. Counts from the older of the two reads.</span><span class="hint">default 60, typical 30&ndash;120</span></div>
+      <input type="number" name="to" step="1" min="5" max="600" value="!!VAL_TO!!"></div>
 
     <h2>Cell Spread Derating (#24)</h2>
     <div class="row"><div class="text-group"><strong>Cell spread: start derating (mV)</strong><span class="desc">Below this spread the current limits are untouched. Above it they are reduced linearly, reaching trickle/limp current at the 'full derating' value below. Spread = highest raw cell voltage minus lowest.</span><span class="hint">default 60, typical 40&ndash;100</span></div>

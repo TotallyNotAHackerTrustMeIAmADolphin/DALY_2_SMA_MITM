@@ -62,7 +62,7 @@ namespace
         {"ld_v2", ConfigField::KIND_FLOAT, offsetof(SystemConfig, limpDischargeA), 15.0f, 0, "!!VAL_LIMP!!", 0},
         {"cmdv", ConfigField::KIND_FLOAT, offsetof(SystemConfig, cvMinDischarge), 3.000f, 0, "!!VAL_MDV!!", 3},
         {"vs", ConfigField::KIND_INT, offsetof(SystemConfig, vSamples), 0, 12, "!!VAL_VS!!", 0},
-        {"to", ConfigField::KIND_INT, offsetof(SystemConfig, bmsTimeout), 0, 60, nullptr, 0},
+        {"to", ConfigField::KIND_INT, offsetof(SystemConfig, bmsTimeout), 0, 60, "!!VAL_TO!!", 0},
         {"sps", ConfigField::KIND_UINT16, offsetof(SystemConfig, spreadStartMv), 0, 60, "!!VAL_SPS!!", 0},
         {"spm", ConfigField::KIND_UINT16, offsetof(SystemConfig, spreadMaxMv), 0, 150, "!!VAL_SPM!!", 0},
     };

@@ -6,8 +6,10 @@
 #include <cstdarg>
 #include <cstddef>
 #include <cstdio>
+#include <cstring>
 #include "esp_core_dump.h"
-#include "esp_flash.h"
+#include "esp_partition.h"
+#include "esp_spi_flash.h"
 #include "esp_system.h"
 #include "esp_ota_ops.h"
 
@@ -26,10 +28,9 @@ namespace
     //
     // Keys as of #34 (unchanged from before this refactor):
     //   ca cvt cag ta cmv cmsv cmpp mam da cdvt clag ld_v2 cmdv vs to sps spm
-    // `to` (bmsTimeout) is loaded from NVS but was never wired to /save or
-    // the /config page even before this change - see the note in
-    // saveConfig() below. Preserved as-is: placeholder = nullptr, and it's
-    // simply never present in a /save request.
+    // `to` (bmsTimeout) is on the /config page since #35 (it was NVS-only
+    // before). A field with placeholder = nullptr would be NVS-only again:
+    // never substituted into the page, never present in a /save request.
     struct ConfigField
     {
         const char *key;
@@ -62,7 +63,7 @@ namespace
         {"ld_v2", ConfigField::KIND_FLOAT, offsetof(SystemConfig, limpDischargeA), 15.0f, 0, "!!VAL_LIMP!!", 0},
         {"cmdv", ConfigField::KIND_FLOAT, offsetof(SystemConfig, cvMinDischarge), 3.000f, 0, "!!VAL_MDV!!", 3},
         {"vs", ConfigField::KIND_INT, offsetof(SystemConfig, vSamples), 0, 12, "!!VAL_VS!!", 0},
-        {"to", ConfigField::KIND_INT, offsetof(SystemConfig, bmsTimeout), 0, 60, nullptr, 0},
+        {"to", ConfigField::KIND_INT, offsetof(SystemConfig, bmsTimeout), 0, 60, "!!VAL_TO!!", 0},
         {"sps", ConfigField::KIND_UINT16, offsetof(SystemConfig, spreadStartMv), 0, 60, "!!VAL_SPS!!", 0},
         {"spm", ConfigField::KIND_UINT16, offsetof(SystemConfig, spreadMaxMv), 0, 150, "!!VAL_SPM!!", 0},
     };
@@ -218,6 +219,21 @@ void WebDashboard::saveConfig(AsyncWebServerRequest *request)
     // the whole set of field updates atomic from loop()'s point of view,
     // instead of a reader potentially seeing a mix of old and new setpoints
     // mid-save.
+    //
+    // The NVS write itself (Preferences - flash erase/write, tens of ms) is
+    // deliberately done AFTER dataMutex is released (#21): canTask only
+    // takes dataMutex for up to 20ms per 250ms SMA-frame cycle, and used to
+    // time out and skip a frame if a save's flash write was still running
+    // under the same lock. So: parse every submitted field into a local
+    // SystemConfig copy (starting from *_cfg, so untouched fields keep
+    // their current value) under the lock, publish it to *_cfg, release the
+    // lock, then write only the submitted fields to NVS from that copy -
+    // `present[]` (parallel to kConfigFields, by index) remembers which
+    // fields were actually in the request, since a value in `copy` alone
+    // can't distinguish "submitted, same as before" from "not submitted".
+    constexpr size_t kNumFields = sizeof(kConfigFields) / sizeof(kConfigFields[0]);
+    bool present[kNumFields] = {false};
+
     if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(300)) != pdTRUE)
     {
         debugLog("[WEB] /save refused: config busy\n");
@@ -225,46 +241,69 @@ void WebDashboard::saveConfig(AsyncWebServerRequest *request)
         return;
     }
 
-    _prefs.begin("bms-bridge", false);
+    SystemConfig copy = *_cfg;
 
-    // "to" (bmsTimeout) has no form field in config_html, so hasParam(f.key)
-    // is always false for it here - it just never gets touched, same as
-    // before this refactor.
-    for (const ConfigField &f : kConfigFields)
+    // Only fields present in the request are parsed and later written to
+    // NVS; everything else keeps its value from *_cfg.
+    for (size_t i = 0; i < kNumFields; i++)
     {
+        const ConfigField &f = kConfigFields[i];
         if (!request->hasParam(f.key))
             continue;
+        present[i] = true;
 
         const String &val = request->getParam(f.key)->value();
-        uint8_t *member = reinterpret_cast<uint8_t *>(_cfg) + f.offset;
+        uint8_t *member = reinterpret_cast<uint8_t *>(&copy) + f.offset;
         switch (f.kind)
         {
         case ConfigField::KIND_FLOAT:
-        {
-            float v = val.toFloat();
-            *reinterpret_cast<float *>(member) = v;
-            _prefs.putFloat(f.key, v);
+            *reinterpret_cast<float *>(member) = val.toFloat();
             break;
-        }
         case ConfigField::KIND_INT:
-        {
-            int v = val.toInt();
-            *reinterpret_cast<int *>(member) = v;
-            _prefs.putInt(f.key, v);
+            *reinterpret_cast<int *>(member) = val.toInt();
             break;
-        }
         case ConfigField::KIND_UINT16:
-        {
-            uint16_t v = (uint16_t)val.toInt();
-            *reinterpret_cast<uint16_t *>(member) = v;
-            _prefs.putUInt(f.key, v);
+            *reinterpret_cast<uint16_t *>(member) = (uint16_t)val.toInt();
             break;
-        }
         }
     }
 
-    _prefs.end();
+    // #12: the Winter Force Charge trigger (min cell < cvMaintStart) must sit
+    // above the discharge floor (min cell <= cvMinDischarge -> DCL 0 A), or
+    // the grid top-up can only start once discharge is already cut.
+    if (copy.cvMaintStart <= copy.cvMinDischarge)
+    {
+        xSemaphoreGive(dataMutex);
+        debugLog("[WEB] /save refused: Maint. Start (%.3f V) must be above Min Discharge (%.3f V)\n",
+                 copy.cvMaintStart, copy.cvMinDischarge);
+        request->send(400, "text/plain", "Maint. Start Vpc must be above Min Discharge Vpc - nothing saved");
+        return;
+    }
+    *_cfg = copy;
     xSemaphoreGive(dataMutex);
+
+    _prefs.begin("bms-bridge", false);
+    for (size_t i = 0; i < kNumFields; i++)
+    {
+        if (!present[i])
+            continue;
+
+        const ConfigField &f = kConfigFields[i];
+        const uint8_t *member = reinterpret_cast<const uint8_t *>(&copy) + f.offset;
+        switch (f.kind)
+        {
+        case ConfigField::KIND_FLOAT:
+            _prefs.putFloat(f.key, *reinterpret_cast<const float *>(member));
+            break;
+        case ConfigField::KIND_INT:
+            _prefs.putInt(f.key, *reinterpret_cast<const int *>(member));
+            break;
+        case ConfigField::KIND_UINT16:
+            _prefs.putUInt(f.key, *reinterpret_cast<const uint16_t *>(member));
+            break;
+        }
+    }
+    _prefs.end();
 
     if (_actionCb)
         _actionCb("configSaved");
@@ -331,7 +370,7 @@ void WebDashboard::setupRoutes()
                {
         String h = String(config_html);
         for (const ConfigField &f : kConfigFields) {
-            if (!f.placeholder) continue; // e.g. "to"/bmsTimeout - no UI field
+            if (!f.placeholder) continue; // NVS-only field, no UI input
             const uint8_t *member = reinterpret_cast<const uint8_t *>(_cfg) + f.offset;
             switch (f.kind) {
             case ConfigField::KIND_FLOAT:
@@ -504,7 +543,15 @@ void WebDashboard::setupRoutes()
     // is on in this Arduino core's prebuilt sdkconfig). Decode on a PC with
     // the ELF of the firmware that crashed:
     //   espcoredump.py info_corefile -t raw -c coredump.bin firmware.elf
-    // Streamed straight from flash in small chunks - no 64KB heap buffer.
+    //
+    // Mapped once via esp_partition_mmap() (#21) instead of a per-chunk
+    // esp_flash_read(): the previous filler's flash read disabled the cache
+    // and stalled the other core for every single chunk. The mapping is
+    // released exactly once - on normal completion AND on client abort -
+    // via onDisconnect, same single-release pattern as /api/logs/download's
+    // sdMutex release above (this library always closes non-keep-alive
+    // file-response connections, so onDisconnect is a reliable single
+    // release point).
     //
     // esp_core_dump_image_check() runs first (not just image_get()) so a
     // dump that's present-sized but fails its CRC (e.g. brownout mid-panic,
@@ -531,16 +578,48 @@ void WebDashboard::setupRoutes()
             return;
         }
 
+        const esp_partition_t *part = esp_partition_find_first(
+            ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_COREDUMP, NULL);
+        if (!part) {
+            request->send(404, "text/plain", "No core dump stored");
+            return;
+        }
+
+        // esp_core_dump_image_get()'s size describes the stored image and
+        // should never exceed the partition it lives in - but if it ever
+        // did (e.g. a corrupt size field slipping past image_check()'s CRC),
+        // mapping/serving more than the partition actually holds must never
+        // happen. Clamp once, here, and use this same value for the mmap
+        // call, the filler's bound and Content-Length below, so those three
+        // can't disagree with each other (#21) - unlike the old per-chunk
+        // esp_flash_read() filler, whose only error path (a failed chunk
+        // read) returned 0 mid-stream and left the response short against
+        // an already-sent, un-clamped Content-Length.
+        size_t mapSize = size < part->size ? size : part->size;
+
+        const void *mapPtr = nullptr;
+        spi_flash_mmap_handle_t mapHandle = 0;
+        if (esp_partition_mmap(part, 0, mapSize, SPI_FLASH_MMAP_DATA, &mapPtr, &mapHandle) != ESP_OK) {
+            request->send(500, "text/plain", "Failed to map core dump partition");
+            return;
+        }
+
+        const uint8_t *base = static_cast<const uint8_t *>(mapPtr);
+        request->onDisconnect([mapHandle]() { spi_flash_munmap(mapHandle); });
+
         AsyncWebServerResponse *response = request->beginResponse(
-            "application/octet-stream", size,
-            [addr, size](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
-                if (index >= size)
+            "application/octet-stream", mapSize,
+            [base, mapSize](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
+                // The only remaining "end" condition: index has reached the
+                // clamped size. memcpy from an already-successful mmap
+                // can't itself fail mid-stream the way esp_flash_read()
+                // could, so there is no other error path left to handle.
+                if (index >= mapSize)
                     return 0;
-                size_t n = size - index;
+                size_t n = mapSize - index;
                 if (n > maxLen)
                     n = maxLen;
-                if (esp_flash_read(NULL, buffer, addr + index, n) != ESP_OK)
-                    return 0;
+                memcpy(buffer, base + index, n);
                 return n;
             });
         response->addHeader("Content-Disposition", "attachment; filename=\"coredump.bin\"");

@@ -19,7 +19,7 @@ Built for the **LilyGO T-CAN485** board, this firmware utilizes true FreeRTOS mu
 *   **🌐 Modern Web Dashboard:** View live pack stats, SMA operating states, and a dynamic 16-cell voltage grid (with the highest and lowest cells auto-highlighted) from any browser.
 *   **❄️ Winter Maintenance Mode:** Automatically detects dangerously low cell voltages during dark winter weeks and spoofs a 2% SOC to force the SMA Sunny Island to pull from the grid.
 *   **🛡️ "Nuclear" Bus-Off Recovery:** Includes deep ESP-IDF workarounds. If the CAN cable is unplugged, the system gracefully suspends the driver instead of crashing, and auto-recovers the second the cable is reattached.
-*   **📡 Remote Telnet Logging:** Stream live diagnostic data and state changes directly to your terminal.
+*   **📡 Live Web Console:** Stream live diagnostic data and state changes to the dashboard's browser-based console via Server-Sent Events, with SD-backed history browsing and download through the `/api/logs/*` routes.
 *   **💾 SD Card Logging & Graphs:** Every telemetry sample and system event is written to a daily-rotated CSV/log file on an onboard microSD card. Browse and view historical logs, download a full file, or chart Pack Voltage, SOC, Current, and Cell Voltage trends over time, all from the web UI.
 *   **🩺 BMS Protection Visibility:** Polls the Daly BMS's own hardware protection state (charge/discharge MOSFET on/off, cell/pack overvoltage alarm bits) independently of the glideslope math, and logs it the moment it changes — so if the BMS itself cuts the pack off, you have a timestamped record to line up against the inverter's own event log instead of just inferring it from a voltage glitch.
 
@@ -91,13 +91,11 @@ All four tabs share the same navigation bar, so every page is reachable from eve
 
 ---
 
-## 👨‍💻 Diagnostics & Telnet
+## 👨‍💻 Diagnostics
 
-If you need to debug the system, open a terminal and connect via Telnet:
-```bash
-telnet <device-ip>
-```
-You will see a live feed of configuration changes, inverter state shifts, and any RS485/CAN hardware fault recoveries.
+If you need to debug the system, open the Dashboard tab in your browser: the live console at the bottom shows a real-time feed of configuration changes, inverter state shifts, and any RS485/CAN hardware fault recoveries via Server-Sent Events, seeded on load from the tail of today's SD `.log` file.
+
+For history beyond what's on screen, use the Logs tab (or the underlying `/api/logs/*` routes) to browse, tail-view, or download any day's full CSV/log file from the SD card.
 
 ---
 

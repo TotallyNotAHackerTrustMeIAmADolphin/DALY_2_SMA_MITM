@@ -19,10 +19,12 @@
 
 namespace StatusFrame
 {
-    // main.cpp hardcodes 16 cells (its MAX_CELLS) into the maintenance
-    // hysteresis and CVL/DVL formulas below; mirrored here as a named
-    // constant rather than a magic 16; NOT the DalyRS485 per-cell read
-    // count (that one stays MAX_CELLS in main.cpp), just the same value.
+    // main.cpp hardcodes 16 cells (its MAX_CELLS) into the CVL/DVL
+    // formulas below (the auto-maintenance hysteresis compares a per-cell
+    // voltage directly since #12, so it no longer needs a cell count);
+    // mirrored here as a named constant rather than a magic 16; NOT the
+    // DalyRS485 per-cell read count (that one stays MAX_CELLS in
+    // main.cpp), just the same value.
     constexpr int kCellCount = 16;
 
     // Everything canTask reads out of currentData / the shared reset
@@ -164,11 +166,18 @@ namespace StatusFrame
             }
         }
 
-        // Auto-maintenance hysteresis on pack voltage vs cvMaintStart/
-        // cvMaintStop x cell count.
-        if (!st.autoMaint && s.packVoltage > 0 && s.packVoltage < (cfg.cvMaintStart * kCellCount))
+        // Auto-maintenance hysteresis on the smoothed MINIMUM cell voltage
+        // vs cvMaintStart/cvMaintStop (#12), matching the config page's
+        // "any cell" wording instead of the pack average: under discharge
+        // one weak cell can hit the discharge floor while the pack
+        // average is still well above cvMaintStart * kCellCount, so the
+        // old pack-voltage comparison never fired. Smoothed, not raw,
+        // because maintenance is a slow decision and must not chatter on
+        // per-read noise (same smoothed/raw split Glideslope.h uses for
+        // the taper vs. the hard cutoff).
+        if (!st.autoMaint && s.minCellSmoothedV > 0 && s.minCellSmoothedV < cfg.cvMaintStart)
             st.autoMaint = true;
-        else if (st.autoMaint && s.packVoltage > (cfg.cvMaintStop * kCellCount))
+        else if (st.autoMaint && s.minCellSmoothedV > cfg.cvMaintStop)
             st.autoMaint = false;
 
         bool maintenanceActive = s.manualMaintForce || st.autoMaint;

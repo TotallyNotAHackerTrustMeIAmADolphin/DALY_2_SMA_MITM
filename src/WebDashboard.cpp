@@ -28,10 +28,9 @@ namespace
     //
     // Keys as of #34 (unchanged from before this refactor):
     //   ca cvt cag ta cmv cmsv cmpp mam da cdvt clag ld_v2 cmdv vs to sps spm
-    // `to` (bmsTimeout) is loaded from NVS but was never wired to /save or
-    // the /config page even before this change - see the note in
-    // saveConfig() below. Preserved as-is: placeholder = nullptr, and it's
-    // simply never present in a /save request.
+    // `to` (bmsTimeout) is on the /config page since #35 (it was NVS-only
+    // before). A field with placeholder = nullptr would be NVS-only again:
+    // never substituted into the page, never present in a /save request.
     struct ConfigField
     {
         const char *key;
@@ -244,9 +243,8 @@ void WebDashboard::saveConfig(AsyncWebServerRequest *request)
 
     SystemConfig copy = *_cfg;
 
-    // "to" (bmsTimeout) has no form field in config_html, so hasParam(f.key)
-    // is always false for it here - it just never gets touched, same as
-    // before this refactor.
+    // Only fields present in the request are parsed and later written to
+    // NVS; everything else keeps its value from *_cfg.
     for (size_t i = 0; i < kNumFields; i++)
     {
         const ConfigField &f = kConfigFields[i];
@@ -372,7 +370,7 @@ void WebDashboard::setupRoutes()
                {
         String h = String(config_html);
         for (const ConfigField &f : kConfigFields) {
-            if (!f.placeholder) continue; // e.g. "to"/bmsTimeout - no UI field
+            if (!f.placeholder) continue; // NVS-only field, no UI input
             const uint8_t *member = reinterpret_cast<const uint8_t *>(_cfg) + f.offset;
             switch (f.kind) {
             case ConfigField::KIND_FLOAT:

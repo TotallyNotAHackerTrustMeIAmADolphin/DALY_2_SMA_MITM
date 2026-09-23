@@ -270,6 +270,17 @@ void WebDashboard::saveConfig(AsyncWebServerRequest *request)
         }
     }
 
+    // #12: the Winter Force Charge trigger (min cell < cvMaintStart) must sit
+    // above the discharge floor (min cell <= cvMinDischarge -> DCL 0 A), or
+    // the grid top-up can only start once discharge is already cut.
+    if (copy.cvMaintStart <= copy.cvMinDischarge)
+    {
+        xSemaphoreGive(dataMutex);
+        debugLog("[WEB] /save refused: Maint. Start (%.3f V) must be above Min Discharge (%.3f V)\n",
+                 copy.cvMaintStart, copy.cvMinDischarge);
+        request->send(400, "text/plain", "Maint. Start Vpc must be above Min Discharge Vpc - nothing saved");
+        return;
+    }
     *_cfg = copy;
     xSemaphoreGive(dataMutex);
 

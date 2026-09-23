@@ -167,7 +167,7 @@ const char config_html[] PROGMEM = R"rawliteral(
       <input type="number" name="cmv" step="0.001" value="!!VAL_MV!!"></div>
 
     <h2 class="winter-h">Winter Force Charge</h2>
-    <div class="row"><div class="text-group"><strong>Maint. Start Vpc</strong><span class="desc">Trigger grid charge if any cell falls below this.</span></div>
+    <div class="row"><div class="text-group"><strong>Maint. Start Vpc</strong><span class="desc">Trigger grid charge if any cell (smoothed) falls below this. Must be above Min Discharge Vpc, or the top-up can only start after discharge is already cut.</span></div>
       <input type="number" name="cmsv" step="0.001" value="!!VAL_MSV!!"></div>
     <div class="row"><div class="text-group"><strong>Maint. Stop Vpc</strong><span class="desc">Stop grid charge when cells reach this.</span></div>
       <input type="number" name="cmpp" step="0.001" value="!!VAL_MPP!!"></div>

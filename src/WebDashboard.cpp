@@ -576,9 +576,21 @@ void WebDashboard::setupRoutes()
             return;
         }
 
+        // esp_core_dump_image_get()'s size describes the stored image and
+        // should never exceed the partition it lives in - but if it ever
+        // did (e.g. a corrupt size field slipping past image_check()'s CRC),
+        // mapping/serving more than the partition actually holds must never
+        // happen. Clamp once, here, and use this same value for the mmap
+        // call, the filler's bound and Content-Length below, so those three
+        // can't disagree with each other (#21) - unlike the old per-chunk
+        // esp_flash_read() filler, whose only error path (a failed chunk
+        // read) returned 0 mid-stream and left the response short against
+        // an already-sent, un-clamped Content-Length.
+        size_t mapSize = size < part->size ? size : part->size;
+
         const void *mapPtr = nullptr;
         spi_flash_mmap_handle_t mapHandle = 0;
-        if (esp_partition_mmap(part, 0, size, SPI_FLASH_MMAP_DATA, &mapPtr, &mapHandle) != ESP_OK) {
+        if (esp_partition_mmap(part, 0, mapSize, SPI_FLASH_MMAP_DATA, &mapPtr, &mapHandle) != ESP_OK) {
             request->send(500, "text/plain", "Failed to map core dump partition");
             return;
         }
@@ -587,11 +599,15 @@ void WebDashboard::setupRoutes()
         request->onDisconnect([mapHandle]() { spi_flash_munmap(mapHandle); });
 
         AsyncWebServerResponse *response = request->beginResponse(
-            "application/octet-stream", size,
-            [base, size](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
-                if (index >= size)
+            "application/octet-stream", mapSize,
+            [base, mapSize](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
+                // The only remaining "end" condition: index has reached the
+                // clamped size. memcpy from an already-successful mmap
+                // can't itself fail mid-stream the way esp_flash_read()
+                // could, so there is no other error path left to handle.
+                if (index >= mapSize)
                     return 0;
-                size_t n = size - index;
+                size_t n = mapSize - index;
                 if (n > maxLen)
                     n = maxLen;
                 memcpy(buffer, base + index, n);

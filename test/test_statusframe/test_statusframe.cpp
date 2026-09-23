@@ -37,8 +37,8 @@ void setUp(void)
 
     // Deliberately far from cvStartTaper/cvHighAlarmGate/cvMaxCharge so the
     // maintenance-hysteresis tests don't interact with the taper thresholds.
-    // Pack thresholds (x16 cells, StatusFrame::kCellCount): start 48.0V,
-    // stop 51.2V.
+    // Per-cell thresholds (#12: compared directly against minCellSmoothedV,
+    // no cell count involved): start 3.0V, stop 3.2V.
     cfg.cvMaintStart = 3.0f;
     cfg.cvMaintStop = 3.2f;
 
@@ -60,13 +60,13 @@ static Snapshot freshSnapshot(uint32_t nowMs)
     s.haveCellData = true;
     s.lastBasicInfoReadMs = nowMs;
     s.lastCellReadMs = nowMs;
-    s.packVoltage = 55.0f; // above both maint thresholds -> autoMaint off
+    s.packVoltage = 55.0f;
     s.packCurrent = 0.0f;
     s.packSOC = 50.0f;
     s.packTemp = 220;
     s.maxCellSmoothedV = 3.0f;
     s.maxCellRawV = 3.0f;
-    s.minCellSmoothedV = 3.3f;
+    s.minCellSmoothedV = 3.3f; // above both maint thresholds -> autoMaint off
     s.minCellRawV = 3.3f;
     s.cellSpreadMv = 0;
     s.manualMaintForce = false;
@@ -241,45 +241,103 @@ void test_reset_hold_arms_on_first_sent_frame_and_finishes_after_5500ms(void)
 
 void test_auto_maint_starts_below_start_stops_above_stop_no_toggle_between(void)
 {
-    // Thresholds: start 48.0V (cvMaintStart 3.0 x 16), stop 51.2V
-    // (cvMaintStop 3.2 x 16).
+    // Thresholds (#12: compared directly against the smoothed minimum
+    // cell voltage): start cvMaintStart=3.0V, stop cvMaintStop=3.2V.
     ControlState ctrl;
 
-    // 55V: above both -> off.
-    Decision d1 = decide(cfg, freshSnapshot(1000), ctrl); // packVoltage=55.0
+    // 3.3V: above both -> off.
+    Decision d1 = decide(cfg, freshSnapshot(1000), ctrl); // minCellSmoothedV=3.3
     TEST_ASSERT_FALSE(d1.maintenanceActive);
 
-    // 50V: between start and stop, autoMaint currently off -> stays off
-    // (50 is not < 48).
+    // 3.1V: between start and stop, autoMaint currently off -> stays off
+    // (3.1 is not < 3.0).
     Snapshot s2 = freshSnapshot(1250);
-    s2.packVoltage = 50.0f;
+    s2.minCellSmoothedV = 3.1f;
     Decision d2 = decide(cfg, s2, ctrl);
     TEST_ASSERT_FALSE(d2.maintenanceActive);
 
-    // 47V: below start(48) -> turns on.
+    // 2.9V: below start(3.0) -> turns on.
     Snapshot s3 = freshSnapshot(1500);
-    s3.packVoltage = 47.0f;
+    s3.minCellSmoothedV = 2.9f;
     Decision d3 = decide(cfg, s3, ctrl);
     TEST_ASSERT_TRUE(d3.maintenanceActive);
 
-    // 50V again: between start and stop, autoMaint now on -> hysteresis
-    // keeps it on (50 is not > 51.2).
+    // 3.1V again: between start and stop, autoMaint now on -> hysteresis
+    // keeps it on (3.1 is not > 3.2).
     Snapshot s4 = freshSnapshot(1750);
-    s4.packVoltage = 50.0f;
+    s4.minCellSmoothedV = 3.1f;
     Decision d4 = decide(cfg, s4, ctrl);
     TEST_ASSERT_TRUE(d4.maintenanceActive);
 
-    // 52V: above stop(51.2) -> turns off.
+    // 3.3V: above stop(3.2) -> turns off.
     Snapshot s5 = freshSnapshot(2000);
-    s5.packVoltage = 52.0f;
+    s5.minCellSmoothedV = 3.3f;
     Decision d5 = decide(cfg, s5, ctrl);
     TEST_ASSERT_FALSE(d5.maintenanceActive);
 }
 
+// --- #12: trigger on the minimum cell, not the pack average ---
+
+void test_auto_maint_starts_on_weak_cell_even_when_pack_average_is_high(void)
+{
+    // The exact scenario from #12: Cell 16 sags under discharge and hits
+    // the discharge floor while the pack average is still well above the
+    // old pack-voltage trigger (cvMaintStart(3.0) * kCellCount(16) =
+    // 48.0V). packVoltage=49.6V > 48.0V, so the retired pack-average
+    // comparison would never have started maintenance here; the minimum
+    // cell (2.99V) is what's actually below cvMaintStart(3.0V).
+    ControlState ctrl;
+    Snapshot s = freshSnapshot(1000);
+    s.packVoltage = 49.6f;
+    s.minCellSmoothedV = 2.99f;
+    Decision d = decide(cfg, s, ctrl);
+    TEST_ASSERT_TRUE(d.maintenanceActive);
+    TEST_ASSERT_TRUE(ctrl.autoMaint);
+}
+
+void test_auto_maint_hysteresis_min_cell_rising_stays_on_until_above_stop(void)
+{
+    // Once started, rising back into the start..stop band must not turn
+    // maintenance off; only crossing above cvMaintStop(3.2V) does.
+    ControlState ctrl;
+
+    // 2.95V: below start(3.0) -> turns on.
+    Snapshot s1 = freshSnapshot(1000);
+    s1.minCellSmoothedV = 2.95f;
+    Decision d1 = decide(cfg, s1, ctrl);
+    TEST_ASSERT_TRUE(d1.maintenanceActive);
+
+    // 3.1V: between start(3.0) and stop(3.2), autoMaint on -> stays on
+    // (3.1 is not > 3.2).
+    Snapshot s2 = freshSnapshot(1250);
+    s2.minCellSmoothedV = 3.1f;
+    Decision d2 = decide(cfg, s2, ctrl);
+    TEST_ASSERT_TRUE(d2.maintenanceActive);
+
+    // 3.25V: above stop(3.2) -> turns off.
+    Snapshot s3 = freshSnapshot(1500);
+    s3.minCellSmoothedV = 3.25f;
+    Decision d3 = decide(cfg, s3, ctrl);
+    TEST_ASSERT_FALSE(d3.maintenanceActive);
+}
+
+void test_auto_maint_never_starts_with_zero_min_cell(void)
+{
+    // minCellSmoothedV == 0 means "no data yet" (same sentinel used
+    // elsewhere in Snapshot/Glideslope) - it must never satisfy
+    // "< cvMaintStart" and start maintenance on a value nobody measured.
+    ControlState ctrl;
+    Snapshot s = freshSnapshot(1000);
+    s.minCellSmoothedV = 0.0f;
+    Decision d = decide(cfg, s, ctrl);
+    TEST_ASSERT_FALSE(d.maintenanceActive);
+    TEST_ASSERT_FALSE(ctrl.autoMaint);
+}
+
 void test_manual_force_overrides(void)
 {
-    // packVoltage=55V would leave autoMaint off; manualMaintForce alone
-    // must still drive maintenanceActive.
+    // minCellSmoothedV=3.3V would leave autoMaint off; manualMaintForce
+    // alone must still drive maintenanceActive.
     ControlState ctrl;
     Snapshot s = freshSnapshot(1000);
     s.manualMaintForce = true;
@@ -397,6 +455,9 @@ int main(int, char **)
     RUN_TEST(test_reset_not_armed_while_no_frames_sent);
     RUN_TEST(test_reset_hold_arms_on_first_sent_frame_and_finishes_after_5500ms);
     RUN_TEST(test_auto_maint_starts_below_start_stops_above_stop_no_toggle_between);
+    RUN_TEST(test_auto_maint_starts_on_weak_cell_even_when_pack_average_is_high);
+    RUN_TEST(test_auto_maint_hysteresis_min_cell_rising_stays_on_until_above_stop);
+    RUN_TEST(test_auto_maint_never_starts_with_zero_min_cell);
     RUN_TEST(test_manual_force_overrides);
     RUN_TEST(test_maintenance_overrides_cvl_and_current);
     RUN_TEST(test_maintenance_cvl_is_fixed_560_not_cvmaxcharge);

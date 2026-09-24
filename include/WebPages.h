@@ -9,6 +9,20 @@
 #define NAV_CSS ".nav { background: #1e1e1e; padding: 10px; border-bottom: 2px solid #333; margin-bottom: 10px; text-align: center; } .nav a { color: #4caf50; text-decoration: none; margin: 0 15px; font-weight: bold; }"
 #define NAV_BAR "<div class=\"nav\"><a href=\"/\">DASHBOARD</a> | <a href=\"/config\">CONFIGURATION</a> | <a href=\"/logs\">LOGS</a> | <a href=\"/graphs\">GRAPHS</a></div>"
 
+// Single source of truth for the "fetch a file list, filter it, optionally
+// populate a <select>, auto-select the newest" JS pasted (and drifted -
+// see #46) across index_html's loadRecentLog(), logs_html's loadList() and
+// graphs_html's loadList(). Spliced into each page's <script> the same way
+// NAV_CSS/NAV_BAR are spliced above (adjacent string-literal concatenation,
+// compile-time, zero runtime cost).
+// (a #define's raw-string value can't span real newlines with this
+// toolchain's preprocessor - unlike a raw string literal used directly in
+// one of the page bodies below - so this one is kept to a single physical
+// line, and JS comments are kept out of it, since a `//` comment would run
+// to the end of that line and swallow the rest of the macro. See the doc
+// comment above for what it does.)
+#define SHARED_LIST_JS R"jssrc( async function fetchAndPopulateSelect(url, filterFn, selectEl, statusEl, labelFn) { const res = await fetch(url); if (!res.ok) throw new Error('HTTP ' + res.status); let files = await res.json(); if (filterFn) files = files.filter(filterFn); if (statusEl) statusEl.innerText = ''; if (selectEl) { selectEl.innerHTML = ''; files.forEach(f => { const opt = document.createElement('option'); opt.value = f.name; opt.text = labelFn ? labelFn(f) : f.name; selectEl.appendChild(opt); }); if (files.length) selectEl.selectedIndex = files.length - 1; } return files; } )jssrc"
+
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML><html><head><title>BMS Bridge Pro</title><meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
@@ -60,6 +74,7 @@ const char index_html[] PROGMEM = R"rawliteral(
 </div>
 <div id="console">Loading history...<br></div>
 <script>
+)rawliteral" SHARED_LIST_JS R"rawliteral(
   const con = document.getElementById('console');
 
   // Seed the console with the tail of today's SD .log file on load, so it
@@ -67,7 +82,7 @@ const char index_html[] PROGMEM = R"rawliteral(
   // this tab connects (the SSE 'log' channel has no replay/backlog).
   async function loadRecentLog() {
     try {
-      const files = (await (await fetch('/api/logs/list')).json()).filter(f => f.name.endsWith('.log'));
+      const files = await fetchAndPopulateSelect('/api/logs/list', f => f.name.endsWith('.log'), null, null);
       if (!files.length) { con.innerHTML = 'Log Active... (no SD log file yet)<br>'; return; }
       const latest = files[files.length - 1].name; // listLogFiles sorts ascending -> last = newest
       const text = await (await fetch('/api/logs/content?file=' + encodeURIComponent(latest))).text();
@@ -226,25 +241,16 @@ const char logs_html[] PROGMEM = R"rawliteral(
   <div id="content">Loading file list...</div>
 </div>
 <script>
+)rawliteral" SHARED_LIST_JS R"rawliteral(
   async function loadList() {
     const sel = document.getElementById('fileSelect');
     const status = document.getElementById('status');
     try {
-      const res = await fetch('/api/logs/list');
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      const files = await res.json();
-      sel.innerHTML = '';
+      const files = await fetchAndPopulateSelect('/api/logs/list', null, sel, status, f => f.name + ' (' + Math.round(f.size / 1024) + ' KB)');
       if (!files.length) {
         document.getElementById('content').innerText = 'No log files found (SD card missing or empty).';
         return;
       }
-      files.forEach(f => {
-        const opt = document.createElement('option');
-        opt.value = f.name;
-        opt.text = f.name + ' (' + Math.round(f.size / 1024) + ' KB)';
-        sel.appendChild(opt);
-      });
-      sel.selectedIndex = files.length - 1; // most recent
       loadFile();
     } catch (e) {
       status.innerText = 'Failed to list log files: ' + e.message;
@@ -306,6 +312,7 @@ const char graphs_html[] PROGMEM = R"rawliteral(
   <div class="chart-box"><h3>Min / Max Cell Voltage</h3><canvas id="chartCell"></canvas></div>
 </div>
 <script>
+)rawliteral" SHARED_LIST_JS R"rawliteral(
   let charts = {};
 
   function darkChart(canvasId, datasets, extraScales) {
@@ -351,21 +358,11 @@ const char graphs_html[] PROGMEM = R"rawliteral(
     const sel = document.getElementById('fileSelect');
     const status = document.getElementById('status');
     try {
-      const res = await fetch('/api/logs/list');
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      const files = (await res.json()).filter(f => f.name.endsWith('.csv'));
-      sel.innerHTML = '';
+      const files = await fetchAndPopulateSelect('/api/logs/list', f => f.name.endsWith('.csv'), sel, status);
       if (!files.length) {
         status.innerText = 'No telemetry CSV files found (SD card missing or empty).';
         return;
       }
-      files.forEach(f => {
-        const opt = document.createElement('option');
-        opt.value = f.name;
-        opt.text = f.name;
-        sel.appendChild(opt);
-      });
-      sel.selectedIndex = files.length - 1; // most recent
       loadGraph();
     } catch (e) {
       status.innerText = 'Failed to list log files: ' + e.message;

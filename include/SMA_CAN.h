@@ -2,22 +2,14 @@
 #include <Arduino.h>
 #include "driver/twai.h"
 #include "SystemState.h"
+#include "SMAFrames.h"
 
 typedef void (*SMADebugCallback)(const char *msg);
 
-struct SMATxData
-{
-    float packVoltage;
-    float packCurrent;
-    int16_t packTemp;
-    float packSOC;
-    uint16_t ccl;
-    uint16_t dcl;
-    uint16_t cvl;
-    uint16_t dvl;
-    bool maintenanceActive;
-    bool isResetting;
-};
+// SMATxData is SMAFrames::SMATxData under its old name (#45) - same pattern
+// as DalyRS485.h re-exposing DalyFrames.h's structs, so existing callers
+// (main.cpp) are unchanged.
+using SMATxData = SMAFrames::SMATxData;
 
 class SMA_CAN
 {
@@ -43,5 +35,5 @@ private:
     gpio_num_t _sePin; // Added
 
     void debugLog(const char *format, ...);
-    void sendFrame(uint32_t id, uint8_t dlc, uint8_t *data);
+    void sendFrame(uint32_t id, uint8_t dlc, const uint8_t *data);
 };

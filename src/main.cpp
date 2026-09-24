@@ -9,6 +9,7 @@
 #include "SystemState.h"
 #include "CellSmoother.h"
 #include "StatusFrame.h"
+#include "BmsEvents.h"
 #include "DalyRS485.h"
 #include "SMA_CAN.h"
 #include "WebDashboard.h"
@@ -170,6 +171,11 @@ void bmsTask(void *pvParameters)
 {
   vTaskDelay(pdMS_TO_TICKS(2000));
 
+  // Persistent decision state for the edge-triggered SOC/MOSFET/alarm
+  // events below - replaces the three function-local `static`s this used
+  // to hold (#44, see include/BmsEvents.h).
+  BmsEvents::State bmsEventState;
+
   while (true)
   {
     DalyBasicInfo info;
@@ -179,12 +185,9 @@ void bmsTask(void *pvParameters)
       // (or occasionally jumps for other reasons); flag that as an event so
       // an abrupt CCL drop at the SMA can be lined up against it. Logged
       // outside dataMutex, before the mutex-protected store below.
-      static float lastSoc = -1;
-      float soc = info.packSOC;
-      if (lastSoc >= 0 &&
-          (fabsf(soc - lastSoc) > 10.0f || (soc >= 99.9f && lastSoc < 95.0f)))
-        netLog("[BMS] SOC jumped %.1f -> %.1f %% (Daly recalibration?)\n", lastSoc, soc);
-      lastSoc = soc;
+      BmsEvents::Events ev = BmsEvents::decide(bmsEventState, &info, nullptr, nullptr);
+      if (ev.socJumped)
+        netLog("[BMS] SOC jumped %.1f -> %.1f %% (Daly recalibration?)\n", ev.socFrom, ev.socTo);
 
       if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
         currentData.packVoltage = info.packVoltage;
@@ -253,26 +256,14 @@ void bmsTask(void *pvParameters)
     // poll) so a stuck-on alarm doesn't spam the log queue; this is what
     // lets a future SMA "battery voltage out of range" fault be lined up
     // against the BMS's own MOSFET/alarm timeline to the second.
-    static bool lastChargeMosOn = true;
-    static bool lastDischargeMosOn = true;
-    static uint8_t lastAlarmBytes[7] = {0};
-    static uint8_t lastFaultCode = 0;
-    static bool haveMosfetBaseline = false;
-    static bool alarmBaseline = false;
-
     DalyMosfetStatus mosStatus;
     if (bms.readMosfetStatus(mosStatus))
     {
-      if (haveMosfetBaseline)
-      {
-        if (mosStatus.chargeMosOn != lastChargeMosOn)
-          netLog("[BMS] Charge MOSFET %s\n", mosStatus.chargeMosOn ? "ON" : "OFF - protection or BMS-initiated cutoff");
-        if (mosStatus.dischargeMosOn != lastDischargeMosOn)
-          netLog("[BMS] Discharge MOSFET %s\n", mosStatus.dischargeMosOn ? "ON" : "OFF - protection or BMS-initiated cutoff");
-      }
-      lastChargeMosOn = mosStatus.chargeMosOn;
-      lastDischargeMosOn = mosStatus.dischargeMosOn;
-      haveMosfetBaseline = true;
+      BmsEvents::Events ev = BmsEvents::decide(bmsEventState, nullptr, &mosStatus, nullptr);
+      if (ev.chargeMosChanged)
+        netLog("[BMS] Charge MOSFET %s\n", ev.chargeMosOn ? "ON" : "OFF - protection or BMS-initiated cutoff");
+      if (ev.dischargeMosChanged)
+        netLog("[BMS] Discharge MOSFET %s\n", ev.dischargeMosOn ? "ON" : "OFF - protection or BMS-initiated cutoff");
 
       if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
         currentData.chargeMosOn = mosStatus.chargeMosOn;
@@ -290,31 +281,17 @@ void bmsTask(void *pvParameters)
       // by byte.bit position, so an unexpected fault isn't silently
       // swallowed) - baseline flag so the first read after boot doesn't log
       // every bit as "SET"/"CLEARED" from an all-zero starting point.
-      if (alarmBaseline)
+      BmsEvents::Events ev = BmsEvents::decide(bmsEventState, nullptr, nullptr, &alarmStatus);
+      for (int i = 0; i < ev.alarmBitCount; i++)
       {
-        for (int b = 0; b < 7; b++)
-        {
-          uint8_t changed = alarmStatus.rawBytes[b] ^ lastAlarmBytes[b];
-          if (!changed)
-            continue;
-          for (int bit = 0; bit < 8; bit++)
-          {
-            if (!(changed & (1 << bit)))
-              continue;
-            bool set = alarmStatus.rawBytes[b] & (1 << bit);
-            const char *name = DalyRS485::kAlarmBitNames[b][bit];
-            if (name)
-              netLog("[BMS] Alarm: %s %s\n", name, set ? "SET" : "CLEARED");
-            else
-              netLog("[BMS] Alarm: bit %d.%d %s\n", b, bit, set ? "SET" : "CLEARED");
-          }
-        }
-        if (alarmBaseline && alarmStatus.rawBytes[7] != lastFaultCode)
-          netLog("[BMS] Fault code %u -> %u\n", lastFaultCode, alarmStatus.rawBytes[7]);
+        const BmsEvents::AlarmBitEvent &e = ev.alarmBits[i];
+        if (e.name)
+          netLog("[BMS] Alarm: %s %s\n", e.name, e.set ? "SET" : "CLEARED");
+        else
+          netLog("[BMS] Alarm: bit %d.%d %s\n", e.byteIndex, e.bitIndex, e.set ? "SET" : "CLEARED");
       }
-      memcpy(lastAlarmBytes, alarmStatus.rawBytes, sizeof(lastAlarmBytes));
-      lastFaultCode = alarmStatus.rawBytes[7];
-      alarmBaseline = true;
+      if (ev.faultCodeChanged)
+        netLog("[BMS] Fault code %u -> %u\n", ev.faultCodeFrom, ev.faultCodeTo);
 
       if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
         currentData.bmsProtectionActive = alarmStatus.anyProtectionActive;

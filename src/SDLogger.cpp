@@ -373,19 +373,29 @@ bool SDLogger::readTail(const String &fileName, String &outContent, size_t maxBy
 
 namespace
 {
-    // Returns the idx'th comma-separated field of line (0-based), or "" past the end.
-    String csvField(const String &line, int idx)
+    // Returns the idx'th comma-separated field of a (buf, len) line span
+    // (0-based), or "" past the end. Reads straight out of the raw buffer
+    // rather than requiring a String for the whole line first (#40) -
+    // readGraphSeries() only ever needs 7 of a row's 38 fields, so a
+    // skipped row never needs a line String built at all, and a kept row
+    // only pays for the String(const char*, length) constructor once per
+    // extracted field below, not once for the whole line.
+    String csvFieldFromBuf(const char *buf, size_t len, int idx)
     {
-        int start = 0;
+        size_t start = 0;
         for (int i = 0; i < idx; i++)
         {
-            int comma = line.indexOf(',', start);
-            if (comma < 0)
+            size_t j = start;
+            while (j < len && buf[j] != ',')
+                j++;
+            if (j >= len)
                 return "";
-            start = comma + 1;
+            start = j + 1;
         }
-        int comma = line.indexOf(',', start);
-        return comma < 0 ? line.substring(start) : line.substring(start, comma);
+        size_t end = start;
+        while (end < len && buf[end] != ',')
+            end++;
+        return String(buf + start, (unsigned int)(end - start));
     }
 }
 
@@ -435,83 +445,132 @@ bool SDLogger::readGraphSeries(const String &fileName, size_t targetPoints, Stri
         return false;
     }
 
-    // Pass 1: count data rows (total newlines, minus the header line) so we
-    // can pick a skip interval - a plain byte scan, no line objects allocated.
-    // Bounded by sourceSize (the directory-entry size read moments ago,
-    // above) in addition to read() returning 0, so a filesystem edge case
-    // can't spin this forever while holding sdMutex_. This whole route runs
-    // synchronously on the AsyncTCP task (confirmed via serial: a hung/slow
-    // scan here previously starved that task's own watchdog feed and
-    // crashed the whole device - `task_wdt: ... async_tcp` -> abort() ->
-    // reboot) so it must yield periodically regardless of how bounded the
-    // loop is.
-    size_t totalLines = 0;
+    // Estimate the data-row count from a small sample instead of a full-file
+    // scan (#40 - this used to be "pass 1", an exact-count byte scan of the
+    // *whole* file just to pick a skip interval). targetPoints tops out at
+    // 2000 and a telemetry row is a fairly uniform width, so an estimate
+    // from a short sample right after the header gives the same skip
+    // interval in practice, without the full pass. Re-opens the file (this
+    // route already accepted multiple short opens for the same reason the
+    // size-check above does) rather than seeking, matching the existing
+    // pattern in this function and avoiding any seek-after-partial-read
+    // question entirely.
+    constexpr uint32_t kSampleBytes = 4096;
+    size_t estimatedLines = 1;
+    uint32_t dataBytes = 0;
     {
         File f = SD.open(path, FILE_READ);
-        if (f)
+        if (!f)
         {
-            uint8_t buf[512];
-            int n;
-            uint32_t bytesRead = 0;
-            uint32_t chunkCount = 0;
-            while (bytesRead < sourceSize && (n = f.read(buf, sizeof(buf))) > 0)
-            {
-                bytesRead += (uint32_t)n;
-                for (int i = 0; i < n; i++)
-                {
-                    if (buf[i] == '\n')
-                        totalLines++;
-                }
-                if (++chunkCount % 8 == 0)
-                    { esp_task_wdt_reset(); vTaskDelay(1); }
-            }
-            f.close();
-            if (totalLines > 0)
-                totalLines--; // header line
-            ok = true;
+            xSemaphoreGive(sdMutex_);
+            outCSV = "";
+            return false;
         }
+        String header = f.readStringUntil('\n');
+        uint32_t headerBytes = (uint32_t)header.length() + 1; // + the '\n' it consumed
+        dataBytes = (sourceSize > headerBytes) ? (sourceSize - headerBytes) : 0;
+
+        uint8_t sampleBuf[512];
+        uint32_t sampleBytesRead = 0;
+        size_t sampleLines = 0;
+        int n;
+        while (sampleBytesRead < kSampleBytes &&
+               (n = f.read(sampleBuf, (size_t)((kSampleBytes - sampleBytesRead) < sizeof(sampleBuf) ? (kSampleBytes - sampleBytesRead) : sizeof(sampleBuf)))) > 0)
+        {
+            sampleBytesRead += (uint32_t)n;
+            for (int i = 0; i < n; i++)
+                if (sampleBuf[i] == '\n')
+                    sampleLines++;
+        }
+        f.close();
+
+        // sampleLines==0 means the sample didn't even contain one full row
+        // (a huge single line, or a file barely bigger than its header) -
+        // estimatedLines stays at its 1 default rather than dividing by
+        // zero, which makes skip below come out to 1 (keep every row).
+        if (sampleLines > 0 && sampleBytesRead > 0)
+        {
+            float avgLineLen = (float)sampleBytesRead / (float)sampleLines;
+            estimatedLines = (size_t)((float)dataBytes / avgLineLen);
+            if (estimatedLines == 0)
+                estimatedLines = 1;
+        }
+        ok = true;
     }
 
-    // Pass 2: re-read, keeping every Nth data row, extracting only the
-    // columns needed for graphing.
+    // Single buffered pass: re-open and read the whole file in 512-byte
+    // chunks (like the old pass 1's byte scan - fast block reads, not the
+    // old pass 2's one-Stream-call-per-line readStringUntil(), which was
+    // the dominant cost: ~30s measured on a 1.7MB/~24k-row day on-device,
+    // see #40). Every row's bytes still get copied into lineBuf (cheap: a
+    // bounds-checked array write, no allocation), but a line is only ever
+    // turned into a String - via csvFieldFromBuf(), 7 times - when it's
+    // one of the kept (1-in-skip) rows. That's the per-row cost this drops
+    // for ~23700 of ~24000 rows on a typical day: no String allocation, no
+    // per-field parsing, just an array write until the next '\n'.
     if (ok)
     {
-        size_t skip = (totalLines > targetPoints) ? (totalLines / targetPoints) : 1;
+        size_t skip = (estimatedLines > targetPoints) ? (estimatedLines / targetPoints) : 1;
+        if (skip == 0)
+            skip = 1;
 
         File f = SD.open(path, FILE_READ);
         if (f)
         {
             outCSV.reserve(outCSV.length() + (targetPoints + 1) * 60);
-            f.readStringUntil('\n'); // header
+            f.readStringUntil('\n'); // header, discarded (fresh open, same as the sample pass above)
 
-            // Bounded by totalLines (from pass 1, over the same mutex-held,
-            // now-immutable file content) as well as f.available(), and
-            // yields every few lines for the same watchdog reason as pass 1
-            // above - this loop does several String allocations per line
-            // (readStringUntil + csvField x7), which is exactly the kind of
-            // CPU-bound-with-no-yield work that starved async_tcp's
-            // watchdog on a file with enough rows.
+            uint8_t buf[512];
+            char lineBuf[320]; // a full telemetry row is ~230 bytes today; generous margin
+            size_t lineLen = 0;
             size_t lineIdx = 0;
-            while (f.available() && lineIdx <= totalLines)
-            {
-                String line = f.readStringUntil('\n');
-                if (line.length() == 0)
-                {
-                    lineIdx++;
-                    continue;
-                }
+            bool keepLine = true; // lineIdx starts at 0, and 0 % skip == 0 always
+            uint32_t bytesRead = 0;
+            uint32_t chunkCount = 0;
+            int n;
 
-                if (lineIdx % skip == 0)
+            auto flushKeptLine = [&]()
+            {
+                if (!keepLine || lineLen == 0)
+                    return;
+                outCSV += csvFieldFromBuf(lineBuf, lineLen, idxTimestamp) + "," +
+                          csvFieldFromBuf(lineBuf, lineLen, idxPackV) + "," +
+                          csvFieldFromBuf(lineBuf, lineLen, idxPackI) + "," +
+                          csvFieldFromBuf(lineBuf, lineLen, idxSOC) + "," +
+                          csvFieldFromBuf(lineBuf, lineLen, idxMinCellV) + "," +
+                          csvFieldFromBuf(lineBuf, lineLen, idxMaxCellV) + "," +
+                          csvFieldFromBuf(lineBuf, lineLen, idxReqI) + "\n";
+            };
+
+            while (bytesRead < dataBytes && (n = f.read(buf, sizeof(buf))) > 0)
+            {
+                bytesRead += (uint32_t)n;
+                for (int i = 0; i < n; i++)
                 {
-                    outCSV += csvField(line, idxTimestamp) + "," + csvField(line, idxPackV) + "," +
-                              csvField(line, idxPackI) + "," + csvField(line, idxSOC) + "," +
-                              csvField(line, idxMinCellV) + "," + csvField(line, idxMaxCellV) + "," +
-                              csvField(line, idxReqI) + "\n";
+                    uint8_t c = buf[i];
+                    if (c == '\n')
+                    {
+                        flushKeptLine();
+                        lineLen = 0;
+                        lineIdx++;
+                        keepLine = (lineIdx % skip == 0);
+                    }
+                    else if (lineLen < sizeof(lineBuf) - 1)
+                    {
+                        lineBuf[lineLen++] = (char)c;
+                    }
                 }
-                lineIdx++;
-                if (lineIdx % 32 == 0)
+                // Same watchdog reasoning as the old pass 1 (this route runs
+                // synchronously on the AsyncTCP task; a hung/slow scan here
+                // previously starved its watchdog feed and crashed the
+                // device - `task_wdt: ... async_tcp` -> abort() -> reboot).
+                if (++chunkCount % 8 == 0)
                     { esp_task_wdt_reset(); vTaskDelay(1); }
             }
+            // A final row without a trailing newline (e.g. the writer
+            // task's last flush hadn't landed yet) - flush it too, same as
+            // the old f.available()-driven loop did.
+            flushKeptLine();
             f.close();
         }
         else

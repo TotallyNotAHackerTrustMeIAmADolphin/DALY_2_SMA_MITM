@@ -53,6 +53,13 @@ namespace SMAFrames
 
         void add(uint32_t id, uint8_t dlc, const uint8_t *src)
         {
+            // Defensive bounds check (#45 review): today's only caller,
+            // encodeStatus(), never emits more than kMaxFrames, but this
+            // array had no other guard against a future frame type pushing
+            // it past 6 - silently drop rather than write out of bounds on
+            // this safety-critical CAN path.
+            if (count >= kMaxFrames)
+                return;
             CanFrame &f = frames[count++];
             f.id = id;
             f.dlc = dlc;

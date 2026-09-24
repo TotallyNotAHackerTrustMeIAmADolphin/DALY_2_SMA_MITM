@@ -6,6 +6,8 @@
 #include "pin_config.h"
 #include "esp_task_wdt.h"
 #include "TelemetrySchema.h"
+#include "CsvDecimation.h"
+#include "TailTrim.h"
 
 bool SDLogger::initialized = false;
 QueueHandle_t SDLogger::logQueue = NULL;
@@ -326,77 +328,31 @@ bool SDLogger::readTail(const String &fileName, String &outContent, size_t maxBy
         // arbitrary offset near EOF consistently made the following read()
         // return 0 bytes immediately (empty tail, silently "successful").
         // Sequential reads from 0 are the one access pattern proven
-        // reliable everywhere else in this file (pass 1/2 below, and the
-        // /api/logs/download route), so use that here too, trimming down to
-        // the last maxBytes as we go instead of seeking there directly.
-        // Reserved once up front (not just left to grow) - concat-then-
-        // remove hundreds of times without a stable reserved capacity
-        // fragments the heap badly enough to make the *caller's* later
-        // allocation (building the HTTP response from this string) fail
-        // silently, even though this function's own final content is
-        // correct - confirmed via serial diagnostics live on-device.
-        outContent.reserve(maxBytes + 600);
+        // reliable everywhere else in this file (readGraphSeries() below,
+        // and the /api/logs/download route), so use that here too. The
+        // rolling trim-to-last-maxBytes and leading-partial-line-drop logic
+        // itself now lives in TailTrim::Trimmer (#43), pure and natively
+        // tested - this loop is just SD I/O and the watchdog yield cadence.
+        TailTrim::Trimmer trimmer(maxBytes);
         uint8_t buf[512];
         int n;
         uint32_t bytesScanned = 0;
         uint32_t chunkCount = 0;
-        bool truncated = false;
         while (bytesScanned < sourceSize && (n = file.read(buf, sizeof(buf))) > 0)
         {
-            outContent.concat((const char *)buf, n);
+            trimmer.feed(buf, (size_t)n);
             bytesScanned += (uint32_t)n;
-            if (outContent.length() > maxBytes)
-            {
-                outContent.remove(0, outContent.length() - maxBytes);
-                truncated = true;
-            }
             if (++chunkCount % 8 == 0)
                 { esp_task_wdt_reset(); vTaskDelay(1); }
         }
-        // Only drop the leading partial line if we actually trimmed content
-        // away - for a file that never exceeded maxBytes, outContent is the
-        // untouched file from byte 0 and its first line is real content,
-        // not a truncation artifact.
-        if (truncated && outContent.length() > 0)
-        {
-            int firstNewline = outContent.indexOf('\n');
-            if (firstNewline >= 0 && (size_t)firstNewline < outContent.length() - 1)
-                outContent.remove(0, firstNewline + 1);
-        }
+        trimmer.finish();
+        outContent = String(trimmer.data(), (unsigned int)trimmer.length());
         file.close();
         ok = true;
     }
 
     xSemaphoreGive(sdMutex_);
     return ok;
-}
-
-namespace
-{
-    // Returns the idx'th comma-separated field of a (buf, len) line span
-    // (0-based), or "" past the end. Reads straight out of the raw buffer
-    // rather than requiring a String for the whole line first (#40) -
-    // readGraphSeries() only ever needs 7 of a row's 38 fields, so a
-    // skipped row never needs a line String built at all, and a kept row
-    // only pays for the String(const char*, length) constructor once per
-    // extracted field below, not once for the whole line.
-    String csvFieldFromBuf(const char *buf, size_t len, int idx)
-    {
-        size_t start = 0;
-        for (int i = 0; i < idx; i++)
-        {
-            size_t j = start;
-            while (j < len && buf[j] != ',')
-                j++;
-            if (j >= len)
-                return "";
-            start = j + 1;
-        }
-        size_t end = start;
-        while (end < len && buf[end] != ',')
-            end++;
-        return String(buf + start, (unsigned int)(end - start));
-    }
 }
 
 bool SDLogger::readGraphSeries(const String &fileName, size_t targetPoints, String &outCSV)
@@ -410,14 +366,17 @@ bool SDLogger::readGraphSeries(const String &fileName, size_t targetPoints, Stri
     // (#32) instead of hardcoding 0-6 - these happen to still be 0-6 today
     // since Timestamp..ReqI are the first seven TelemetrySchema columns,
     // but a source row is read by position here regardless of any later
-    // reordering upstream in the table.
-    const int idxTimestamp = TelemetrySchema::index("Timestamp");
-    const int idxPackV = TelemetrySchema::index("PackV");
-    const int idxPackI = TelemetrySchema::index("PackI");
-    const int idxSOC = TelemetrySchema::index("SOC");
-    const int idxMinCellV = TelemetrySchema::index("MinCellV");
-    const int idxMaxCellV = TelemetrySchema::index("MaxCellV");
-    const int idxReqI = TelemetrySchema::index("ReqI");
+    // reordering upstream in the table. Handed to CsvDecimation::Accumulator
+    // below, which never interprets them itself (#43).
+    const size_t fieldIndices[7] = {
+        (size_t)TelemetrySchema::index("Timestamp"),
+        (size_t)TelemetrySchema::index("PackV"),
+        (size_t)TelemetrySchema::index("PackI"),
+        (size_t)TelemetrySchema::index("SOC"),
+        (size_t)TelemetrySchema::index("MinCellV"),
+        (size_t)TelemetrySchema::index("MaxCellV"),
+        (size_t)TelemetrySchema::index("ReqI"),
+    };
 
     if (targetPoints == 0)
         targetPoints = 1;
@@ -502,12 +461,10 @@ bool SDLogger::readGraphSeries(const String &fileName, size_t targetPoints, Stri
     // chunks (like the old pass 1's byte scan - fast block reads, not the
     // old pass 2's one-Stream-call-per-line readStringUntil(), which was
     // the dominant cost: ~30s measured on a 1.7MB/~24k-row day on-device,
-    // see #40). Every row's bytes still get copied into lineBuf (cheap: a
-    // bounds-checked array write, no allocation), but a line is only ever
-    // turned into a String - via csvFieldFromBuf(), 7 times - when it's
-    // one of the kept (1-in-skip) rows. That's the per-row cost this drops
-    // for ~23700 of ~24000 rows on a typical day: no String allocation, no
-    // per-field parsing, just an array write until the next '\n'.
+    // see #40). Line-accumulation and skip-decimation themselves now live
+    // in CsvDecimation::Accumulator (#43), pure and natively tested - this
+    // loop is just SD I/O, feeding it chunks and appending whatever it
+    // wrote for that chunk onto outCSV, plus the watchdog yield cadence.
     if (ok)
     {
         size_t skip = (estimatedLines > targetPoints) ? (estimatedLines / targetPoints) : 1;
@@ -520,46 +477,20 @@ bool SDLogger::readGraphSeries(const String &fileName, size_t targetPoints, Stri
             outCSV.reserve(outCSV.length() + (targetPoints + 1) * 60);
             f.readStringUntil('\n'); // header, discarded (fresh open, same as the sample pass above)
 
+            CsvDecimation::Accumulator accum(fieldIndices, 7, skip);
             uint8_t buf[512];
-            char lineBuf[320]; // a full telemetry row is ~230 bytes today; generous margin
-            size_t lineLen = 0;
-            size_t lineIdx = 0;
-            bool keepLine = true; // lineIdx starts at 0, and 0 % skip == 0 always
+            char outBuf[2048]; // generous margin over the largest single 512-byte chunk's worth of decimated output
             uint32_t bytesRead = 0;
             uint32_t chunkCount = 0;
             int n;
 
-            auto flushKeptLine = [&]()
-            {
-                if (!keepLine || lineLen == 0)
-                    return;
-                outCSV += csvFieldFromBuf(lineBuf, lineLen, idxTimestamp) + "," +
-                          csvFieldFromBuf(lineBuf, lineLen, idxPackV) + "," +
-                          csvFieldFromBuf(lineBuf, lineLen, idxPackI) + "," +
-                          csvFieldFromBuf(lineBuf, lineLen, idxSOC) + "," +
-                          csvFieldFromBuf(lineBuf, lineLen, idxMinCellV) + "," +
-                          csvFieldFromBuf(lineBuf, lineLen, idxMaxCellV) + "," +
-                          csvFieldFromBuf(lineBuf, lineLen, idxReqI) + "\n";
-            };
-
             while (bytesRead < dataBytes && (n = f.read(buf, sizeof(buf))) > 0)
             {
                 bytesRead += (uint32_t)n;
-                for (int i = 0; i < n; i++)
-                {
-                    uint8_t c = buf[i];
-                    if (c == '\n')
-                    {
-                        flushKeptLine();
-                        lineLen = 0;
-                        lineIdx++;
-                        keepLine = (lineIdx % skip == 0);
-                    }
-                    else if (lineLen < sizeof(lineBuf) - 1)
-                    {
-                        lineBuf[lineLen++] = (char)c;
-                    }
-                }
+                size_t outLen = 0;
+                accum.feed(buf, (size_t)n, outBuf, sizeof(outBuf), &outLen);
+                if (outLen > 0)
+                    outCSV.concat(outBuf, (unsigned int)outLen);
                 // Same watchdog reasoning as the old pass 1 (this route runs
                 // synchronously on the AsyncTCP task; a hung/slow scan here
                 // previously starved its watchdog feed and crashed the
@@ -570,7 +501,10 @@ bool SDLogger::readGraphSeries(const String &fileName, size_t targetPoints, Stri
             // A final row without a trailing newline (e.g. the writer
             // task's last flush hadn't landed yet) - flush it too, same as
             // the old f.available()-driven loop did.
-            flushKeptLine();
+            size_t finalLen = 0;
+            accum.finish(outBuf, sizeof(outBuf), &finalLen);
+            if (finalLen > 0)
+                outCSV.concat(outBuf, (unsigned int)finalLen);
             f.close();
         }
         else

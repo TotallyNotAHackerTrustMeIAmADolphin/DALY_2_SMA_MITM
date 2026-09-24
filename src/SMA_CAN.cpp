@@ -59,7 +59,7 @@ void SMA_CAN::checkBusHealth()
 {
     if (_wasBusOff)
     {
-        if (millis() - _recoveryTimer > 1000)
+        if (SMAFrames::shouldRetryBusRecovery(millis(), _wasBusOff, _recoveryTimer))
         {
             debugLog("[CAN] Reinstalling TWAI Driver...\n");
             if (begin(_txPin, _rxPin, _sePin))
@@ -87,7 +87,7 @@ void SMA_CAN::checkBusHealth()
     }
 }
 
-void SMA_CAN::sendFrame(uint32_t id, uint8_t dlc, uint8_t *data)
+void SMA_CAN::sendFrame(uint32_t id, uint8_t dlc, const uint8_t *data)
 {
     if (_wasBusOff)
         return;
@@ -116,47 +116,14 @@ void SMA_CAN::sendStatus(const SMATxData &data)
     if (_wasBusOff)
         return;
 
-    uint8_t frame[8];
+    uint8_t nextTicker;
+    SMAFrames::TxFrameSet frameSet = SMAFrames::encodeStatus(data, _ticker35E, nextTicker);
+    _ticker35E = nextTicker;
 
-    frame[0] = data.cvl & 0xFF;
-    frame[1] = (data.cvl >> 8) & 0xFF;
-    frame[2] = data.ccl & 0xFF;
-    frame[3] = (data.ccl >> 8) & 0xFF;
-    frame[4] = data.dcl & 0xFF;
-    frame[5] = (data.dcl >> 8) & 0xFF;
-    frame[6] = data.isResetting ? 0x00 : (data.maintenanceActive ? 0x70 : 0xC0);
-    frame[7] = 0x00;
-    sendFrame(0x351, 8, frame);
-
-    uint16_t outSOC = data.maintenanceActive ? 2 : (uint16_t)round(data.packSOC);
-    frame[0] = outSOC & 0xFF;
-    frame[1] = (outSOC >> 8) & 0xFF;
-    frame[2] = 100;
-    frame[3] = 0;
-    sendFrame(0x355, 4, frame);
-
-    uint16_t v_out = (uint16_t)round(data.packVoltage * 100.0f);
-    int16_t i_out = (int16_t)round(data.packCurrent * 10.0f);
-    frame[0] = v_out & 0xFF;
-    frame[1] = (v_out >> 8) & 0xFF;
-    frame[2] = i_out & 0xFF;
-    frame[3] = (i_out >> 8) & 0xFF;
-    frame[4] = data.packTemp & 0xFF;
-    frame[5] = (data.packTemp >> 8) & 0xFF;
-    sendFrame(0x356, 6, frame);
-
-    memset(frame, 0, 8);
-    if (data.maintenanceActive)
-        frame[0] |= 0x10;
-    sendFrame(0x359, 8, frame);
-
-    if (++_ticker35E > 10)
+    for (int i = 0; i < frameSet.count; i++)
     {
-        _ticker35E = 0;
-        uint8_t smaId[8] = {'S', 0, 'M', 0, 'A', 0, 0, 0};
-        sendFrame(0x35E, 8, smaId);
-        uint8_t mfg[8] = {3, 0, 0, 0, 0x48, 0x03, 0, 0};
-        sendFrame(0x35F, 8, mfg);
+        const SMAFrames::CanFrame &f = frameSet.frames[i];
+        sendFrame(f.id, f.dlc, f.data);
     }
 }
 
@@ -172,16 +139,13 @@ void SMA_CAN::readMessages(DashboardData &dashboardOut)
     {
         msgCount++;
 
-        if (in_msg.identifier == 0x305 && in_msg.data_length_code > 0)
+        SMAFrames::RxUpdate update;
+        if (SMAFrames::decodeFrame(in_msg.identifier, in_msg.data, in_msg.data_length_code, update))
         {
-            uint8_t m = in_msg.data[0];
-            dashboardOut.smaChargeMode = (m == 1) ? "Bulk" : (m == 2) ? "Absorption"
-                                                         : (m == 3)   ? "Float"
-                                                                      : "Equalize";
-        }
-        if (in_msg.identifier == 0x300 && in_msg.data_length_code > 0)
-        {
-            dashboardOut.gridPresent = (in_msg.data[0] & 0x01);
+            if (update.hasChargeMode)
+                dashboardOut.smaChargeMode = update.chargeMode;
+            if (update.hasGridPresent)
+                dashboardOut.gridPresent = update.gridPresent;
         }
     }
 }

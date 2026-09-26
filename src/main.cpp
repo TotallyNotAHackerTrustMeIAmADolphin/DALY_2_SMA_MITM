@@ -554,12 +554,6 @@ void setup()
   Diagnostics::setDebugCallback(netLog);
   Diagnostics::logBootDiagnostics();
 
-  currentData.packTemp = 220; // no temperature sensor is read - fixed 22.0C goes to the SMA
-  currentData.smaChargeMode = "Unknown";
-  currentData.minCellVoltageRaw = 0;
-  currentData.maxCellVoltageRaw = 0;
-  currentData.cellSpreadRawMv = 0;
-  currentData.derateFactor = 1.0f; // no derating until canTask's first cycle computes the real factor
 
   // BMS and CAN come up before the network: setupNetwork() can block for up
   // to ~15s (WiFi + NTP), and the SMA should get frames as soon as real BMS

@@ -7,9 +7,7 @@
 #include "ConfigStore.h"
 #include "ConfigForm.h"
 #include <SD.h>
-#include <cstdarg>
 #include <cstddef>
-#include <cstdio>
 
 namespace
 {
@@ -46,24 +44,6 @@ namespace
 WebDashboard::WebDashboard(uint16_t port)
     : _server(port), _events("/events") {}
 
-void WebDashboard::debugLog(const char *format, ...)
-{
-    if (!_debugCb)
-        return;
-
-    char loc_res[256];
-    va_list arg;
-    va_start(arg, format);
-    vsnprintf(loc_res, sizeof(loc_res), format, arg);
-    va_end(arg);
-
-    // "%s" as the format string, loc_res as its argument - not
-    // _debugCb(loc_res) - so a log line containing a literal '%' (e.g. a
-    // percentage) isn't reinterpreted as a format specifier by netLog's own
-    // vsnprintf. Same guard as main.cpp's libraryLogger(): netLog("%s", msg).
-    _debugCb("%s", loc_res);
-}
-
 void WebDashboard::begin(SystemConfig *cfg)
 {
     // /config and /save (registered by setupRoutes() below) dereference
@@ -71,7 +51,7 @@ void WebDashboard::begin(SystemConfig *cfg)
     // null deref.
     if (cfg == nullptr)
     {
-        debugLog("[WEB] begin() called with a null config - server not started\n");
+        logf(_debugCb, "[WEB] begin() called with a null config - server not started\n");
         return;
     }
     _cfg = cfg;
@@ -87,7 +67,7 @@ void WebDashboard::setActionCallback(ActionCallback cb)
     _actionCb = cb;
 }
 
-void WebDashboard::setDebugCallback(WebDebugCallback cb)
+void WebDashboard::setDebugCallback(LogSink cb)
 {
     _debugCb = cb;
 }
@@ -129,10 +109,10 @@ void WebDashboard::saveConfig(AsyncWebServerRequest *request)
         for (const String &msg : errors)
         {
             body += msg + "\n";
-            // One log line per violation: debugLog's buffer is 256 bytes,
-            // and one call with embedded newlines would both truncate and
-            // leave the continuation lines untimestamped.
-            debugLog("[WEB] /save refused: %s\n", msg.c_str());
+            // One log line per violation: logf's buffer is 256 bytes, and
+            // one call with embedded newlines would both truncate and leave
+            // the continuation lines untimestamped.
+            logf(_debugCb, "[WEB] /save refused: %s\n", msg.c_str());
         }
         request->send(400, "text/plain", body + "Nothing saved.\n");
         return;
@@ -144,7 +124,7 @@ void WebDashboard::saveConfig(AsyncWebServerRequest *request)
     // lock is released (#21).
     if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(300)) != pdTRUE)
     {
-        debugLog("[WEB] /save refused: config busy\n");
+        logf(_debugCb, "[WEB] /save refused: config busy\n");
         request->send(503, "text/plain", "Device busy, please try Save again");
         return;
     }
@@ -156,7 +136,7 @@ void WebDashboard::saveConfig(AsyncWebServerRequest *request)
     // Only now that the save has fully succeeded (published under the lock
     // and written to NVS), never for a refused save.
     ConfigForm::logChanges(before, copy, [this](const char *line)
-                            { debugLog("%s", line); });
+                            { logf(_debugCb, "%s", line); });
 
     request->redirect("/");
 }

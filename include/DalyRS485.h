@@ -2,8 +2,7 @@
 #include <Arduino.h>
 #include <vector>
 #include "DalyFrames.h"
-
-typedef void (*DalyDebugCallback)(const char *msg);
+#include "LogSink.h"
 
 // The plain data structs and pure byte-level parsers live in DalyFrames.h,
 // so both compile and run under `pio test -e native`. These using-
@@ -19,7 +18,7 @@ public:
 
     void begin(int rxPin, int txPin, int sePin = -1, int enPin = -1, int pwr5vPin = -1);
 
-    void setDebugCallback(DalyDebugCallback cb);
+    void setDebugCallback(LogSink cb);
 
     bool readBasicInfo(DalyBasicInfo &info);
     bool readCellVoltages(uint8_t expectedCells, std::vector<float> &cellVoltages);
@@ -38,7 +37,7 @@ public:
 
 private:
     HardwareSerial *_serial;
-    DalyDebugCallback _debugCb; // Stores the callback function
+    LogSink _debugCb;
     DalyFrames::FrameAssembler _frameAssembler;
 
     // Edge-triggered flag for the "Rejected cell frame"/"plausible again"
@@ -62,6 +61,4 @@ private:
     // writing the 8-byte payload into `payload` on success. One attempt,
     // no retry.
     bool query(DalyFrames::Cmd cmd, uint8_t payload[DalyFrames::kPayloadLen], unsigned long timeoutMs);
-
-    void debugLog(const char *format, ...) __attribute__((format(printf, 2, 3)));
 };

@@ -1,6 +1,4 @@
 #include "SMA_CAN.h"
-#include <cstdarg>
-#include <cstdio>
 
 namespace
 {
@@ -13,21 +11,9 @@ namespace
 SMA_CAN::SMA_CAN() : _debugCb(nullptr), _ticker35E(0),
                      _driverDown(false), _startFailed(false), _recoveryTimer(0) {}
 
-void SMA_CAN::setDebugCallback(SMADebugCallback cb)
+void SMA_CAN::setDebugCallback(LogSink cb)
 {
     _debugCb = cb;
-}
-
-void SMA_CAN::debugLog(const char *format, ...)
-{
-    if (!_debugCb)
-        return;
-    char loc_res[256];
-    va_list arg;
-    va_start(arg, format);
-    vsnprintf(loc_res, sizeof(loc_res), format, arg);
-    va_end(arg);
-    _debugCb(loc_res);
 }
 
 bool SMA_CAN::begin(gpio_num_t txPin, gpio_num_t rxPin, gpio_num_t sePin)
@@ -72,9 +58,9 @@ bool SMA_CAN::startDriver()
 
     // Edge-triggered: one failure line per retry streak is enough.
     if (ok)
-        debugLog("[CAN] TWAI Driver installed and running at 500kbps.\n");
+        logf(_debugCb, "[CAN] TWAI Driver installed and running at 500kbps.\n");
     else if (!_startFailed)
-        debugLog("[CAN] Failed to initialize TWAI Driver - retrying every second.\n");
+        logf(_debugCb, "[CAN] Failed to initialize TWAI Driver - retrying every second.\n");
     _startFailed = !ok;
     return ok;
 }
@@ -92,7 +78,7 @@ void SMA_CAN::checkBusHealth()
         if (SMAFrames::shouldRetryBusRecovery(millis(), _driverDown, _recoveryTimer))
         {
             if (!_startFailed)
-                debugLog("[CAN] Reinstalling TWAI Driver...\n");
+                logf(_debugCb, "[CAN] Reinstalling TWAI Driver...\n");
             if (startDriver())
                 _driverDown = false;
             else
@@ -108,7 +94,7 @@ void SMA_CAN::checkBusHealth()
     if (twai_stat.state == TWAI_STATE_BUS_OFF)
     {
         markDriverDown();
-        debugLog("[CAN] Bus-Off! Bypassing ESP-IDF bug with a nuclear driver reset...\n");
+        logf(_debugCb, "[CAN] Bus-Off! Bypassing ESP-IDF bug with a nuclear driver reset...\n");
         twai_driver_uninstall();
     }
 }

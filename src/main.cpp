@@ -20,6 +20,7 @@
 #include "MutexLock.h"
 #include "Interval.h"
 #include "LocalClock.h"
+#include "LogSink.h"
 
 static_assert(kPackCells <= DalyFrames::kMaxCollectorCells, "DalyRS485 can't collect every cell of the pack");
 
@@ -75,6 +76,21 @@ constexpr TickType_t kCanTickLockTimeout = pdMS_TO_TICKS(20);
 constexpr TickType_t kLoopLockTimeout = pdMS_TO_TICKS(20);
 
 // --- CENTRAL LOGGING ---
+// The LogSink (include/LogSink.h) every other module's setDebugCallback is
+// wired to: a timestamped line to Serial and, once netReady, the SSE log
+// channel. netLog() below is the varargs entry point everything in this
+// file calls directly; it formats and timestamps, then funnels through
+// here for the actual sinks, same as any other module's callback.
+void netLogLine(const char *line)
+{
+  Serial.print(line);
+  if (netReady)
+  {
+    if (MutexLock lock{netOutMutex, kNetOutLockTimeout})
+      webUI.broadcastLog(line);
+  }
+}
+
 // printf format checking: a Setting<T> (or any wrong type) passed for a
 // %d/%f is a compile warning instead of garbage in the log - varargs never
 // apply Setting's conversion to T.
@@ -102,16 +118,9 @@ void netLog(const char *format, ...)
     snprintf(final_res, sizeof(final_res), "[WAITING FOR NTP...] %s", loc_res);
   }
 
-  Serial.print(final_res);
-  if (netReady)
-  {
-    if (MutexLock lock{netOutMutex, kNetOutLockTimeout})
-      webUI.broadcastLog(final_res);
-  }
+  netLogLine(final_res);
   SDLogger::logEvent(loc_res);
 }
-
-void libraryLogger(const char *msg) { netLog("%s", msg); }
 
 // SSE telemetry push, serialized with netLog's network sinks (netOutMutex).
 void pushTelemetry(const DashboardData &data)
@@ -557,28 +566,28 @@ void setup()
   // Config and SD need no network - load them before the BMS/CAN tasks,
   // which need the setpoints (and a place to log) right away.
   webUI.setActionCallback(handleUIAction);
-  webUI.setDebugCallback(netLog);
+  webUI.setDebugCallback(netLogLine);
 
-  SDLogger::setDebugCallback(libraryLogger);
+  SDLogger::setDebugCallback(netLogLine);
   bool sdOk = SDLogger::begin();
   netLog(sdOk ? "[SYS] SD card logging initialized.\n"
               : "[SYS] SD card logging unavailable (no card or mount failed).\n");
 
   // After SDLogger::begin(): the "[CFG] Loaded config fails validation"
   // lines only reach the SD .log once it is initialised.
-  ConfigStore::load(cfg, netLog);
+  ConfigStore::load(cfg, netLogLine);
 
   // Right after the SD log exists to receive it, not deferred to loop(),
   // so a reset within the first 60s of a cold boot still gets logged.
-  Diagnostics::setDebugCallback(netLog);
+  Diagnostics::setDebugCallback(netLogLine);
   Diagnostics::logBootDiagnostics();
 
   // BMS and CAN come up before the network: setupNetwork() can block up to
   // ~15s, and the SMA should get frames as soon as real BMS data exists.
-  bms.setDebugCallback(libraryLogger);
+  bms.setDebugCallback(netLogLine);
   bms.begin(RS485_RX, RS485_TX, RS485_SE, RS485_EN, PIN_5V_EN);
 
-  inverter.setDebugCallback(libraryLogger);
+  inverter.setDebugCallback(netLogLine);
   inverter.begin((gpio_num_t)CAN_TX, (gpio_num_t)CAN_RX, (gpio_num_t)CAN_SE);
 
   // No handle output needed here - Diagnostics::logHealth() looks these up

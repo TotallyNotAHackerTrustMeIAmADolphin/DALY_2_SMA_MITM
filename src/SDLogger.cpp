@@ -14,7 +14,7 @@
 bool SDLogger::initialized = false;
 QueueHandle_t SDLogger::logQueue = NULL;
 SemaphoreHandle_t SDLogger::sdMutex_ = NULL;
-SDDebugCallback SDLogger::debugCb = nullptr;
+LogSink SDLogger::debugCb = nullptr;
 std::atomic<uint32_t> SDLogger::droppedQueueFull_{0};
 std::atomic<uint32_t> SDLogger::droppedLockTimeout_{0};
 std::atomic<uint32_t> SDLogger::writeFailures_{0};
@@ -110,7 +110,7 @@ bool SDLogger::isReady()
     return initialized;
 }
 
-void SDLogger::setDebugCallback(SDDebugCallback cb)
+void SDLogger::setDebugCallback(LogSink cb)
 {
     debugCb = cb;
 }

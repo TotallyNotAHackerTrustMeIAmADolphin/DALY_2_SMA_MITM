@@ -275,6 +275,47 @@ static void test_block_reference_ratchets_up(void)
     TEST_ASSERT_EQUAL(kBlockDrop, decide(st, s, 2 * kTen).reason);
 }
 
+// --- priority is a single ordered mechanism (#106): the Reason enum order,
+// applied the same way whether the candidate came from the per-task loop
+// or a global counter ---
+
+static void test_priority_stack_low_beats_sd_drops_and_heap_drop(void)
+{
+    // kStackLow sorts before kSdDrops and kHeapDrop: all three fire at
+    // once, and the per-task reason must still win.
+    State st;
+    Sample s = steady();
+    s.stackLeft[kCan] = 400;
+    decide(st, s, 0);
+    s.stackLeft[kCan] = 300;
+    s.sdDroppedQueueFull += 1;
+    s.minFreeHeap -= kHeapDropBytes;
+    Decision d = decide(st, s, kTen);
+    TEST_ASSERT_EQUAL(kStackLow, d.reason);
+    TEST_ASSERT_EQUAL(kCan, d.task);
+}
+
+static void test_priority_sd_drops_beats_heap_and_block_drop(void)
+{
+    State st;
+    decide(st, steady(), 0);
+    Sample s = steady();
+    s.sdDroppedQueueFull += 1;
+    s.minFreeHeap -= kHeapDropBytes;
+    s.maxBlock -= kBlockDropBytes;
+    TEST_ASSERT_EQUAL(kSdDrops, decide(st, s, kTen).reason);
+}
+
+static void test_priority_heap_drop_beats_block_drop(void)
+{
+    State st;
+    decide(st, steady(), 0);
+    Sample s = steady();
+    s.minFreeHeap -= kHeapDropBytes;
+    s.maxBlock -= kBlockDropBytes;
+    TEST_ASSERT_EQUAL(kHeapDrop, decide(st, s, kTen).reason);
+}
+
 int main(int, char **)
 {
     UNITY_BEGIN();
@@ -298,5 +339,8 @@ int main(int, char **)
     RUN_TEST(test_sd_drops_no_increase_no_trigger);
     RUN_TEST(test_sd_drops_baseline_captures_nonzero_counters);
     RUN_TEST(test_block_reference_ratchets_up);
+    RUN_TEST(test_priority_stack_low_beats_sd_drops_and_heap_drop);
+    RUN_TEST(test_priority_sd_drops_beats_heap_and_block_drop);
+    RUN_TEST(test_priority_heap_drop_beats_block_drop);
     return UNITY_END();
 }

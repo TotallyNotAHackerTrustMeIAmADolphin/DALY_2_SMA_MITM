@@ -69,19 +69,17 @@ void Diagnostics::logHealth()
     // HealthLog::decide() says something moved (see include/HealthLog.h).
     static HealthLog::State st;
 
-    // "loopTask" is the Arduino core's name for the task running loop();
-    // looked up by name like the others rather than via a NULL handle, so
-    // the loop column stays right even if this is ever called elsewhere.
-    static const char *const names[HealthLog::kNumTasks] = {"loopTask", "BMS_Task", "CAN_Task", "SD_LogTask", "async_tcp", "arduino_events"};
-    static const char *const shortNames[HealthLog::kNumTasks] = {"loop", "bms", "can", "sd", "async_tcp", "events"};
     HealthLog::Sample s;
     s.freeHeap = ESP.getFreeHeap();
     s.minFreeHeap = ESP.getMinFreeHeap();
     s.maxBlock = ESP.getMaxAllocHeap();
-    // On ESP-IDF the stack high-water mark is in bytes.
+    // On ESP-IDF the stack high-water mark is in bytes. "loopTask" is the
+    // Arduino core's name for the task running loop(); looked up by name
+    // like the others rather than via a NULL handle, so the loop column
+    // stays right even if this is ever called elsewhere.
     for (int i = 0; i < HealthLog::kNumTasks; i++)
     {
-        TaskHandle_t h = xTaskGetHandle(names[i]);
+        TaskHandle_t h = xTaskGetHandle(HealthLog::taskNames()[i].full);
         s.stackLeft[i] = h ? (uint32_t)uxTaskGetStackHighWaterMark(h) : HealthLog::kNoTask;
     }
 
@@ -94,13 +92,15 @@ void Diagnostics::logHealth()
     if (d.reason == HealthLog::kNone)
         return;
 
-    char stacks[HealthLog::kNumTasks][12];
+    char stacks[160];
+    BoundedWriter stacksW(stacks, sizeof(stacks));
     for (int i = 0; i < HealthLog::kNumTasks; i++)
     {
+        const char *sep = i ? ", " : "";
         if (s.stackLeft[i] == HealthLog::kNoTask)
-            strlcpy(stacks[i], "-", sizeof(stacks[i]));
+            stacksW.append("%s%s -", sep, HealthLog::taskNames()[i].shortForm);
         else
-            snprintf(stacks[i], sizeof(stacks[i]), "%u", (unsigned)s.stackLeft[i]);
+            stacksW.append("%s%s %u", sep, HealthLog::taskNames()[i].shortForm, (unsigned)s.stackLeft[i]);
     }
 
     char rssi[16];
@@ -111,15 +111,13 @@ void Diagnostics::logHealth()
 
     char why[48];
     if (d.task >= 0)
-        snprintf(why, sizeof(why), "%s: %s", HealthLog::reasonName(d.reason), shortNames[d.task]);
+        snprintf(why, sizeof(why), "%s: %s", HealthLog::reasonName(d.reason), HealthLog::taskNames()[d.task].shortForm);
     else
         strlcpy(why, HealthLog::reasonName(d.reason), sizeof(why));
 
-    debugLog("[DIAG] Health (%s): heap free %u, min %u, max block %u | stack left: loop %s, bms %s, can %s, sd %s, async_tcp %s, events %s | WiFi RSSI %s | SD drops: queue %u, lock %u, write %u\n",
+    debugLog("[DIAG] Health (%s): heap free %u, min %u, max block %u | stack left: %s | WiFi RSSI %s | SD drops: queue %u, lock %u, write %u\n",
              why, (unsigned)s.freeHeap, (unsigned)s.minFreeHeap, (unsigned)s.maxBlock,
-             stacks[HealthLog::kLoop], stacks[HealthLog::kBms], stacks[HealthLog::kCan],
-             stacks[HealthLog::kSd], stacks[HealthLog::kAsyncTcp], stacks[HealthLog::kEvents],
-             rssi, (unsigned)s.sdDroppedQueueFull, (unsigned)s.sdDroppedLockTimeout, (unsigned)s.sdWriteFailures);
+             stacks, rssi, (unsigned)s.sdDroppedQueueFull, (unsigned)s.sdDroppedLockTimeout, (unsigned)s.sdWriteFailures);
 }
 
 // Why did we (re)boot, and what does the last stored core dump say? Called
@@ -149,7 +147,8 @@ void Diagnostics::logBootDiagnostics()
 
     if (otaState == ESP_OTA_IMG_PENDING_VERIFY)
     {
-        debugLog("[DIAG] Image pending verification: OTA is refused until it is confirmed (needs >= 120 s uptime with WiFi up and BMS data); a reset before that boots the previous firmware.\n");
+        debugLog("[DIAG] Image pending verification: OTA is refused until it is confirmed (needs >= %lu s uptime with WiFi up and BMS data); a reset before that boots the previous firmware.\n",
+                 RollbackConfirm::kConfirmAfterMs / 1000);
     }
 
     // A dump stays in flash until the next crash overwrites it, so it can be

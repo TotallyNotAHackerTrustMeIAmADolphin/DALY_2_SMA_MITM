@@ -29,22 +29,9 @@ namespace CsvDecimation
     // a full telemetry row is ~230 bytes today, generous margin.
     constexpr size_t kLineBufSize = 320;
 
-    // Picks the skip interval readGraphSeries() decimates by, from a short
-    // sample taken right after the CSV header instead of a full-file line
-    // count (#40/#96): extracted out of readGraphSeries() so it's pure and
-    // natively tested. dataBytes: the source file's data bytes (file size
-    // minus the header line). sampleBytes/sampleLines: how many bytes were
-    // read for the sample and how many '\n's were found in them (0 lines
-    // means the sample didn't contain one full row - a huge single line, or
-    // a file barely bigger than its header). targetPoints: the caller's
-    // requested row count (must be >= 1 - callers clamp 0 up to 1 before
-    // calling, same as before).
-    //
-    // Always returns >= 1: unlike the pre-refactor inline version, there's
-    // no separate "if (skip == 0) skip = 1" guard here because it can never
-    // be reached - estimatedLines is always >= 1 and targetPoints is always
-    // >= 1, so estimatedLines / targetPoints (taken only when estimatedLines
-    // > targetPoints) is always >= 1 already.
+    // Skip interval for decimating dataBytes of CSV rows down to
+    // targetPoints, estimated from a short sample (sampleBytes read,
+    // sampleLines '\n's found) instead of a full-file scan. Always >= 1.
     inline size_t estimateSkip(uint32_t dataBytes, uint32_t sampleBytes,
                                 size_t sampleLines, size_t targetPoints)
     {

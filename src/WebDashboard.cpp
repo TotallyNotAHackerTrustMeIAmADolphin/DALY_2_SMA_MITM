@@ -8,7 +8,6 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
-#include <memory>
 #include "esp_core_dump.h"
 #include "esp_partition.h"
 #include "esp_spi_flash.h"
@@ -429,12 +428,8 @@ const char *WebDashboard::contentTypeForLogFile(const String &name)
 
 namespace
 {
-    // Maps a non-Ok SDLogger::ReadResult to the response /api/logs/content
-    // and /api/logs/graph send for it (#98): Busy/NotFound reuse the exact
-    // same bodies findLogFile() already sends for the same conditions;
-    // tooLargeBody is supplied by the caller since the two routes' caps
-    // (and so their existing "too large" wording) differ. Never called
-    // with ReadResult::Ok.
+    // ReadResult -> status code, once, for both /api/logs/content and
+    // /api/logs/graph. tooLargeBody differs per route (different caps).
     void sendReadFailure(AsyncWebServerRequest *request, SDLogger::ReadResult r, const char *tooLargeBody)
     {
         switch (r)
@@ -449,7 +444,7 @@ namespace
             request->send(413, "text/plain", tooLargeBody);
             return;
         case SDLogger::ReadResult::Ok:
-            return; // never reached - callers only invoke this for non-Ok results
+            return;
         }
     }
 }
@@ -539,33 +534,20 @@ void WebDashboard::setupRoutes()
         String name; uint32_t size;
         if (!findLogFile(request, name, size)) return;
 
-        // beginDownload() takes sdMutex_ for the whole transfer AND resolves
-        // name (bare, from findLogFile()'s listing) to its SD path in one
-        // call (#98) - both now live inside SDLogger instead of split
-        // across this route and SDLogger's own internals.
         String sdPath;
-        auto lease = std::make_shared<SDLogger::DownloadLease>(SDLogger::beginDownload(name, sdPath));
-        if (!lease->held()) {
+        auto lock = SDLogger::beginDownload(name, sdPath);
+        if (!lock) {
             request->send(503, "text/plain", "SD card busy, try again");
             return;
         }
 
-        // Released exactly once when this connection closes (completion or
-        // abort) - this library always closes file-response connections
-        // (no keep-alive), so onDisconnect is a reliable single release point.
-        // Held for the WHOLE transfer (accepted tradeoff: the background
-        // writer drops samples it can't log during that window - see PR
-        // description). Explicitly (re-)set the library's ack timeout so a
-        // client that stops ACKing (e.g. walks out of WiFi range) gets
-        // force-disconnected - and this lease released - within 5s rather
-        // than relying silently on the library's own default. The lease is
-        // wrapped in a shared_ptr because AsyncWebServer's onDisconnect is a
-        // std::function (must be copyable) and DownloadLease itself is
-        // move-only; release() inside the callback drops the lock exactly
-        // when onDisconnect fires, rather than whenever the shared_ptr's
-        // last reference happens to be destroyed.
+        // Held for the whole transfer (accepted tradeoff: the background
+        // writer drops samples it can't log during that window). Force a
+        // stalled client's disconnect within 5s so the lock can't be held
+        // indefinitely; resetting the shared_ptr in onDisconnect releases
+        // it exactly once, whichever side closes the connection.
         request->client()->setAckTimeout(5000);
-        request->onDisconnect([lease]() { lease->release(); });
+        request->onDisconnect([lock]() mutable { lock.reset(); });
 
         request->send(SD, sdPath, contentTypeForLogFile(name), true /* download */); });
 

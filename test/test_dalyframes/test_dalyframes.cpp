@@ -52,6 +52,49 @@ static void test_checksum_bad(void)
     TEST_ASSERT_FALSE(DalyFrames::checksumOk(frame));
 }
 
+// --- buildRequest / checksum (#103) ---
+// checksum = low byte of the sum of A5 40 <cmd> 08 00 00 00 00 00 00 00 00.
+
+static void test_build_request_basic_info(void)
+{
+    // 0xA5+0x40+0x90+0x08 = 0x16D -> low byte 0x7D
+    uint8_t expected[13] = {0xA5, 0x40, 0x90, 0x08, 0, 0, 0, 0, 0, 0, 0, 0, 0x7D};
+    uint8_t frame[13];
+    DalyFrames::buildRequest(DalyFrames::BasicInfo, frame);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(expected, frame, 13);
+    TEST_ASSERT_TRUE(DalyFrames::checksumOk(frame));
+}
+
+static void test_build_request_mosfet_status(void)
+{
+    // 0xA5+0x40+0x93+0x08 = 0x170 -> low byte 0x80
+    uint8_t expected[13] = {0xA5, 0x40, 0x93, 0x08, 0, 0, 0, 0, 0, 0, 0, 0, 0x80};
+    uint8_t frame[13];
+    DalyFrames::buildRequest(DalyFrames::MosfetStatus, frame);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(expected, frame, 13);
+    TEST_ASSERT_TRUE(DalyFrames::checksumOk(frame));
+}
+
+static void test_build_request_cell_voltages(void)
+{
+    // 0xA5+0x40+0x95+0x08 = 0x172 -> low byte 0x82
+    uint8_t expected[13] = {0xA5, 0x40, 0x95, 0x08, 0, 0, 0, 0, 0, 0, 0, 0, 0x82};
+    uint8_t frame[13];
+    DalyFrames::buildRequest(DalyFrames::CellVoltages, frame);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(expected, frame, 13);
+    TEST_ASSERT_TRUE(DalyFrames::checksumOk(frame));
+}
+
+static void test_build_request_alarm_status(void)
+{
+    // 0xA5+0x40+0x98+0x08 = 0x175 -> low byte 0x85
+    uint8_t expected[13] = {0xA5, 0x40, 0x98, 0x08, 0, 0, 0, 0, 0, 0, 0, 0, 0x85};
+    uint8_t frame[13];
+    DalyFrames::buildRequest(DalyFrames::AlarmStatus, frame);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(expected, frame, 13);
+    TEST_ASSERT_TRUE(DalyFrames::checksumOk(frame));
+}
+
 // --- parseBasicInfo (cmd 0x90) ---
 // packVoltage = ((data[0]<<8)|data[1]) / 10.0  -> raw 552 = 0x0228 -> 55.2V
 // packCurrent = (((data[4]<<8)|data[5]) - 30000) / 10.0 -> raw 30050 -> 5.0A
@@ -271,6 +314,10 @@ int main(int, char **)
     UNITY_BEGIN();
     RUN_TEST(test_checksum_ok);
     RUN_TEST(test_checksum_bad);
+    RUN_TEST(test_build_request_basic_info);
+    RUN_TEST(test_build_request_mosfet_status);
+    RUN_TEST(test_build_request_cell_voltages);
+    RUN_TEST(test_build_request_alarm_status);
     RUN_TEST(test_parse_basic_info);
     RUN_TEST(test_parse_basic_info_negative_current);
     RUN_TEST(test_parse_cell_frame);

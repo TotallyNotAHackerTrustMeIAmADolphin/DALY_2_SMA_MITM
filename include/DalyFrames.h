@@ -12,6 +12,23 @@
 
 namespace DalyFrames
 {
+    // Daly UART frame envelope (#103): every request/response frame is
+    // kFrameLen bytes: kStartByte, kHostAddr, a command byte, kPayloadLen,
+    // kPayloadLen data bytes, then a trailing checksum byte.
+    constexpr uint8_t kStartByte = 0xA5;
+    constexpr uint8_t kHostAddr = 0x40;
+    constexpr uint8_t kPayloadLen = 8;
+    constexpr uint8_t kFrameLen = 13; // 4-byte header + kPayloadLen + 1 checksum byte
+
+    // Command bytes for the four frame types this firmware sends/parses.
+    enum Cmd : uint8_t
+    {
+        BasicInfo = 0x90,
+        MosfetStatus = 0x93,
+        CellVoltages = 0x95,
+        AlarmStatus = 0x98,
+    };
+
     struct DalyBasicInfo
     {
         float packVoltage;
@@ -103,15 +120,36 @@ namespace DalyFrames
         return table;
     }
 
-    // Daly UART frame checksum: low byte of the sum of the first 12 bytes
-    // of the 13-byte frame (0xA5, address, command, length, 8 data bytes),
-    // compared against byte 12.
-    inline bool checksumOk(const uint8_t frame[13])
+    // Daly UART frame checksum: low byte of the sum of the first
+    // kFrameLen-1 bytes of the frame (0xA5, address, command, length, 8
+    // data bytes).
+    inline uint8_t checksum(const uint8_t frame[kFrameLen])
     {
-        uint8_t checksum = 0;
-        for (int i = 0; i < 12; i++)
-            checksum += frame[i];
-        return checksum == frame[12];
+        uint8_t sum = 0;
+        for (int i = 0; i < kFrameLen - 1; i++)
+            sum += frame[i];
+        return sum;
+    }
+
+    // checksumOk compares checksum(frame) against the frame's trailing byte.
+    inline bool checksumOk(const uint8_t frame[kFrameLen])
+    {
+        return checksum(frame) == frame[kFrameLen - 1];
+    }
+
+    // Builds a well-formed request frame for `cmd`: no payload (all-zero
+    // data bytes) and a correct trailing checksum. `out` must be kFrameLen
+    // bytes. Every Daly request this firmware sends has an all-zero
+    // payload, so buildRequest() takes no payload argument.
+    inline void buildRequest(Cmd cmd, uint8_t out[kFrameLen])
+    {
+        out[0] = kStartByte;
+        out[1] = kHostAddr;
+        out[2] = static_cast<uint8_t>(cmd);
+        out[3] = kPayloadLen;
+        for (int i = 0; i < kPayloadLen; i++)
+            out[4 + i] = 0;
+        out[kFrameLen - 1] = checksum(out);
     }
 
     // Daly UART "Basic Info" (cmd 0x90) 8-byte payload:

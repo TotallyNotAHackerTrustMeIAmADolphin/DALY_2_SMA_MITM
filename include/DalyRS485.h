@@ -53,8 +53,14 @@ private:
     HardwareSerial *_serial;
     DalyDebugCallback _debugCb; // Stores the callback function
 
-    void sendCommand(uint8_t cmd);
-    bool receiveSingleFrame(uint8_t expectedCmd, uint8_t *dataOut, unsigned long timeout = 150);
+    void sendCommand(DalyFrames::Cmd cmd);
+    bool receiveSingleFrame(DalyFrames::Cmd expectedCmd, uint8_t *dataOut, unsigned long timeout);
+
+    // Sends `cmd` and waits up to timeoutMs for its single-frame reply,
+    // writing the 8-byte payload into `payload` on success. One attempt,
+    // no retry (#103) - readBasicInfo/readMosfetStatus/readAlarmStatus
+    // never retried before this refactor either.
+    bool query(DalyFrames::Cmd cmd, uint8_t payload[DalyFrames::kPayloadLen], unsigned long timeoutMs);
 
     // Internal variadic logger (works exactly like printf)
     void debugLog(const char *format, ...) __attribute__((format(printf, 2, 3)));

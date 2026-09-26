@@ -16,6 +16,7 @@
 #include "SDLogger.h"
 #include "Diagnostics.h"
 #include "WifiEvents.h"
+#include "MutexLock.h"
 
 // Bring in your Wi-Fi credentials AND network config (static IP, gateway,
 // subnet, DNS) - all of it lives in this one gitignored file now, so a
@@ -56,6 +57,21 @@ CellSmoother cellSmoother;
 StatusFrame::BmsLink bmsLink;
 StatusFrame::UiCommands uiCommands;
 
+// How long each dataMutex/netOutMutex user waits before giving up. Every
+// holder keeps the lock for microseconds (copies, no I/O), so these only
+// bound the worst case; what a timeout costs differs per site:
+// canTask skips a tick (the next one is 250 ms later), bmsTask drops one
+// reading (logged, see LockDropLog), loop() skips a check, netLog drops
+// the SSE copy of a line (Serial and SD still get it).
+constexpr TickType_t kNetOutLockTimeout = pdMS_TO_TICKS(50);
+constexpr TickType_t kUiLockTimeout = pdMS_TO_TICKS(50);
+constexpr TickType_t kBmsStoreLockTimeout = pdMS_TO_TICKS(50);
+constexpr TickType_t kBmsCellStoreLockTimeout = pdMS_TO_TICKS(100);
+constexpr TickType_t kBmsCfgReadLockTimeout = pdMS_TO_TICKS(20);
+constexpr TickType_t kCanRxLockTimeout = pdMS_TO_TICKS(10);
+constexpr TickType_t kCanTickLockTimeout = pdMS_TO_TICKS(20);
+constexpr TickType_t kLoopLockTimeout = pdMS_TO_TICKS(20);
+
 // --- CENTRAL LOGGING ---
 // printf format checking: a Setting<T> (or any wrong type) passed for a
 // %d/%f is a compile warning instead of garbage in the log - varargs never
@@ -87,10 +103,10 @@ void netLog(const char *format, ...)
   }
 
   Serial.print(final_res);
-  if (netReady && xSemaphoreTake(netOutMutex, pdMS_TO_TICKS(50)) == pdTRUE)
+  if (netReady)
   {
-    webUI.broadcastLog(final_res);
-    xSemaphoreGive(netOutMutex);
+    if (MutexLock lock{netOutMutex, kNetOutLockTimeout})
+      webUI.broadcastLog(final_res);
   }
   SDLogger::logEvent(loc_res);
 }
@@ -102,11 +118,8 @@ void pushTelemetry(const DashboardData &data)
 {
   if (!netReady)
     return;
-  if (xSemaphoreTake(netOutMutex, pdMS_TO_TICKS(50)) == pdTRUE)
-  {
+  if (MutexLock lock{netOutMutex, kNetOutLockTimeout})
     webUI.broadcastTelemetry(data);
-    xSemaphoreGive(netOutMutex);
-  }
 }
 
 // --- UI EVENT HANDLER ---
@@ -114,39 +127,66 @@ void handleUIAction(const char *action)
 {
   if (strcmp(action, "toggleMaint") == 0)
   {
-    bool newState = false;
-    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE)
+    bool applied = false, newState = false;
+    if (MutexLock lock{dataMutex, kUiLockTimeout})
     {
       uiCommands.manualMaintForce = !uiCommands.manualMaintForce;
       newState = uiCommands.manualMaintForce;
-      xSemaphoreGive(dataMutex);
+      applied = true;
+    }
+    if (applied)
       netLog("[USER] Manual Force Charge: %s\n", newState ? "ON" : "OFF");
-    }
     else
-    {
       netLog("[USER] %s ignored: state busy\n", action);
-    }
   }
   else if (strcmp(action, "resetSMA") == 0)
   {
-    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE)
+    bool applied = false;
+    if (MutexLock lock{dataMutex, kUiLockTimeout})
     {
-      // 0 = "not armed yet": canTask starts the 5.5 s hold from the first
-      // status frame it actually sends with the reset (DVL 0, #63), so a request
+      // 0 = "not armed yet": canTask starts the hold from the first status
+      // frame it actually sends with the reset (DVL 0, #63), so a request
       // made while the BMS is still silent isn't consumed by the wait.
       uiCommands.resetHoldStartMs = 0;
       uiCommands.resetRequested = true;
-      xSemaphoreGive(dataMutex);
+      applied = true;
+    }
+    if (applied)
       netLog("[USER] Manual Cluster Reset Triggered.\n");
-    }
     else
-    {
       netLog("[USER] %s ignored: state busy\n", action);
-    }
   }
 }
 
 // --- CORE 0: BMS BACKGROUND TASK ---
+
+// A BMS reading bmsTask couldn't store because dataMutex was busy is lost,
+// and enough of them in a row let the data go stale (0 A). Logged
+// edge-triggered: once when drops start, once with the total when a store
+// succeeds again. Call note() outside the lock.
+struct LockDropLog
+{
+  bool dropping = false;
+  uint32_t dropped = 0;
+
+  void note(bool stored, const char *what)
+  {
+    if (!stored)
+    {
+      if (!dropping)
+        netLog("[BMS] dataMutex busy - %s reading dropped\n", what);
+      dropping = true;
+      dropped++;
+    }
+    else if (dropping)
+    {
+      netLog("[BMS] dataMutex free again - %lu reading(s) dropped\n", (unsigned long)dropped);
+      dropping = false;
+      dropped = 0;
+    }
+  }
+};
+
 void bmsTask(void *pvParameters)
 {
   vTaskDelay(pdMS_TO_TICKS(2000));
@@ -155,6 +195,7 @@ void bmsTask(void *pvParameters)
   // events below - replaces the three function-local `static`s this used
   // to hold (#44, see include/BmsEvents.h).
   BmsEvents::State bmsEventState;
+  LockDropLog lockDrops;
 
   while (true)
   {
@@ -169,14 +210,17 @@ void bmsTask(void *pvParameters)
       if (ev.socJumped)
         netLog("[BMS] SOC jumped %.1f -> %.1f %% (Daly recalibration?)\n", ev.socFrom, ev.socTo);
 
-      if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+      bool stored = false;
+      if (MutexLock lock{dataMutex, kBmsStoreLockTimeout})
+      {
         currentData.packVoltage = info.packVoltage;
         currentData.packCurrent = info.packCurrent;
         currentData.packSOC = info.packSOC;
         bmsLink.lastBasicInfoMs = millis();
         bmsLink.haveBasicInfo = true;
-        xSemaphoreGive(dataMutex);
+        stored = true;
       }
+      lockDrops.note(stored, "basic info");
     }
 
     vTaskDelay(pdMS_TO_TICKS(100));
@@ -185,10 +229,8 @@ void bmsTask(void *pvParameters)
     if (bms.readCellVoltages(kPackCells, cellVolts))
     {
       static int lastKnownVSamples = 12; // falls back to this if the lock is briefly contended
-      if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+      if (MutexLock lock{dataMutex, kBmsCfgReadLockTimeout})
         lastKnownVSamples = cfg.vSamples;
-        xSemaphoreGive(dataMutex);
-      }
       int windowSize = max(1, min(CellSmoother::MAX_SAMPLES, lastKnownVSamples));
 
       // The moving-average/reseed-on-window-change logic (and the
@@ -204,7 +246,8 @@ void bmsTask(void *pvParameters)
       DashboardData broadcastCopy;
       bool shouldBroadcast = false;
 
-      if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+      if (MutexLock lock{dataMutex, kBmsCellStoreLockTimeout})
+      {
         currentData.avgCellVoltage = r.avgV;
         currentData.minCellVoltage = r.minV;
         currentData.maxCellVoltage = r.maxV;
@@ -220,13 +263,11 @@ void bmsTask(void *pvParameters)
         // Copy for broadcast outside mutex
         broadcastCopy = currentData;
         shouldBroadcast = true;
-
-        xSemaphoreGive(dataMutex);
       }
+      lockDrops.note(shouldBroadcast, "cell voltage");
 
-      if (shouldBroadcast) {
+      if (shouldBroadcast)
         pushTelemetry(broadcastCopy);
-      }
     }
 
     vTaskDelay(pdMS_TO_TICKS(100));
@@ -245,11 +286,14 @@ void bmsTask(void *pvParameters)
       if (ev.dischargeMosChanged)
         netLog("[BMS] Discharge MOSFET %s\n", ev.dischargeMosOn ? "ON" : "OFF - protection or BMS-initiated cutoff");
 
-      if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+      bool stored = false;
+      if (MutexLock lock{dataMutex, kBmsStoreLockTimeout})
+      {
         currentData.chargeMosOn = mosStatus.chargeMosOn;
         currentData.dischargeMosOn = mosStatus.dischargeMosOn;
-        xSemaphoreGive(dataMutex);
+        stored = true;
       }
+      lockDrops.note(stored, "MOSFET status");
     }
 
     vTaskDelay(pdMS_TO_TICKS(100));
@@ -273,14 +317,17 @@ void bmsTask(void *pvParameters)
       if (ev.faultCodeChanged)
         netLog("[BMS] Fault code %u -> %u\n", ev.faultCodeFrom, ev.faultCodeTo);
 
-      if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+      bool stored = false;
+      if (MutexLock lock{dataMutex, kBmsStoreLockTimeout})
+      {
         currentData.bmsProtectionActive = alarmStatus.anyProtectionActive;
         currentData.cellOvervoltLevel1 = alarmStatus.cellOvervoltLevel1;
         currentData.cellOvervoltLevel2 = alarmStatus.cellOvervoltLevel2;
         currentData.packOvervoltLevel1 = alarmStatus.packOvervoltLevel1;
         currentData.packOvervoltLevel2 = alarmStatus.packOvervoltLevel2;
-        xSemaphoreGive(dataMutex);
+        stored = true;
       }
+      lockDrops.note(stored, "alarm status");
     }
 
     vTaskDelay(pdMS_TO_TICKS(2000));
@@ -445,10 +492,8 @@ void canTask(void *pvParameters)
     {
       lastCanCheck = now;
       inverter.checkBusHealth();
-      if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+      if (MutexLock lock{dataMutex, kCanRxLockTimeout})
         inverter.readMessages(currentData);
-        xSemaphoreGive(dataMutex);
-      }
     }
 
     if (now - lastSmaTx > 250)
@@ -456,16 +501,17 @@ void canTask(void *pvParameters)
       lastSmaTx = now;
       StatusFrame::Decision dec;
 
-      if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+      if (MutexLock lock{dataMutex, kCanTickLockTimeout})
+      {
         dec = StatusFrame::decide(cfg, StatusFrame::snapshotFrom(currentData, bmsLink, uiCommands, now), ctrl);
         applyDecision(dec);
-        xSemaphoreGive(dataMutex);
-
-        // Transmit outside the lock (#74): dec is this task's own copy, and
-        // inverter is only ever touched by canTask.
-        if (dec.sendFrames)
-          inverter.sendStatus(dec.values);
       }
+
+      // Transmit outside the lock (#74): dec is this task's own copy, and
+      // inverter is only ever touched by canTask. A failed take leaves
+      // dec.sendFrames false, so nothing is sent this tick.
+      if (dec.sendFrames)
+        inverter.sendStatus(dec.values);
 
       logDecisionEvents(dec, now);
     }
@@ -551,11 +597,11 @@ void loop()
   if (millis() - lastSdLog > 10000)
   {
     lastSdLog = millis();
-    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+    if (MutexLock lock{dataMutex, kLoopLockTimeout})
+    {
       // No placeholder rows before the first real BMS data.
       if (bmsLink.ready())
         SDLogger::logTelemetry(currentData);
-      xSemaphoreGive(dataMutex);
     }
   }
 
@@ -582,11 +628,8 @@ void loop()
     lastConfirmCheck = millis();
     bool wifiUp = WiFi.status() == WL_CONNECTED;
     bool bmsUp = false;
-    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(20)) == pdTRUE)
-    {
+    if (MutexLock lock{dataMutex, kLoopLockTimeout})
       bmsUp = bmsLink.ready();
-      xSemaphoreGive(dataMutex);
-    }
     // If the mutex take fails, bmsUp stays false for this pass and the
     // check is simply retried a second later.
     Diagnostics::confirmImageIfReady(wifiUp, bmsUp);

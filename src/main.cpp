@@ -75,12 +75,10 @@ constexpr TickType_t kCanTickLockTimeout = pdMS_TO_TICKS(20);
 constexpr TickType_t kLoopLockTimeout = pdMS_TO_TICKS(20);
 
 // --- CENTRAL LOGGING ---
-// The LogSink (include/LogSink.h) every other module's setDebugCallback is
-// wired to: a timestamped line to Serial and, once netReady, the SSE log
-// channel. netLog() below is the varargs entry point everything in this
-// file calls directly; it formats and timestamps, then funnels through
-// here for the actual sinks, same as any other module's callback.
-void netLogLine(const char *line)
+// Serial + SSE only - no timestamp, no SD write. Private: netLog() below is
+// the only caller, once it has formatted and timestamped a line. Nothing
+// else may call this directly, or its line skips the SD .log.
+static void netOut(const char *line)
 {
   Serial.print(line);
   if (netReady)
@@ -117,9 +115,18 @@ void netLog(const char *format, ...)
     snprintf(final_res, sizeof(final_res), "[WAITING FOR NTP...] %s", loc_res);
   }
 
-  netLogLine(final_res);
+  netOut(final_res);
   SDLogger::logEvent(loc_res);
 }
+
+// The LogSink (include/LogSink.h) every other module's setDebugCallback is
+// wired to: routes a pre-formatted line through netLog() itself, so it gets
+// the same timestamp, Serial/SSE and SD .log treatment as a line logged
+// directly via netLog(fmt, ...). SDLogger's own sink is the one exception
+// to watch: its writer task must never call this (see the "No netLog()
+// here" comment in SDLogger.cpp) or logEvent()'s queue send would recurse
+// into the very task draining that queue.
+void netLogLine(const char *line) { netLog("%s", line); }
 
 // SSE telemetry push, serialized with netLog's network sinks (netOutMutex).
 void pushTelemetry(const DashboardData &data)

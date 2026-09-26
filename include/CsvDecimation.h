@@ -55,27 +55,42 @@ namespace CsvDecimation
     // (Timestamp..ReqI).
     constexpr size_t kMaxFields = 16;
 
-    // Returns the idx'th comma-separated field of a (buf, len) line span
-    // (0-based) by appending its bytes to out+*outLen, bounds-checked
-    // against outCap; appends nothing if idx is past the line's last
-    // comma-separated field (matches the pre-refactor csvFieldFromBuf()
-    // returning "" in that case).
-    inline void appendField(const char *lineBuf, size_t lineLen, size_t idx,
-                             char *out, size_t outCap, size_t *outLen)
+    // Finds the [*start, *end) byte range of the idx'th comma-separated
+    // field of a (buf, len) line span (0-based); both are set to lineLen
+    // (an empty field) if idx is past the line's last comma-separated
+    // field (matches the pre-refactor csvFieldFromBuf() returning "" in
+    // that case).
+    inline void fieldSpan(const char *lineBuf, size_t lineLen, size_t idx,
+                           size_t *start, size_t *end)
     {
-        size_t start = 0;
+        size_t s = 0;
         for (size_t i = 0; i < idx; i++)
         {
-            size_t j = start;
+            size_t j = s;
             while (j < lineLen && lineBuf[j] != ',')
                 j++;
             if (j >= lineLen)
-                return; // field idx doesn't exist in this line -> empty, append nothing
-            start = j + 1;
+            {
+                *start = lineLen;
+                *end = lineLen;
+                return;
+            }
+            s = j + 1;
         }
-        size_t end = start;
-        while (end < lineLen && lineBuf[end] != ',')
-            end++;
+        size_t e = s;
+        while (e < lineLen && lineBuf[e] != ',')
+            e++;
+        *start = s;
+        *end = e;
+    }
+
+    // Appends the idx'th field (see fieldSpan()) to out+*outLen,
+    // bounds-checked against outCap.
+    inline void appendField(const char *lineBuf, size_t lineLen, size_t idx,
+                             char *out, size_t outCap, size_t *outLen)
+    {
+        size_t start, end;
+        fieldSpan(lineBuf, lineLen, idx, &start, &end);
         for (size_t k = start; k < end && *outLen < outCap; k++)
             out[(*outLen)++] = lineBuf[k];
     }
@@ -143,18 +158,34 @@ namespace CsvDecimation
         }
 
     private:
+        // Only emits the line if it fits outCap in full (fields + commas +
+        // trailing '\n'); otherwise leaves out/*outLen untouched, so the
+        // output always ends on a complete line rather than a truncated
+        // field (#115).
         void flushCurrentLine(char *out, size_t outCap, size_t *outLen)
         {
             if (!keepLine_ || lineLen_ == 0)
                 return;
+
+            size_t needed = fieldCount_ > 0 ? fieldCount_ - 1 : 0; // commas
             for (size_t f = 0; f < fieldCount_; f++)
             {
-                if (f > 0 && *outLen < outCap)
+                size_t start, end;
+                fieldSpan(lineBuf_, lineLen_, fieldIndices_[f], &start, &end);
+                needed += end - start;
+            }
+            needed += 1; // trailing '\n'
+
+            if (needed > outCap - *outLen)
+                return; // whole line doesn't fit - stop at the previous line boundary
+
+            for (size_t f = 0; f < fieldCount_; f++)
+            {
+                if (f > 0)
                     out[(*outLen)++] = ',';
                 appendField(lineBuf_, lineLen_, fieldIndices_[f], out, outCap, outLen);
             }
-            if (*outLen < outCap)
-                out[(*outLen)++] = '\n';
+            out[(*outLen)++] = '\n';
         }
 
         size_t fieldIndices_[kMaxFields];

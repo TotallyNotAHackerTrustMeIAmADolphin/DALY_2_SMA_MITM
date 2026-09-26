@@ -77,12 +77,6 @@ static void test_header_matches_claude_md(void)
     TEST_ASSERT_EQUAL_STRING(kExpectedHeader, buf);
 }
 
-static void test_header_has_38_fields(void)
-{
-    TEST_ASSERT_EQUAL(38, countFields(kExpectedHeader));
-    TEST_ASSERT_EQUAL(count(), countFields(kExpectedHeader));
-}
-
 // --- index() ---
 
 static void test_index_first_seven_columns(void)
@@ -98,10 +92,11 @@ static void test_index_first_seven_columns(void)
 
 static void test_index_max_cell_raw(void)
 {
-    // Position today: Timestamp(0)+10 base fields(1-10)+16 cells(11-26)+7
-    // MOS/alarm columns(27-33) -> MinCellRaw is 34, MaxCellRaw is 35.
-    TEST_ASSERT_EQUAL(34, index("MinCellRaw"));
-    TEST_ASSERT_EQUAL(35, index("MaxCellRaw"));
+    // Relative to PackOV2 (the last MOS/alarm column), not an absolute
+    // literal: a new column appended after Derate (CLAUDE.md's documented
+    // extension point) must not move these two.
+    TEST_ASSERT_EQUAL(index("PackOV2") + 1, index("MinCellRaw"));
+    TEST_ASSERT_EQUAL(index("MinCellRaw") + 1, index("MaxCellRaw"));
 }
 
 static void test_index_unknown_name(void)
@@ -110,11 +105,6 @@ static void test_index_unknown_name(void)
 }
 
 // --- count() / formatter output count ---
-
-static void test_column_count_is_38(void)
-{
-    TEST_ASSERT_EQUAL(38, count());
-}
 
 static void test_formatter_output_count_matches_columns_minus_timestamp(void)
 {
@@ -192,13 +182,17 @@ static void test_sample_formats_to_known_row(void)
 static void test_missing_cells_are_omitted_not_padded(void)
 {
     DashboardData d = makeSample();
+    size_t totalCells = d.cellVoltages.size(); // 16, all read in makeSample()
     d.cellVoltages.resize(5); // only 5 of 16 cells read so far
+    size_t missingCells = totalCells - d.cellVoltages.size();
 
     char row[480];
     formatRow(d, row, sizeof(row));
 
-    // 10 base fields + 5 cells + 7 MOS/alarm + 4 raw/spread/derate = 26.
-    TEST_ASSERT_EQUAL(26, countFields(row));
+    // count() - 1 excludes Timestamp (formatRow only builds what follows
+    // it); each missing cell omits one field rather than a blank
+    // placeholder, so it comes straight off the total.
+    TEST_ASSERT_EQUAL((int)(count() - 1 - missingCells), countFields(row));
     // The 5th cell (index 4) is 3.300+4*0.010=3.340, immediately followed
     // by ChargeMOS's "1" - no empty placeholders for the missing 11 cells.
     TEST_ASSERT_NOT_NULL(strstr(row, "3.340,1,0,0,0,0,0,0,3.195"));
@@ -221,11 +215,9 @@ int main(int, char **)
 {
     UNITY_BEGIN();
     RUN_TEST(test_header_matches_claude_md);
-    RUN_TEST(test_header_has_38_fields);
     RUN_TEST(test_index_first_seven_columns);
     RUN_TEST(test_index_max_cell_raw);
     RUN_TEST(test_index_unknown_name);
-    RUN_TEST(test_column_count_is_38);
     RUN_TEST(test_formatter_output_count_matches_columns_minus_timestamp);
     RUN_TEST(test_row_field_count_matches_header_field_count);
     RUN_TEST(test_sample_formats_to_known_row);

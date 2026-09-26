@@ -39,10 +39,15 @@ public:
     // include/HealthLog.h. The first call always logs a baseline.
     static void logHealth();
 
+    // True while confirmImageIfReady() can still act on wifiUp/bmsUp:
+    // after kConfirmAfterMs and until the image is confirmed. loop() only
+    // gathers bmsUp (a dataMutex take) while this is true (#75).
+    static bool confirmCheckDue();
+
     // OTA rollback-confirmation safety net - see verifyRollbackLater()
-    // below. Call every loop() iteration with the same wifiUp/bmsUp
-    // predicate main.cpp's loop() always evaluated inline (bmsUp needs
-    // dataMutex, so that part stays in main.cpp). Confirms the image once
+    // below. Call from loop() while confirmCheckDue() with the wifiUp/bmsUp
+    // predicate (bmsUp needs dataMutex, so that part stays in main.cpp).
+    // Confirms the image once
     // both have been true for kConfirmAfterMs of uptime (cancelling the
     // rollback), and otherwise logs a one-shot "not confirmed" warning the
     // first time the image is still pending-verify after that deadline.

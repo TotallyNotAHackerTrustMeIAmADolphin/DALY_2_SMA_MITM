@@ -46,6 +46,15 @@ namespace RollbackConfirm
     // partition still ESP_OTA_IMG_PENDING_VERIFY?", passed in rather than
     // queried here so this stays free of esp_ota_ops.h; the wrapper only
     // needs to compute it when it can affect the outcome (see its comment).
+    // Whether decide() can still act on wifiUp/bmsUp: false before
+    // kConfirmAfterMs (decide() returns early) and forever once confirmed.
+    // Lets the caller skip gathering bmsUp - a dataMutex take - on every
+    // loop() pass for the whole uptime (#75).
+    inline bool needsInputs(const State &state, unsigned long nowMs)
+    {
+        return !state.imageConfirmed && nowMs > kConfirmAfterMs;
+    }
+
     inline Action decide(State &state, bool wifiUp, bool bmsUp,
                           unsigned long nowMs, bool imagePendingVerify)
     {

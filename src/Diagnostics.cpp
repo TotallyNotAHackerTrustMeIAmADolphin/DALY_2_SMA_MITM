@@ -175,9 +175,18 @@ void Diagnostics::logBootDiagnostics()
     }
 }
 
+// File scope (was a function-local static in confirmImageIfReady()) so
+// confirmCheckDue() can read it too.
+static RollbackConfirm::State s_rollbackState;
+
+bool Diagnostics::confirmCheckDue()
+{
+    return RollbackConfirm::needsInputs(s_rollbackState, millis());
+}
+
 void Diagnostics::confirmImageIfReady(bool wifiUp, bool bmsUp)
 {
-    static RollbackConfirm::State st;
+    RollbackConfirm::State &st = s_rollbackState;
 
     // One clock read for both the guard below and decide(): with two reads,
     // the guard could see exactly kConfirmAfterMs (skip the OTA query) and

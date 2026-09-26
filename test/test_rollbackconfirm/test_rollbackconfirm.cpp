@@ -148,6 +148,28 @@ static void test_confirm_still_possible_after_warning_fired(void)
     TEST_ASSERT_TRUE(st.imageConfirmed);
 }
 
+// --- needsInputs(): lets loop() skip the dataMutex take for bmsUp (#75) ---
+
+static void test_needs_inputs_false_until_after_deadline(void)
+{
+    State st;
+    TEST_ASSERT_FALSE(RollbackConfirm::needsInputs(st, 0));
+    TEST_ASSERT_FALSE(RollbackConfirm::needsInputs(st, kConfirmAfterMs));
+    TEST_ASSERT_TRUE(RollbackConfirm::needsInputs(st, kConfirmAfterMs + 1));
+}
+
+static void test_needs_inputs_true_after_warning_false_after_confirm(void)
+{
+    // After the one-shot warning the image can still be confirmed later,
+    // so the inputs are still needed; once confirmed, never again.
+    State st;
+    decide(st, false, false, kConfirmAfterMs + 1000, true);
+    TEST_ASSERT_TRUE(st.unconfirmedWarned);
+    TEST_ASSERT_TRUE(RollbackConfirm::needsInputs(st, kConfirmAfterMs + 2000));
+    decide(st, true, true, kConfirmAfterMs + 3000, false);
+    TEST_ASSERT_FALSE(RollbackConfirm::needsInputs(st, kConfirmAfterMs + 4000));
+}
+
 int main(int, char **)
 {
     UNITY_BEGIN();
@@ -167,6 +189,9 @@ int main(int, char **)
     RUN_TEST(test_not_pending_second_call_is_noop_even_if_now_pending);
 
     RUN_TEST(test_confirm_still_possible_after_warning_fired);
+
+    RUN_TEST(test_needs_inputs_false_until_after_deadline);
+    RUN_TEST(test_needs_inputs_true_after_warning_false_after_confirm);
 
     return UNITY_END();
 }

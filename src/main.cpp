@@ -654,20 +654,27 @@ void loop()
     Diagnostics::logHealth();
   }
 
-  // wifiUp/bmsUp is the same predicate this block always evaluated inline;
-  // bmsUp needs dataMutex, so it's still read here. The millis() gate, the
-  // one-shot "not confirmed" warning and the actual rollback-cancel call
-  // now live in Diagnostics::confirmImageIfReady().
-  bool wifiUp = WiFi.status() == WL_CONNECTED;
-  bool bmsUp = false;
-  if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(20)) == pdTRUE)
+  // OTA rollback confirm (#75): bmsUp needs dataMutex, which canTask
+  // waits on for only 10-20 ms, so it is gathered only while the check can
+  // still act (after 2 min, until confirmed) and then at most once a
+  // second - not on every ~1 ms loop() pass for the whole uptime. The
+  // one-shot "not confirmed" warning and the rollback cancel live in
+  // Diagnostics::confirmImageIfReady().
+  static unsigned long lastConfirmCheck = 0;
+  if (Diagnostics::confirmCheckDue() && millis() - lastConfirmCheck >= 1000)
   {
-    bmsUp = haveBasicInfo && haveCellData;
-    xSemaphoreGive(dataMutex);
+    lastConfirmCheck = millis();
+    bool wifiUp = WiFi.status() == WL_CONNECTED;
+    bool bmsUp = false;
+    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(20)) == pdTRUE)
+    {
+      bmsUp = haveBasicInfo && haveCellData;
+      xSemaphoreGive(dataMutex);
+    }
+    // If the mutex take fails, bmsUp stays false for this pass and the
+    // check is simply retried a second later.
+    Diagnostics::confirmImageIfReady(wifiUp, bmsUp);
   }
-  // If the mutex take fails, bmsUp stays false for this pass and the
-  // check is simply retried next loop() iteration.
-  Diagnostics::confirmImageIfReady(wifiUp, bmsUp);
 
   static unsigned long lastHealth = 0;
   if (millis() - lastHealth > 10UL * 60UL * 1000UL)

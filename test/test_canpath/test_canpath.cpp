@@ -125,13 +125,29 @@ static void test_reset_request_zeroes_dvl_on_the_wire(void)
 
 static void test_manual_maintenance_on_the_wire(void)
 {
-    TEST_ASSERT_TRUE(cfg.cvMaxCharge.set(3.45f)); // normal CVL 55.2 V, not 56.0
+    // cvMaxCharge left at the fixture's 3.5V, so normal CVL (560) equals
+    // kMaintCvlDeciV and the min() cap doesn't bite - see
+    // test_maintenance_cvl_capped_below_normal_on_the_wire for the case
+    // where it does (#60).
     UiCommands ui;
     ui.manualMaintForce = true;
     Limits l = tick(healthyPack(), freshLink(), ui);
     TEST_ASSERT_EQUAL_UINT16(200, l.ccl); // maintAmps 20 A
     TEST_ASSERT_EQUAL_UINT16(0, l.dcl);
     TEST_ASSERT_EQUAL_UINT16(560, l.cvl); // kMaintCvlDeciV
+}
+
+static void test_maintenance_cvl_capped_below_normal_on_the_wire(void)
+{
+    // #60: with cvMaxCharge lowered so normal CVL (55.2 V -> 552) is below
+    // the fixed kMaintCvlDeciV (56.0 V -> 560), maintenance must not ask
+    // for the higher voltage - min(560, 552) = 552 on the wire. This used
+    // to read 560 unconditionally (the bypass this ticket fixes).
+    TEST_ASSERT_TRUE(cfg.cvMaxCharge.set(3.45f));
+    UiCommands ui;
+    ui.manualMaintForce = true;
+    Limits l = tick(healthyPack(), freshLink(), ui);
+    TEST_ASSERT_EQUAL_UINT16(552, l.cvl);
 }
 
 int main(int, char **)
@@ -144,5 +160,6 @@ int main(int, char **)
     RUN_TEST(test_stale_cells_zero_both_on_the_wire);
     RUN_TEST(test_reset_request_zeroes_dvl_on_the_wire);
     RUN_TEST(test_manual_maintenance_on_the_wire);
+    RUN_TEST(test_maintenance_cvl_capped_below_normal_on_the_wire);
     return UNITY_END();
 }

@@ -32,6 +32,36 @@ static void test_ccl_mid_taper(void)
 static void test_ccl_zero_at_hard_max(void) { TEST_ASSERT_EQUAL(0, calculateCCL(cfg, 3.5f, 3.5f, 0, true, false)); }
 static void test_ccl_maintenance_overrides(void) { TEST_ASSERT_EQUAL(200, calculateCCL(cfg, 3.0f, 3.0f, 0, true, true)); }
 
+// --- Maintenance never bypasses the hard cutoff or alarm gate (#60) ---
+
+static void test_ccl_maintenance_zero_at_hard_cutoff(void)
+{
+    // rawMaxV(3.5) >= cvMaxCharge(3.5): 0A even while force charging.
+    TEST_ASSERT_EQUAL(0, calculateCCL(cfg, 3.0f, 3.5f, 0, true, true));
+}
+
+static void test_ccl_maintenance_clamped_to_trickle_at_gate(void)
+{
+    // rawMaxV(3.4) >= cvHighAlarmGate(3.4): min(maintAmps=20, trickleA=5)
+    // = 5A -> 50, not the full 20A maintAmps.
+    TEST_ASSERT_EQUAL(50, calculateCCL(cfg, 3.0f, 3.4f, 0, true, true));
+}
+
+static void test_ccl_maintenance_clamped_to_smaller_maint_amps_at_gate(void)
+{
+    // Same gate, but maintAmps(2) < trickleA(5) this time: min() must pick
+    // the smaller value regardless of which side is smaller.
+    cfg.maintAmps.setUnchecked(2.0f);
+    TEST_ASSERT_EQUAL(20, calculateCCL(cfg, 3.0f, 3.4f, 0, true, true));
+}
+
+static void test_ccl_maintenance_below_gate_unchanged(void)
+{
+    // Below both the cutoff and the gate: maintAmps still passes through
+    // unclamped, same as test_ccl_maintenance_overrides.
+    TEST_ASSERT_EQUAL(200, calculateCCL(cfg, 3.0f, 3.39f, 0, true, true));
+}
+
 // --- DCL taper ---
 
 static void test_dcl_full_above_taper(void) { TEST_ASSERT_EQUAL(2000, calculateDCL(cfg, 3.3f, 3.3f, 0, true, false)); }
@@ -564,6 +594,10 @@ int main(int, char **)
     RUN_TEST(test_ccl_mid_taper);
     RUN_TEST(test_ccl_zero_at_hard_max);
     RUN_TEST(test_ccl_maintenance_overrides);
+    RUN_TEST(test_ccl_maintenance_zero_at_hard_cutoff);
+    RUN_TEST(test_ccl_maintenance_clamped_to_trickle_at_gate);
+    RUN_TEST(test_ccl_maintenance_clamped_to_smaller_maint_amps_at_gate);
+    RUN_TEST(test_ccl_maintenance_below_gate_unchanged);
     RUN_TEST(test_dcl_full_above_taper);
     RUN_TEST(test_dcl_limp_at_alarm_gate);
     RUN_TEST(test_dcl_mid_taper);

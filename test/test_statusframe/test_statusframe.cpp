@@ -371,6 +371,20 @@ static void test_maintenance_cvl_is_fixed_560_not_cvmaxcharge(void)
     TEST_ASSERT_EQUAL(576, d2.values.cvl);
 }
 
+static void test_maintenance_cvl_capped_by_lowered_cvmaxcharge(void)
+{
+    // #60: a lowered cvMaxCharge (here 3.0V x 16 x 10 = 480, below the
+    // fixed 560 maintenance target) must cap the maintenance CVL at the
+    // normal value - maintenance must never ask for a HIGHER pack voltage
+    // than normal operation allows.
+    ControlState ctrl;
+    cfg.cvMaxCharge.setUnchecked(3.0f); // normal CVL = 480
+    Snapshot s = freshSnapshot(1000);
+    s.manualMaintForce = true;
+    Decision d = decide(cfg, s, ctrl);
+    TEST_ASSERT_EQUAL(480, d.values.cvl);
+}
+
 // --- Cell-spread derating ---
 
 static void test_derate_factor_applied_once_ccl_at_spread_midpoint_is_half(void)
@@ -609,6 +623,7 @@ int main(int, char **)
     RUN_TEST(test_manual_force_overrides);
     RUN_TEST(test_maintenance_overrides_cvl_and_current);
     RUN_TEST(test_maintenance_cvl_is_fixed_560_not_cvmaxcharge);
+    RUN_TEST(test_maintenance_cvl_capped_by_lowered_cvmaxcharge);
     RUN_TEST(test_derate_factor_applied_once_ccl_at_spread_midpoint_is_half);
     RUN_TEST(test_derating_started_once_ended_only_after_hysteresis);
     RUN_TEST(test_raw_spike_reaches_ccl_through_decide);

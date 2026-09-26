@@ -127,6 +127,11 @@ namespace Glideslope
     // spreadFactor(), clamped back up to trickleA; never applied to the
     // hard 0A/gate-trickle branches (already gated by the weak cell's own
     // voltage) or in maintenance mode.
+    //
+    // Maintenance overrides only the taper/full-current branch below: the
+    // hard cutoff and alarm gate are checked first and still apply, so a
+    // force charge can never push a cell past cvMaxCharge or above
+    // cvHighAlarmGate at more than trickle (#60).
     inline uint16_t calculateCCL(const SystemConfig &cfg, float smoothedMaxV, float rawMaxV, uint16_t spreadMv, bool bmsFresh, bool maintenanceActive)
     {
         if (!bmsFresh)
@@ -140,13 +145,17 @@ namespace Glideslope
             isnan(cfg.maxChargeA) || isnan(cfg.trickleA) || isnan(cfg.maintAmps))
             return 0;
 
-        if (maintenanceActive)
-            return toDeciAmps(cfg.maintAmps);
-
+        // Maintenance never bypasses the per-cell hard cutoff or alarm gate
+        // (#60): a weak/high cell climbing past cvMaxCharge or
+        // cvHighAlarmGate must still cut to 0A/trickle even while force
+        // charging, so these two checks come before the maintenance branch.
         if (rawMaxV >= cfg.cvMaxCharge)
             return 0;
         if (rawMaxV >= cfg.cvHighAlarmGate)
-            return toDeciAmps(cfg.trickleA);
+            return toDeciAmps(maintenanceActive ? fminf(cfg.maintAmps, cfg.trickleA) : (float)cfg.trickleA);
+
+        if (maintenanceActive)
+            return toDeciAmps(cfg.maintAmps);
 
         float factor = spreadFactor(spreadMv, cfg.spreadStartMv, cfg.spreadMaxMv);
 

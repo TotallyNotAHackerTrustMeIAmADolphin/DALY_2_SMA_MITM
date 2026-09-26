@@ -5,6 +5,7 @@
 #include "esp_core_dump.h"
 #include "rom/rtc.h"
 #include "RollbackConfirm.h"
+#include "HealthLog.h"
 
 DiagDebugCallback Diagnostics::debugCb = nullptr;
 
@@ -62,11 +63,26 @@ const char *Diagnostics::resetReasonName(esp_reset_reason_t r)
 
 void Diagnostics::logHealth()
 {
-    TaskHandle_t bmsTask = xTaskGetHandle("BMS_Task");
-    TaskHandle_t canTask = xTaskGetHandle("CAN_Task");
-    TaskHandle_t asyncTcp = xTaskGetHandle("async_tcp");
-    TaskHandle_t sdTask = xTaskGetHandle("SD_LogTask");
-    TaskHandle_t evt = xTaskGetHandle("arduino_events");
+    // Sampled every 10 minutes from loop(), but only logged when
+    // HealthLog::decide() says something moved (see include/HealthLog.h).
+    static HealthLog::State st;
+
+    const char *names[HealthLog::kNumTasks] = {nullptr, "BMS_Task", "CAN_Task", "SD_LogTask", "async_tcp", "arduino_events"};
+    HealthLog::Sample s;
+    s.freeHeap = ESP.getFreeHeap();
+    s.minFreeHeap = ESP.getMinFreeHeap();
+    s.maxBlock = ESP.getMaxAllocHeap();
+    // On ESP-IDF the stack high-water mark is in bytes. names[kLoop] is
+    // nullptr: uxTaskGetStackHighWaterMark(NULL) is the calling task (loop).
+    for (int i = 0; i < HealthLog::kNumTasks; i++)
+    {
+        TaskHandle_t h = names[i] ? xTaskGetHandle(names[i]) : NULL;
+        s.stackLeft[i] = (names[i] && !h) ? 0u : (uint32_t)uxTaskGetStackHighWaterMark(h);
+    }
+
+    HealthLog::Reason why = HealthLog::decide(st, s, millis());
+    if (why == HealthLog::kNone)
+        return;
 
     char rssi[16];
     if (WiFi.status() == WL_CONNECTED)
@@ -74,15 +90,12 @@ void Diagnostics::logHealth()
     else
         strlcpy(rssi, "n/a", sizeof(rssi));
 
-    // On ESP-IDF the stack high-water mark is in bytes.
-    debugLog("[DIAG] Heap free %u, min %u, max block %u | stack left: loop %u, bms %u, can %u, sd %u, async_tcp %u, events %u | WiFi RSSI %s\n",
-             (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap(), (unsigned)ESP.getMaxAllocHeap(),
-             (unsigned)uxTaskGetStackHighWaterMark(NULL),
-             bmsTask ? (unsigned)uxTaskGetStackHighWaterMark(bmsTask) : 0u,
-             canTask ? (unsigned)uxTaskGetStackHighWaterMark(canTask) : 0u,
-             sdTask ? (unsigned)uxTaskGetStackHighWaterMark(sdTask) : 0u,
-             asyncTcp ? (unsigned)uxTaskGetStackHighWaterMark(asyncTcp) : 0u,
-             evt ? (unsigned)uxTaskGetStackHighWaterMark(evt) : 0u,
+    debugLog("[DIAG] Health (%s): heap free %u, min %u, max block %u | stack left: loop %u, bms %u, can %u, sd %u, async_tcp %u, events %u | WiFi RSSI %s\n",
+             HealthLog::reasonName(why),
+             (unsigned)s.freeHeap, (unsigned)s.minFreeHeap, (unsigned)s.maxBlock,
+             (unsigned)s.stackLeft[HealthLog::kLoop], (unsigned)s.stackLeft[HealthLog::kBms],
+             (unsigned)s.stackLeft[HealthLog::kCan], (unsigned)s.stackLeft[HealthLog::kSd],
+             (unsigned)s.stackLeft[HealthLog::kAsyncTcp], (unsigned)s.stackLeft[HealthLog::kEvents],
              rssi);
 }
 

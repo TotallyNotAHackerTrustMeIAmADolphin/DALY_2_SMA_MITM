@@ -34,7 +34,9 @@ public:
     // RSSI. Looks up every task (including BMS_Task/CAN_Task) by name via
     // xTaskGetHandle, so no task handles need to be passed in. Called once
     // early (as soon as the clock/BMS data settle) and every 10 minutes
-    // after that.
+    // after that, but only LOGS when HealthLog::decide() says something
+    // moved (heap/stack shrank past a threshold) or a day has passed - see
+    // include/HealthLog.h. The first call always logs a baseline.
     static void logHealth();
 
     // OTA rollback-confirmation safety net - see verifyRollbackLater()

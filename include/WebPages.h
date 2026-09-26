@@ -99,11 +99,13 @@ const char index_html[] PROGMEM = R"rawliteral(
     var obj = JSON.parse(e.data);
     document.getElementById('v').innerHTML = obj.v.toFixed(2) + " V";
     document.getElementById('reqI').innerHTML = obj.reqI.toFixed(1) + " A";
-    // maxC/minC are the smoothed (~48s moving average) values; maxCellRaw/
-    // minCellRaw are the latest single BMS read - see #9 (the hard cutoff
-    // and alarm gate act on the raw value, not this smoothed one).
-    document.getElementById('maxCellV').innerHTML = obj.maxC.toFixed(3) + " (raw " + obj.maxCellRaw.toFixed(3) + ")";
-    document.getElementById('minCellV').innerHTML = obj.minC.toFixed(3) + " (raw " + obj.minCellRaw.toFixed(3) + ")";
+    // maxC/minC are the smoothed (~48s moving average) values. The raw
+    // single-read values (maxCellRaw/minCellRaw, which the hard cutoff and
+    // alarm gate act on - #9) stay in the SSE JSON and the CSV (MinCellRaw/
+    // MaxCellRaw) for the Graphs/Logs pages; the dashboard shows smoothed
+    // values only, like the cell grid below.
+    document.getElementById('maxCellV').innerHTML = obj.maxC.toFixed(3) + " V";
+    document.getElementById('minCellV').innerHTML = obj.minC.toFixed(3) + " V";
 
     // Cell spread (#24) - raw max-min cell voltage and the resulting
     // current-limit derating factor (1.0 = no derating).

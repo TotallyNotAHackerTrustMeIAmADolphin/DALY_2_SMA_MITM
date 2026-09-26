@@ -17,6 +17,7 @@
 #include "Diagnostics.h"
 #include "WifiEvents.h"
 #include "MutexLock.h"
+#include "Interval.h"
 
 static_assert(kPackCells <= DalyFrames::kMaxCollectorCells, "DalyRS485 can't collect every cell of the pack");
 
@@ -159,6 +160,14 @@ void handleUIAction(const char *action)
       netLog("[USER] %s ignored: state busy\n", action);
   }
 }
+
+// Periodic work, in ms (Interval fires once more than the period passed).
+constexpr uint32_t kCanRxPeriodMs = 50;          // canTask: bus health + RX drain
+constexpr uint32_t kSmaTxPeriodMs = 250;         // canTask: status frames to the SMA
+constexpr uint32_t kSdTelemetryPeriodMs = 10000; // loop(): one CSV row
+constexpr uint32_t kHealthPeriodMs = 10UL * 60UL * 1000UL;
+constexpr uint32_t kFirstHealthDeadlineMs = 60000; // first health sample even without NTP
+constexpr uint32_t kConfirmCheckPeriodMs = 1000;   // OTA confirm, while it can still act
 
 // --- CORE 0: BMS BACKGROUND TASK ---
 
@@ -500,25 +509,23 @@ static void logDecisionEvents(const StatusFrame::Decision &dec, unsigned long no
 // WiFi/NTP wait (up to ~15s) and isn't held up by OTA handling in loop().
 void canTask(void *pvParameters)
 {
-  unsigned long lastCanCheck = 0;
-  unsigned long lastSmaTx = 0;
+  Interval canRx(kCanRxPeriodMs);
+  Interval smaTx(kSmaTxPeriodMs);
   StatusFrame::ControlState ctrl;
 
   while (true)
   {
     unsigned long now = millis();
 
-    if (now - lastCanCheck > 50)
+    if (canRx.due(now))
     {
-      lastCanCheck = now;
       inverter.checkBusHealth();
       if (MutexLock lock{dataMutex, kCanRxLockTimeout})
         inverter.readMessages(currentData);
     }
 
-    if (now - lastSmaTx > 250)
+    if (smaTx.due(now))
     {
-      lastSmaTx = now;
       StatusFrame::Decision dec;
 
       if (MutexLock lock{dataMutex, kCanTickLockTimeout})
@@ -613,10 +620,12 @@ void loop()
   ArduinoOTA.handle();
   drainWifiEvents();
 
-  static unsigned long lastSdLog = 0;
-  if (millis() - lastSdLog > 10000)
+  static Interval sdTelemetry(kSdTelemetryPeriodMs);
+  static Interval confirmCheck(kConfirmCheckPeriodMs);
+  static Interval health(kHealthPeriodMs);
+
+  if (sdTelemetry.due(millis()))
   {
-    lastSdLog = millis();
     if (MutexLock lock{dataMutex, kLoopLockTimeout})
     {
       // No placeholder rows before the first real BMS data.
@@ -630,7 +639,7 @@ void loop()
   // logged. This just gets one logHealth() sample in once the clock/BMS
   // data settle, ahead of the regular 10-minute cadence below.
   static bool firstHealthDone = false;
-  if (!firstHealthDone && (time(nullptr) > 1000000000L || millis() > 60000))
+  if (!firstHealthDone && (time(nullptr) > 1000000000L || millis() > kFirstHealthDeadlineMs))
   {
     firstHealthDone = true;
     Diagnostics::logHealth();
@@ -642,10 +651,8 @@ void loop()
   // second - not on every ~1 ms loop() pass for the whole uptime. The
   // one-shot "not confirmed" warning and the rollback cancel live in
   // Diagnostics::confirmImageIfReady().
-  static unsigned long lastConfirmCheck = 0;
-  if (Diagnostics::confirmCheckDue() && millis() - lastConfirmCheck >= 1000)
+  if (Diagnostics::confirmCheckDue() && confirmCheck.due(millis()))
   {
-    lastConfirmCheck = millis();
     bool wifiUp = WiFi.status() == WL_CONNECTED;
     bool bmsUp = false;
     if (MutexLock lock{dataMutex, kLoopLockTimeout})
@@ -655,10 +662,8 @@ void loop()
     Diagnostics::confirmImageIfReady(wifiUp, bmsUp);
   }
 
-  static unsigned long lastHealth = 0;
-  if (millis() - lastHealth > 10UL * 60UL * 1000UL)
+  if (health.due(millis()))
   {
-    lastHealth = millis();
     Diagnostics::logHealth();
   }
 

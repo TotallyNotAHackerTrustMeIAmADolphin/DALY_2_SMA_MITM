@@ -176,7 +176,7 @@ const char config_html[] PROGMEM = R"rawliteral(
       <input type="number" name="cag" step="0.001" value="!!VAL_AG!!"></div>
     <div class="row"><div class="text-group"><strong>Trickle Amps</strong><span class="desc">Constant current floor for balancing.</span></div>
       <input type="number" name="ta" step="0.5" value="!!VAL_TA!!"></div>
-    <div class="row"><div class="text-group"><strong>Max Charge Vpc</strong><span class="desc">Absolute cell safety cutoff (Hard Floor).</span></div>
+    <div class="row"><div class="text-group"><strong>Max Charge Vpc</strong><span class="desc">Absolute cell safety cutoff (Hard Floor).</span><span class="hint">ceiling 3.550 (Daly OV 3.65 minus 100 mV margin, #8)</span></div>
       <input type="number" name="cmv" step="0.001" value="!!VAL_MV!!"></div>
 
     <h2 class="winter-h">Winter Force Charge</h2>

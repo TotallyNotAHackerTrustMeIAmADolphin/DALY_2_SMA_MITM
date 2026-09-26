@@ -47,6 +47,35 @@ namespace
         uint8_t decimals; // String(float, decimals) formatting for /config; KIND_INT/KIND_UINT16 ignore this
     };
 
+    // One row per SystemConfig::ValidationResult flag that can be set, each
+    // with a human-readable message naming the offending field(s) (#53).
+    // Shared by saveConfig()'s 400 response (#55) and loadConfig()'s startup
+    // log (#56) so the flag->message mapping only lives in one place; each
+    // caller decides how to emit the lines (concatenated into one HTTP body,
+    // or one netLog call per line).
+    struct ValidationMessage
+    {
+        bool SystemConfig::ValidationResult::*flag;
+        const char *message;
+    };
+
+    const ValidationMessage kValidationMessages[] = {
+        {&SystemConfig::ValidationResult::hasNaN,
+         "A config value is NaN (corrupted NVS?) - check every setting."},
+        {&SystemConfig::ValidationResult::maintStartBelowMinDischarge,
+         "Maint. Start Vpc must be above Min Discharge Vpc (#12)."},
+        {&SystemConfig::ValidationResult::chargeTaperOrderBad,
+         "Charge thresholds must be ordered: Start Taper Vpc < High Alarm Gate Vpc < Max Charge Vpc."},
+        {&SystemConfig::ValidationResult::dischargeTaperOrderBad,
+         "Discharge thresholds must be ordered: Start D-Taper Vpc > Low Alarm Gate Vpc > Min Discharge Vpc."},
+        {&SystemConfig::ValidationResult::maintHysteresisBad,
+         "Maint. Stop Vpc must be above Maint. Start Vpc (#12)."},
+        {&SystemConfig::ValidationResult::chargeHeadroomBad,
+         "Max Charge Vpc must be at most 3.550 V (Daly OV protection 3.65 V minus 100 mV margin, #8)."},
+        {&SystemConfig::ValidationResult::hasNegativeCurrent,
+         "Current setpoints (charge/discharge/trickle/limp/maintenance) must not be negative."},
+    };
+
     const ConfigField kConfigFields[] = {
         // key      kind                       offset                                    defF    defI  placeholder      decimals
         {"ca", ConfigField::KIND_FLOAT, offsetof(SystemConfig, maxChargeA), 250.0f, 0, "!!VAL_CA!!", 0},
@@ -210,6 +239,19 @@ void WebDashboard::loadConfig(SystemConfig &configOut)
     }
 
     _prefs.end();
+
+    // #56: sanity-check whatever just got loaded (defaults or NVS content)
+    // and log it - never blocks boot, just surfaces a corrupted/inconsistent
+    // NVS setpoint set for a human to notice and fix via /config or /save.
+    SystemConfig::ValidationResult validation = SystemConfig::validate(*_cfg);
+    if (!validation.ok())
+    {
+        for (const ValidationMessage &vm : kValidationMessages)
+        {
+            if (validation.*(vm.flag))
+                debugLog("[CFG] Loaded config fails validation: %s\n", vm.message);
+        }
+    }
 }
 
 void WebDashboard::saveConfig(AsyncWebServerRequest *request)
@@ -268,15 +310,20 @@ void WebDashboard::saveConfig(AsyncWebServerRequest *request)
         }
     }
 
-    // #12: the Winter Force Charge trigger (min cell < cvMaintStart) must sit
-    // above the discharge floor (min cell <= cvMinDischarge -> DCL 0 A), or
-    // the grid top-up can only start once discharge is already cut.
-    if (copy.cvMaintStart <= copy.cvMinDischarge)
+    // #53/#55: full sanity check (ordering, hysteresis, NaN, charge headroom
+    // margin, negative current), not just the old single #12 comparison.
+    SystemConfig::ValidationResult validation = SystemConfig::validate(copy);
+    if (!validation.ok())
     {
         xSemaphoreGive(dataMutex);
-        debugLog("[WEB] /save refused: Maint. Start (%.3f V) must be above Min Discharge (%.3f V)\n",
-                 copy.cvMaintStart, copy.cvMinDischarge);
-        request->send(400, "text/plain", "Maint. Start Vpc must be above Min Discharge Vpc - nothing saved");
+        String body;
+        for (const ValidationMessage &vm : kValidationMessages)
+        {
+            if (validation.*(vm.flag))
+                body += String(vm.message) + "\n";
+        }
+        debugLog("[WEB] /save refused: config failed validation:\n%s", body.c_str());
+        request->send(400, "text/plain", body + "Nothing saved.\n");
         return;
     }
     *_cfg = copy;

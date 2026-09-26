@@ -29,6 +29,15 @@ static int countFields(const char *csv)
     return n;
 }
 
+static int countCommas(const char *csv)
+{
+    int n = 0;
+    for (const char *p = csv; *p; p++)
+        if (*p == ',')
+            n++;
+    return n;
+}
+
 // A single populated sample used by several tests below - all 16 cells
 // read, every flag set to a non-default value so a formatter that silently
 // no-ops would be caught by the row-string comparison.
@@ -186,37 +195,56 @@ static void test_sample_formats_to_known_row(void)
     TEST_ASSERT_EQUAL_STRING(kExpectedRow, row);
 }
 
-// --- Missing-cell behavior (matches the pre-refactor cellCount bound) ---
+// --- Missing/blank fields stay in place, never dropped (#66) ---
 
-static void test_missing_cells_are_omitted_not_padded(void)
+static void test_missing_cells_are_blank_not_omitted(void)
 {
     DashboardData d = makeSample();
-    size_t totalCells = d.cellVoltages.size(); // 16, all read in makeSample()
-    d.cellVoltages.resize(5); // only 5 of 16 cells read so far
-    size_t missingCells = totalCells - d.cellVoltages.size();
+    d.cellVoltages.resize(4); // only 4 of 16 cells read so far
 
     char row[480];
-    formatRow(d, row, sizeof(row));
+    int n = formatRow(d, row, sizeof(row));
+    TEST_ASSERT_TRUE(n > 0);
 
-    // count() - 1 excludes Timestamp (formatRow only builds what follows
-    // it); each missing cell omits one field rather than a blank
-    // placeholder, so it comes straight off the total.
-    TEST_ASSERT_EQUAL((int)(count() - 1 - missingCells), countFields(row));
-    // The 5th cell (index 4) is 3.300+4*0.010=3.340, immediately followed
-    // by ChargeMOS's "1" - no empty placeholders for the missing 11 cells.
-    TEST_ASSERT_NOT_NULL(strstr(row, "3.340,1,0,0,0,0,0,0,3.195"));
+    // Every column still gets a field - missing cells are empty, not
+    // dropped - so the row plus a stand-in timestamp has exactly as many
+    // commas as the header (count() - 1), the same check formatRow's other
+    // callers rely on to keep columns aligned under their header.
+    char full[512];
+    snprintf(full, sizeof(full), "2024-01-01 00:00:00,%s", row);
+    TEST_ASSERT_EQUAL(count() - 1, countCommas(full));
+
+    // Cell4 (index 3) is 3.300+3*0.010=3.330, followed by 12 blank fields
+    // for Cell5..Cell16, then ChargeMOS's "1" - no shift in later columns.
+    TEST_ASSERT_NOT_NULL(strstr(row, "3.330,,,,,,,,,,,,,1,0,0,0,0,0,0,3.195"));
+}
+
+static void test_empty_mode_string_stays_a_field(void)
+{
+    DashboardData d = makeSample();
+    d.smaChargeMode = ""; // e.g. before the SMA has reported a mode
+
+    char row[480];
+    int n = formatRow(d, row, sizeof(row));
+    TEST_ASSERT_TRUE(n > 0);
+
+    char full[512];
+    snprintf(full, sizeof(full), "2024-01-01 00:00:00,%s", row);
+    TEST_ASSERT_EQUAL(count() - 1, countCommas(full));
+    TEST_ASSERT_NOT_NULL(strstr(row, "45.0,,1,0,1,")); // ReqI,Mode(blank),ForceCharge,...
 }
 
 // A default-constructed DashboardData (#80) formats deterministically: the
-// pre-BMS state, no cells yet, no derating.
+// pre-BMS state, no cells yet (all 16 Cell columns blank, not omitted -
+// #66), no derating.
 static void test_default_constructed_row(void)
 {
     DashboardData d;
     char row[480];
     TEST_ASSERT_TRUE(formatRow(d, row, sizeof(row)) > 0);
-    TEST_ASSERT_EQUAL_STRING("0.00,0.00,0.0,0.000,0.000,0.0,Unknown,0,0,0,"
-                             "0,0,0,0,0,0,0,"
-                             "0.000,0.000,0,1.00",
+    TEST_ASSERT_EQUAL_STRING("0.00,0.00,0.0,0.000,0.000,0.0,Unknown,0,0,0"
+                             ",,,,,,,,,,,,,,,,,"
+                             "0,0,0,0,0,0,0,0.000,0.000,0,1.00",
                              row);
 }
 
@@ -231,7 +259,8 @@ int main(int, char **)
     RUN_TEST(test_formatter_output_count_matches_columns_minus_timestamp);
     RUN_TEST(test_row_field_count_matches_header_field_count);
     RUN_TEST(test_sample_formats_to_known_row);
-    RUN_TEST(test_missing_cells_are_omitted_not_padded);
+    RUN_TEST(test_missing_cells_are_blank_not_omitted);
+    RUN_TEST(test_empty_mode_string_stays_a_field);
     RUN_TEST(test_default_constructed_row);
     return UNITY_END();
 }

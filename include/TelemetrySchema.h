@@ -26,9 +26,10 @@ namespace TelemetrySchema
     {
         const char *csvName;
         // snprintf-style: returns the number of characters written
-        // (excluding the NUL), or <= 0 to mean "nothing to write, omit this
-        // field from the row entirely" (used only by the CellN family, for
-        // a cell slot that hasn't been read yet this boot).
+        // (excluding the NUL). A CellN slot not yet read this boot (or any
+        // other formatter with nothing to say) returns 0; formatRow() below
+        // still emits the field, empty, so every row has one entry per
+        // header column - never fewer (#66).
         int (*format)(const DashboardData &d, char *buf, size_t len);
     };
 
@@ -140,10 +141,13 @@ namespace TelemetrySchema
 
     // Builds one CSV data row - everything after Timestamp, which the
     // logger prepends itself from the row's write time - by joining every
-    // column's formatted text with commas, in table order, skipping columns
-    // whose formatter reports nothing to write (a CellN slot beyond how
-    // many cells have actually been read this boot). Returns the number of
-    // characters written into buf (excluding the NUL).
+    // column's formatted text with commas, in table order. Every column
+    // gets a field, blank if its formatter had nothing to write (a CellN
+    // slot beyond how many cells have been read this boot, or a real
+    // formatter error): the header lists every column regardless, so
+    // dropping a field here would shift every later one under the wrong
+    // header (#66). Returns the number of characters written into buf
+    // (excluding the NUL).
     inline int formatRow(const DashboardData &d, char *buf, size_t len)
     {
         int written = 0;
@@ -151,11 +155,10 @@ namespace TelemetrySchema
         {
             char field[64];
             int n = kColumns[i].format(d, field, sizeof(field));
-            if (n <= 0)
-                continue;
+            const char *value = n > 0 ? field : "";
             if ((size_t)written >= len)
                 break;
-            int m = snprintf(buf + written, len - (size_t)written, written > 0 ? ",%s" : "%s", field);
+            int m = snprintf(buf + written, len - (size_t)written, i > 1 ? ",%s" : "%s", value);
             if (m < 0)
                 break;
             written += m;

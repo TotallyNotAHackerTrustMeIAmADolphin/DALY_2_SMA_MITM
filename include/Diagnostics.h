@@ -4,6 +4,8 @@
 #include "esp_ota_ops.h"
 #include "CoreDumpInfo.h"
 
+class AsyncWebServer; // registerRoutes() only takes a reference
+
 // Matches netLog()'s own variadic signature, so it can be wired straight to
 // netLog with setDebugCallback(netLog) below, no formatting shim needed.
 typedef void (*DiagDebugCallback)(const char *fmt, ...);
@@ -36,6 +38,10 @@ public:
 
     // The running image's ELF sha256, first 16 hex chars.
     static void runningElfSha(char (&out)[17]);
+
+    // Registers the two coredump routes; order matters, see the comment
+    // beside the registrations in Diagnostics.cpp.
+    static void registerRoutes(AsyncWebServer &server);
 
     // Heap free/min/max-block, per-task stack high-water marks (tasks
     // looked up by name via xTaskGetHandle) and WiFi RSSI. Called early and

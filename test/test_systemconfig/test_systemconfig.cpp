@@ -8,7 +8,10 @@
 #include <string>
 #include <type_traits>
 #include "SystemConfig.h"
+#include "SettingFormat.h"
 #include "WebPages.h"
+
+using ParseResult = SettingBase::ParseResult;
 
 using ValidationResult = SystemConfig::ValidationResult;
 
@@ -233,7 +236,7 @@ static void test_parse_rejects_garbage_and_leaves_value_alone(void)
     for (const char *in : bad)
     {
         SystemConfig cfg;
-        TEST_ASSERT_EQUAL_MESSAGE(PARSE_NOT_A_NUMBER, cfg.maxChargeA.parse(in), in);
+        TEST_ASSERT_EQUAL_MESSAGE(ParseResult::NotANumber, cfg.maxChargeA.parse(in), in);
         TEST_ASSERT_EQUAL_FLOAT((float)cfg.maxChargeA.def(), cfg.maxChargeA);
     }
 }
@@ -241,39 +244,39 @@ static void test_parse_rejects_garbage_and_leaves_value_alone(void)
 static void test_parse_accepts_numbers_with_spaces(void)
 {
     SystemConfig cfg;
-    TEST_ASSERT_EQUAL(PARSE_OK, cfg.maxChargeA.parse(" 252.5 "));
+    TEST_ASSERT_EQUAL(ParseResult::Ok, cfg.maxChargeA.parse(" 252.5 "));
     TEST_ASSERT_EQUAL_FLOAT(252.5f, cfg.maxChargeA);
-    TEST_ASSERT_EQUAL(PARSE_OK, cfg.spreadStartMv.parse("61"));
+    TEST_ASSERT_EQUAL(ParseResult::Ok, cfg.spreadStartMv.parse("61"));
     TEST_ASSERT_EQUAL(61, (int)cfg.spreadStartMv);
-    TEST_ASSERT_EQUAL(PARSE_OK, cfg.cvMaxCharge.parse("3.550"));
+    TEST_ASSERT_EQUAL(ParseResult::Ok, cfg.cvMaxCharge.parse("3.550"));
     TEST_ASSERT_EQUAL_FLOAT(3.55f, cfg.cvMaxCharge);
 }
 
 static void test_parse_never_wraps(void)
 {
     SystemConfig cfg;
-    TEST_ASSERT_EQUAL(PARSE_OUT_OF_RANGE, cfg.spreadStartMv.parse("-60"));
-    TEST_ASSERT_EQUAL(PARSE_OUT_OF_RANGE, cfg.spreadStartMv.parse("65596")); // would truncate to 60
-    TEST_ASSERT_EQUAL(PARSE_OUT_OF_RANGE, cfg.spreadStartMv.parse("99999999999999999999"));
+    TEST_ASSERT_EQUAL(ParseResult::OutOfRange, cfg.spreadStartMv.parse("-60"));
+    TEST_ASSERT_EQUAL(ParseResult::OutOfRange, cfg.spreadStartMv.parse("65596")); // would truncate to 60
+    TEST_ASSERT_EQUAL(ParseResult::OutOfRange, cfg.spreadStartMv.parse("99999999999999999999"));
     TEST_ASSERT_EQUAL((int)cfg.spreadStartMv.def(), (int)cfg.spreadStartMv);
-    TEST_ASSERT_EQUAL(PARSE_OUT_OF_RANGE, cfg.bmsTimeout.parse("-1"));
+    TEST_ASSERT_EQUAL(ParseResult::OutOfRange, cfg.bmsTimeout.parse("-1"));
     TEST_ASSERT_EQUAL((int)cfg.bmsTimeout.def(), (int)cfg.bmsTimeout);
 }
 
 static void test_parse_integer_setting_rejects_fraction(void)
 {
     SystemConfig cfg;
-    TEST_ASSERT_EQUAL(PARSE_NOT_A_NUMBER, cfg.vSamples.parse("12.5"));
+    TEST_ASSERT_EQUAL(ParseResult::NotANumber, cfg.vSamples.parse("12.5"));
     TEST_ASSERT_EQUAL((int)cfg.vSamples.def(), (int)cfg.vSamples);
 }
 
 static void test_parse_range_and_nonfinite(void)
 {
     SystemConfig cfg;
-    TEST_ASSERT_EQUAL(PARSE_OUT_OF_RANGE, cfg.cvMaxCharge.parse("3.5505"));
-    TEST_ASSERT_EQUAL(PARSE_OUT_OF_RANGE, cfg.cvMaxCharge.parse("3.5501"));
-    TEST_ASSERT_EQUAL(PARSE_OUT_OF_RANGE, cfg.cvMaxCharge.parse("nan"));
-    TEST_ASSERT_EQUAL(PARSE_OUT_OF_RANGE, cfg.cvMaxCharge.parse("1e39"));
+    TEST_ASSERT_EQUAL(ParseResult::OutOfRange, cfg.cvMaxCharge.parse("3.5505"));
+    TEST_ASSERT_EQUAL(ParseResult::OutOfRange, cfg.cvMaxCharge.parse("3.5501"));
+    TEST_ASSERT_EQUAL(ParseResult::OutOfRange, cfg.cvMaxCharge.parse("nan"));
+    TEST_ASSERT_EQUAL(ParseResult::OutOfRange, cfg.cvMaxCharge.parse("1e39"));
     TEST_ASSERT_EQUAL_FLOAT((float)cfg.cvMaxCharge.def(), cfg.cvMaxCharge);
 }
 
@@ -394,49 +397,8 @@ static void test_changed_mask_refused_set_leaves_mask_zero(void)
     TEST_ASSERT_EQUAL(0u, SystemConfig::changedMask(a, b));
 }
 
-// --- formatSettingValue(): the post-save change-log formatter ---
-
-static void test_format_setting_value_float_precision(void)
-{
-    SystemConfig cfg;
-    char buf[24];
-
-    formatSettingValue(cfg.maxChargeA, 250.0, buf, sizeof(buf));
-    TEST_ASSERT_EQUAL_STRING("250", buf);
-
-    formatSettingValue(cfg.maxChargeA, 252.5, buf, sizeof(buf));
-    TEST_ASSERT_EQUAL_STRING("252.5", buf);
-
-    formatSettingValue(cfg.maxChargeA, 252.0625, buf, sizeof(buf));
-    TEST_ASSERT_EQUAL_STRING("252.0625", buf);
-
-    formatSettingValue(cfg.trickleA, (double)2.0004f, buf, sizeof(buf));
-    TEST_ASSERT_EQUAL_STRING("2.0004", buf);
-
-    formatSettingValue(cfg.cvMaxCharge, (double)3.55f, buf, sizeof(buf));
-    TEST_ASSERT_EQUAL_STRING("3.55", buf);
-
-    formatSettingValue(cfg.cvMaxCharge, (double)3.425f, buf, sizeof(buf));
-    TEST_ASSERT_EQUAL_STRING("3.425", buf);
-
-    formatSettingValue(cfg.maxChargeA, 0.0, buf, sizeof(buf));
-    TEST_ASSERT_EQUAL_STRING("0", buf);
-
-    formatSettingValue(cfg.maxChargeA, 1000.0, buf, sizeof(buf));
-    TEST_ASSERT_EQUAL_STRING("1000", buf);
-
-    formatSettingValue(cfg.trickleA, (double)0.001f, buf, sizeof(buf));
-    TEST_ASSERT_EQUAL_STRING("0.001", buf);
-}
-
-static void test_format_setting_value_integer_kind(void)
-{
-    SystemConfig cfg;
-    char buf[24];
-
-    formatSettingValue(cfg.bmsTimeout, 60.0, buf, sizeof(buf));
-    TEST_ASSERT_EQUAL_STRING("60", buf);
-}
+// --- changedMask() + formatSettingValue(): a real change never logs as
+// "X -> X" (the pure formatter itself is tested in test_settingformat) ---
 
 static void test_changed_mask_same_stored_float_is_not_a_change(void)
 {
@@ -504,51 +466,6 @@ static void test_changed_mask_reviewer_example_3_55_vs_3_5500002(void)
     assertDistinctChange(a.cvMaxCharge, b.cvMaxCharge, "3.55", "3.5500002");
 }
 
-// A dummy SettingBase-shaped stand-in isn't needed: reuse a real float
-// setting (maxChargeA, range wide enough to hold every sweep start/value
-// used below) purely for its KIND_FLOAT tag - formatSettingValue() never
-// looks at its range or current value, only s.kind() and the v passed in.
-static void sweepRange(const SettingBase &floatSetting, float start, int steps)
-{
-    float v = start;
-    char prevBuf[24];
-    formatSettingValue(floatSetting, (double)v, prevBuf, sizeof(prevBuf));
-    TEST_ASSERT_TRUE_MESSAGE(v == (float)strtod(prevBuf, nullptr), prevBuf);
-
-    for (int i = 0; i < steps; i++)
-    {
-        float next = nextafterf(v, INFINITY);
-        TEST_ASSERT_TRUE(next != v);
-
-        char nextBuf[24];
-        formatSettingValue(floatSetting, (double)next, nextBuf, sizeof(nextBuf));
-
-        // Each string parses back to exactly its own float (an exact
-        // compare, not TEST_ASSERT_EQUAL_FLOAT - Unity's float assert
-        // allows a relative tolerance, which would let a formatter that's
-        // off by a ULP pass) ...
-        TEST_ASSERT_TRUE_MESSAGE(next == (float)strtod(nextBuf, nullptr), nextBuf);
-        // ... and adjacent floats never print identically (the whole point
-        // of this fix: a real, distinguishable change must always log as
-        // two different numbers).
-        TEST_ASSERT_TRUE_MESSAGE(strcmp(prevBuf, nextBuf) != 0, nextBuf);
-
-        v = next;
-        strcpy(prevBuf, nextBuf);
-    }
-}
-
-static void test_format_setting_value_sweep_adjacent_floats_always_differ(void)
-{
-    SystemConfig cfg;
-    // Ranges chosen to stay within maxChargeA's [0, 1000] the whole sweep
-    // (2000 consecutive floats moves the value by only a handful of ULPs).
-    sweepRange(cfg.maxChargeA, 2.5f, 2000);
-    sweepRange(cfg.maxChargeA, 3.4f, 2000);
-    sweepRange(cfg.maxChargeA, 250.0f, 2000);
-    sweepRange(cfg.maxChargeA, 999.0f, 2000);
-}
-
 int main(int, char **)
 {
     UNITY_BEGIN();
@@ -577,12 +494,9 @@ int main(int, char **)
     RUN_TEST(test_changed_mask_one_setting_sets_only_its_bit);
     RUN_TEST(test_changed_mask_two_settings_both_bits);
     RUN_TEST(test_changed_mask_refused_set_leaves_mask_zero);
-    RUN_TEST(test_format_setting_value_float_precision);
-    RUN_TEST(test_format_setting_value_integer_kind);
     RUN_TEST(test_changed_mask_same_stored_float_is_not_a_change);
     RUN_TEST(test_changed_mask_tiny_real_change_is_a_change);
     RUN_TEST(test_changed_mask_reviewer_example_500_vs_500_00003);
     RUN_TEST(test_changed_mask_reviewer_example_3_55_vs_3_5500002);
-    RUN_TEST(test_format_setting_value_sweep_adjacent_floats_always_differ);
     return UNITY_END();
 }

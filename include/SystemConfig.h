@@ -1,18 +1,10 @@
 #pragma once
 #include <array>
 #include <errno.h>
-#include <float.h>
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
-
-// Fallback for toolchains whose <float.h> lacks this C99/C++11 addition.
-#ifndef FLT_DECIMAL_DIG
-#define FLT_DECIMAL_DIG 9
-#endif
 
 // The Daly BMS's own cell overvoltage protection on this pack (#8, confirmed
 // by the operator) - cvMaxCharge must stay below this with real margin, since
@@ -37,13 +29,6 @@ constexpr int kMaxVSamples = 20;
 // the factor from per-cell limits to the pack CVL/DVL sent to the SMA.
 constexpr int kPackCells = 16;
 
-enum ParseResult
-{
-    PARSE_OK,
-    PARSE_NOT_A_NUMBER,
-    PARSE_OUT_OF_RANGE
-};
-
 // What NVS, /save and the /config page need from a setting, whatever its
 // value type: its name, and its value and limits as numbers. Setting<T>
 // below is the real thing; this base only lets SystemConfig::all() hand
@@ -58,6 +43,15 @@ public:
         KIND_FLOAT,
         KIND_INT,
         KIND_UINT16
+    };
+
+    // parse()'s outcome. Scoped so it can't collide with an unrelated OK/
+    // NotANumber elsewhere - callers write SettingBase::ParseResult::Ok etc.
+    enum class ParseResult
+    {
+        Ok,
+        NotANumber,
+        OutOfRange
     };
 
     const char *key() const { return key_; } // NVS key and /save field name - never rename (NVS)
@@ -84,27 +78,27 @@ public:
 
     // Parses a /save form value and set()s it. The whole string (spaces
     // around it aside) must be a number - an integer for an integer
-    // setting - else PARSE_NOT_A_NUMBER; a number set() refuses is
-    // PARSE_OUT_OF_RANGE. The value is only changed on PARSE_OK.
+    // setting - else NotANumber; a number set() refuses is OutOfRange. The
+    // value is only changed on Ok.
     ParseResult parse(const char *text)
     {
         while (*text == ' ')
             text++;
         if (*text == '\0')
-            return PARSE_NOT_A_NUMBER;
+            return ParseResult::NotANumber;
         char *end = nullptr;
         errno = 0;
         double v = kind_ == KIND_FLOAT ? strtod(text, &end) : (double)strtol(text, &end, 10);
         bool overflow = errno == ERANGE;
         if (end == text)
-            return PARSE_NOT_A_NUMBER;
+            return ParseResult::NotANumber;
         while (*end == ' ')
             end++;
         if (*end != '\0')
-            return PARSE_NOT_A_NUMBER;
+            return ParseResult::NotANumber;
         if (overflow || !set(v))
-            return PARSE_OUT_OF_RANGE;
-        return PARSE_OK;
+            return ParseResult::OutOfRange;
+        return ParseResult::Ok;
     }
 
 protected:
@@ -120,49 +114,6 @@ private:
     uint8_t decimals_;
     Kind kind_;
 };
-
-// Formats v (one of s's own value/min/max/def) at full round-trip precision
-// for the post-save "[CFG] <label>: <old> -> <new> <unit>" change log -
-// deliberately NOT the setting's display decimals, which would round a
-// tiny real change to print as unchanged. An integer kind prints as a
-// plain integer.
-//
-// A float kind prints the shortest FIXED-FORM (non-exponent) %g precision
-// that round-trips v's binary32 value exactly, up to FLT_DECIMAL_DIG (9)
-// significant digits. %g switches to exponential form once its decimal
-// exponent reaches the precision, so a whole number like 250 round-trips
-// exactly in exponential form ("2.5e+02") before precision is high enough
-// for %g to print it fixed - the search below keeps going past the first
-// round-trip while the candidate is exponential, and only falls back to
-// that first round-trip if no fixed-form one exists by precision 9 (a
-// value small enough that %g's exponent-form rule is unavoidable, e.g.
-// 0.00005 -> "5e-05"). Pure, snprintf-based, always NUL-terminated; 24
-// bytes holds every output this function produces.
-inline void formatSettingValue(const SettingBase &s, double v, char *out, size_t outSize)
-{
-    if (s.kind() != SettingBase::KIND_FLOAT)
-    {
-        snprintf(out, outSize, "%ld", (long)v);
-        return;
-    }
-    float target = (float)v;
-    char firstRoundTrip[24] = "";
-    for (int precision = 1; precision <= FLT_DECIMAL_DIG; precision++)
-    {
-        char candidate[24];
-        snprintf(candidate, sizeof(candidate), "%.*g", precision, v);
-        if ((float)strtod(candidate, nullptr) != target)
-            continue;
-        if (firstRoundTrip[0] == '\0')
-            snprintf(firstRoundTrip, sizeof(firstRoundTrip), "%s", candidate);
-        if (strchr(candidate, 'e') == nullptr && strchr(candidate, 'E') == nullptr)
-        {
-            snprintf(out, outSize, "%s", candidate);
-            return;
-        }
-    }
-    snprintf(out, outSize, "%s", firstRoundTrip);
-}
 
 template <typename T>
 struct SettingKind;
@@ -321,10 +272,27 @@ struct SystemConfig
             return !maintStartBelowMinDischarge && !chargeTaperOrderBad && !dischargeTaperOrderBad &&
                    !maintHysteresisBad;
         }
+
+        // Calls emit(message) once per violated flag above, in one place so
+        // a load-time [CFG] log line and a /save 400 response can't drift
+        // apart. message is a string literal, valid for the program's
+        // lifetime.
+        template <typename Emit>
+        void forEachMessage(Emit emit) const
+        {
+            if (maintStartBelowMinDischarge)
+                emit("Maint. Start Vpc must be above Min Discharge Vpc (#12).");
+            if (chargeTaperOrderBad)
+                emit("Charge thresholds must be ordered: Start Taper Vpc < Target Trickle Vpc < Max Charge Vpc.");
+            if (dischargeTaperOrderBad)
+                emit("Discharge thresholds must be ordered: Start Taper Vpc (D) > Target Limp Vpc > Min Discharge Vpc.");
+            if (maintHysteresisBad)
+                emit("Maint. Stop Vpc must be above Maint. Start Vpc (#12).");
+        }
     };
 
     // Pure, tested in test/test_systemconfig/. saveConfig() refuses a
-    // failing result; loadConfig() logs it.
+    // failing result; ConfigStore::load() logs it.
     static ValidationResult validate(const SystemConfig &cfg)
     {
         ValidationResult r;

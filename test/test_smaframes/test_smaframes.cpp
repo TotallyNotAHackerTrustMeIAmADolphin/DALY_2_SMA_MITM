@@ -217,15 +217,18 @@ static void test_decode_0x305_mode_equalize(void)
     TEST_ASSERT_EQUAL_STRING("Equalize", update.chargeMode);
 }
 
-static void test_decode_0x305_mode_unrecognized_byte_falls_back_to_equalize(void)
+static void test_decode_0x305_mode_unrecognized_byte_is_unknown(void)
 {
-    // The pre-#45 ternary chain's final else is a catch-all: any byte other
-    // than 1/2/3 (4 included) decodes as "Equalize". Preserved as-is - #45
-    // is a structural extraction, not a protocol fix.
-    uint8_t data[8] = {99, 0, 0, 0, 0, 0, 0, 0};
-    RxUpdate update;
-    TEST_ASSERT_TRUE(SMAFrames::decodeFrame(0x305, data, 8, update));
-    TEST_ASSERT_EQUAL_STRING("Equalize", update.chargeMode);
+    // #104: anything but 1-4 used to fall through to "Equalize", so a 0 or
+    // garbage byte showed as an equalize charge on the dashboard.
+    const uint8_t modes[] = {0, 5, 99, 0xFF};
+    for (uint8_t m : modes)
+    {
+        uint8_t data[8] = {m, 0, 0, 0, 0, 0, 0, 0};
+        RxUpdate update;
+        TEST_ASSERT_TRUE(SMAFrames::decodeFrame(0x305, data, 8, update));
+        TEST_ASSERT_EQUAL_STRING("Unknown", update.chargeMode);
+    }
 }
 
 static void test_decode_0x305_zero_dlc_ignored(void)
@@ -310,7 +313,7 @@ int main(int, char **)
     RUN_TEST(test_decode_0x305_mode_absorption);
     RUN_TEST(test_decode_0x305_mode_float);
     RUN_TEST(test_decode_0x305_mode_equalize);
-    RUN_TEST(test_decode_0x305_mode_unrecognized_byte_falls_back_to_equalize);
+    RUN_TEST(test_decode_0x305_mode_unrecognized_byte_is_unknown);
     RUN_TEST(test_decode_0x305_zero_dlc_ignored);
     RUN_TEST(test_decode_0x300_grid_present_true);
     RUN_TEST(test_decode_0x300_grid_present_false);

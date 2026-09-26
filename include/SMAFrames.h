@@ -14,6 +14,29 @@
 
 namespace SMAFrames
 {
+    // CAN identifiers (11-bit). TX: what the bridge reports as the BMS;
+    // RX: what the Sunny Island broadcasts.
+    namespace CanId
+    {
+        constexpr uint32_t kLimits = 0x351;       // CVL, CCL, DCL, DVL
+        constexpr uint32_t kSoc = 0x355;          // SOC, SOH
+        constexpr uint32_t kMeasurements = 0x356; // pack V, I, temp
+        constexpr uint32_t kFlags = 0x359;        // maintenance flag byte
+        constexpr uint32_t kBmsName = 0x35E;      // "SMA" ASCII id
+        constexpr uint32_t kBmsInfo = 0x35F;      // manufacturer data
+        constexpr uint32_t kInverterGrid = 0x300; // byte0 bit0: grid present
+        constexpr uint32_t kInverterMode = 0x305; // byte0: charge mode
+    }
+
+    // SOC reported while maintenance is active instead of the real one, so
+    // the Sunny Island treats the pack as empty and charges it.
+    constexpr uint16_t kMaintSocSentinel = 2;
+    constexpr uint16_t kSohPercent = 100;        // 0x355 bytes 2-3, fixed
+    constexpr uint8_t kMaintFlag = 0x10;         // 0x359 byte 0
+    // 0x35E/0x35F go out on every kHeartbeatEvery-th encodeStatus() call.
+    constexpr uint8_t kHeartbeatEvery = 11;
+    constexpr unsigned long kBusRecoveryBackoffMs = 1000;
+
     // Mirrors SMA_CAN.h's SMATxData field-for-field. SMA_CAN.h aliases its
     // own SMATxData to this one (`using SMATxData = SMAFrames::SMATxData;`)
     // so existing callers (main.cpp) are unchanged - same pattern as
@@ -44,7 +67,7 @@ namespace SMAFrames
 
     // encodeStatus() emits at most 6 frames per call: the 4 status frames
     // (0x351/0x355/0x356/0x359) every call, plus the 0x35E/0x35F heartbeat
-    // pair on every 11th call (see the ticker handling below).
+    // pair on every kHeartbeatEvery-th call.
     struct TxFrameSet
     {
         static constexpr int kMaxFrames = 6;
@@ -72,15 +95,15 @@ namespace SMAFrames
     // snapshot, byte-for-byte identical to the pre-#45 sendStatus():
     //   0x351 (8B): CVL/CCL/DCL/DVL (x10, little-endian). DVL is 0 while
     //               isResetting - see the comment at the DVL bytes.
-    //   0x355 (4B): SOC (x1; maintenance sends the outSOC=2 sentinel
-    //               instead of the real SOC) + "SOC high" = 100.
+    //   0x355 (4B): SOC (x1; maintenance sends kMaintSocSentinel instead
+    //               of the real SOC) + SOH = 100.
     //   0x356 (6B): pack voltage (x100), pack current (x10), pack temp -
     //               all little-endian.
-    //   0x359 (8B): all zero except bit4 of byte0 when maintenanceActive.
+    //   0x359 (8B): all zero except kMaintFlag in byte 0 when
+    //               maintenanceActive.
     // tickerIn/tickerOut thread the caller's _ticker35E counter through:
-    // on the 11th call (tickerIn+1 > 10) the counter resets to 0 and the
-    // 0x35E ("SMA" ASCII id) / 0x35F (manufacturer data) frames are added;
-    // every other call just increments it.
+    // when it reaches kHeartbeatEvery it resets to 0 and the 0x35E/0x35F
+    // frames are added; every other call just increments it.
     inline TxFrameSet encodeStatus(const SMATxData &data, uint8_t tickerIn, uint8_t &tickerOut)
     {
         TxFrameSet out;
@@ -101,14 +124,14 @@ namespace SMAFrames
         uint16_t dvl = data.isResetting ? 0 : data.dvl;
         frame[6] = dvl & 0xFF;
         frame[7] = (dvl >> 8) & 0xFF;
-        out.add(0x351, 8, frame);
+        out.add(CanId::kLimits, 8, frame);
 
-        uint16_t outSOC = data.maintenanceActive ? 2 : (uint16_t)std::round(data.packSOC);
+        uint16_t outSOC = data.maintenanceActive ? kMaintSocSentinel : (uint16_t)std::round(data.packSOC);
         frame[0] = outSOC & 0xFF;
         frame[1] = (outSOC >> 8) & 0xFF;
-        frame[2] = 100;
-        frame[3] = 0;
-        out.add(0x355, 4, frame);
+        frame[2] = kSohPercent & 0xFF;
+        frame[3] = (kSohPercent >> 8) & 0xFF;
+        out.add(CanId::kSoc, 4, frame);
 
         uint16_t v_out = (uint16_t)std::round(data.packVoltage * 100.0f);
         int16_t i_out = (int16_t)std::round(data.packCurrent * 10.0f);
@@ -118,21 +141,23 @@ namespace SMAFrames
         frame[3] = (i_out >> 8) & 0xFF;
         frame[4] = data.packTemp & 0xFF;
         frame[5] = (data.packTemp >> 8) & 0xFF;
-        out.add(0x356, 6, frame);
+        out.add(CanId::kMeasurements, 6, frame);
 
         uint8_t frame359[8] = {0, 0, 0, 0, 0, 0, 0, 0};
         if (data.maintenanceActive)
-            frame359[0] |= 0x10;
-        out.add(0x359, 8, frame359);
+            frame359[0] |= kMaintFlag;
+        out.add(CanId::kFlags, 8, frame359);
 
         tickerOut = (uint8_t)(tickerIn + 1);
-        if (tickerOut > 10)
+        if (tickerOut >= kHeartbeatEvery)
         {
             tickerOut = 0;
             uint8_t smaId[8] = {'S', 0, 'M', 0, 'A', 0, 0, 0};
-            out.add(0x35E, 8, smaId);
+            out.add(CanId::kBmsName, 8, smaId);
+            // Opaque manufacturer/battery-info bytes, sent verbatim; their
+            // meaning isn't documented here.
             uint8_t mfg[8] = {3, 0, 0, 0, 0x48, 0x03, 0, 0};
-            out.add(0x35F, 8, mfg);
+            out.add(CanId::kBmsInfo, 8, mfg);
         }
 
         return out;
@@ -155,27 +180,40 @@ namespace SMAFrames
     // (id/dlc matched a known frame); false leaves out untouched by the
     // caller's contract (out is reset to defaults on every call regardless).
     //   0x305 byte0: SMA charge-mode byte -> 1=Bulk, 2=Absorption, 3=Float,
-    //                anything else (4 included) -> "Equalize" - this is the
-    //                pre-#45 mapping's actual behaviour (a 3-way ternary
-    //                chain whose final else is the catch-all), preserved
-    //                as-is since this ticket is a structural extraction
-    //                only, not a protocol fix.
+    //                4=Equalize, anything else "Unknown" (#104: it used to
+    //                fall through to "Equalize", so 0 or garbage showed as
+    //                an equalize charge on the dashboard).
     //   0x300 byte0 bit0: grid-present flag.
+    inline const char *chargeModeName(uint8_t mode)
+    {
+        switch (mode)
+        {
+        case 1:
+            return "Bulk";
+        case 2:
+            return "Absorption";
+        case 3:
+            return "Float";
+        case 4:
+            return "Equalize";
+        default:
+            return "Unknown";
+        }
+    }
+
     inline bool decodeFrame(uint32_t id, const uint8_t *data, uint8_t dlc, RxUpdate &out)
     {
         out = RxUpdate{};
         bool decoded = false;
 
-        if (id == 0x305 && dlc > 0)
+        if (id == CanId::kInverterMode && dlc > 0)
         {
             uint8_t m = data[0];
             out.hasChargeMode = true;
-            out.chargeMode = (m == 1) ? "Bulk" : (m == 2) ? "Absorption"
-                                              : (m == 3)   ? "Float"
-                                                           : "Equalize";
+            out.chargeMode = chargeModeName(m);
             decoded = true;
         }
-        if (id == 0x300 && dlc > 0)
+        if (id == CanId::kInverterGrid && dlc > 0)
         {
             out.hasGridPresent = true;
             out.gridPresent = (data[0] & 0x01) != 0;
@@ -187,8 +225,7 @@ namespace SMAFrames
 
     // Bus-off recovery retry decision (checkBusHealth()'s _wasBusOff /
     // _recoveryTimer logic): retries only once wasBusOff is true and more
-    // than 1000ms (strictly greater than, matching the pre-#45
-    // `millis() - _recoveryTimer > 1000`) have elapsed since recoveryTimer
+    // than kBusRecoveryBackoffMs (strictly greater than) have elapsed since recoveryTimer
     // was last set. nowMillis/recoveryTimer are raw millis() values - an
     // unsigned subtraction, so a millis() wraparound (~49 days uptime)
     // behaves the same as it did before this extraction.
@@ -196,6 +233,6 @@ namespace SMAFrames
     {
         if (!wasBusOff)
             return false;
-        return (nowMillis - recoveryTimer) > 1000;
+        return (nowMillis - recoveryTimer) > kBusRecoveryBackoffMs;
     }
 }

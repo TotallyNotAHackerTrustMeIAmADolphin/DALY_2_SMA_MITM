@@ -1,6 +1,7 @@
 #pragma once
 #include <Arduino.h>
 #include <vector>
+#include <atomic>
 #include "SystemState.h"
 
 // Matches DalyRS485/SMA_CAN's existing setDebugCallback pattern, so SD
@@ -185,6 +186,17 @@ public:
     // whenever the shared_ptr's last reference happens to be destroyed.
     static DownloadLease beginDownload(const String &fileName, String &outPath);
 
+    // Snapshot of the writer's drop/failure counters, for
+    // Diagnostics::logHealth() (via HealthLog::decide()) - otherwise a
+    // full queue, a lock timeout or a failed SD write vanish silently.
+    struct Stats
+    {
+        uint32_t droppedQueueFull;
+        uint32_t droppedLockTimeout;
+        uint32_t writeFailures;
+    };
+    static Stats stats();
+
 private:
     static void loggingTask(void *parameter);
     static String currentLogPath(const char *extension);
@@ -199,5 +211,11 @@ private:
     static bool initialized;
     static QueueHandle_t logQueue;
     static SemaphoreHandle_t sdMutex_;
+
+    // Backing counters for stats(); relaxed is enough since no other
+    // memory access needs to be ordered against them.
+    static std::atomic<uint32_t> droppedQueueFull_;
+    static std::atomic<uint32_t> droppedLockTimeout_;
+    static std::atomic<uint32_t> writeFailures_;
     static SDDebugCallback debugCb;
 };

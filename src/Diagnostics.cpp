@@ -6,6 +6,7 @@
 #include "rom/rtc.h"
 #include "RollbackConfirm.h"
 #include "HealthLog.h"
+#include "SDLogger.h"
 
 DiagDebugCallback Diagnostics::debugCb = nullptr;
 
@@ -83,6 +84,11 @@ void Diagnostics::logHealth()
         s.stackLeft[i] = h ? (uint32_t)uxTaskGetStackHighWaterMark(h) : HealthLog::kNoTask;
     }
 
+    SDLogger::Stats sdStats = SDLogger::stats();
+    s.sdDroppedQueueFull = sdStats.droppedQueueFull;
+    s.sdDroppedLockTimeout = sdStats.droppedLockTimeout;
+    s.sdWriteFailures = sdStats.writeFailures;
+
     HealthLog::Decision d = HealthLog::decide(st, s, millis());
     if (d.reason == HealthLog::kNone)
         return;
@@ -108,11 +114,11 @@ void Diagnostics::logHealth()
     else
         strlcpy(why, HealthLog::reasonName(d.reason), sizeof(why));
 
-    debugLog("[DIAG] Health (%s): heap free %u, min %u, max block %u | stack left: loop %s, bms %s, can %s, sd %s, async_tcp %s, events %s | WiFi RSSI %s\n",
+    debugLog("[DIAG] Health (%s): heap free %u, min %u, max block %u | stack left: loop %s, bms %s, can %s, sd %s, async_tcp %s, events %s | WiFi RSSI %s | SD drops: queue %u, lock %u, write %u\n",
              why, (unsigned)s.freeHeap, (unsigned)s.minFreeHeap, (unsigned)s.maxBlock,
              stacks[HealthLog::kLoop], stacks[HealthLog::kBms], stacks[HealthLog::kCan],
              stacks[HealthLog::kSd], stacks[HealthLog::kAsyncTcp], stacks[HealthLog::kEvents],
-             rssi);
+             rssi, (unsigned)s.sdDroppedQueueFull, (unsigned)s.sdDroppedLockTimeout, (unsigned)s.sdWriteFailures);
 }
 
 // Why did we (re)boot, and what does the last stored core dump say? Called

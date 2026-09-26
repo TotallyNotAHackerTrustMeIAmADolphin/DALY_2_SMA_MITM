@@ -15,6 +15,9 @@ bool SDLogger::initialized = false;
 QueueHandle_t SDLogger::logQueue = NULL;
 SemaphoreHandle_t SDLogger::sdMutex_ = NULL;
 SDDebugCallback SDLogger::debugCb = nullptr;
+std::atomic<uint32_t> SDLogger::droppedQueueFull_{0};
+std::atomic<uint32_t> SDLogger::droppedLockTimeout_{0};
+std::atomic<uint32_t> SDLogger::writeFailures_{0};
 
 namespace
 {
@@ -233,6 +236,15 @@ String SDLogger::pathFor(const String &bareName)
     return "/" + bareName;
 }
 
+SDLogger::Stats SDLogger::stats()
+{
+    return {
+        droppedQueueFull_.load(std::memory_order_relaxed),
+        droppedLockTimeout_.load(std::memory_order_relaxed),
+        writeFailures_.load(std::memory_order_relaxed),
+    };
+}
+
 void SDLogger::logTelemetry(const DashboardData &data)
 {
     if (!initialized)
@@ -246,10 +258,10 @@ void SDLogger::logTelemetry(const DashboardData &data)
     // reproduces the pre-refactor row byte for byte (see its own comment).
     TelemetrySchema::formatRow(data, msg.data, sizeof(msg.data));
 
-    // Queue is sized generously for the ~1 sample/10s telemetry rate; if a
-    // write is genuinely stuck (e.g. card removed mid-session) we drop the
-    // sample rather than block the caller.
-    xQueueSend(logQueue, &msg, 0);
+    // Never blocks the caller; a stuck queue (e.g. card removed) drops the
+    // sample instead, counted via stats().
+    if (xQueueSend(logQueue, &msg, 0) != pdTRUE)
+        droppedQueueFull_.fetch_add(1, std::memory_order_relaxed);
 }
 
 void SDLogger::logEvent(const char *msg_text)
@@ -262,7 +274,8 @@ void SDLogger::logEvent(const char *msg_text)
     strncpy(msg.data, msg_text, sizeof(msg.data) - 1);
     msg.data[sizeof(msg.data) - 1] = '\0';
 
-    xQueueSend(logQueue, &msg, 0);
+    if (xQueueSend(logQueue, &msg, 0) != pdTRUE)
+        droppedQueueFull_.fetch_add(1, std::memory_order_relaxed);
 }
 
 String SDLogger::currentLogPath(const char *extension)
@@ -295,7 +308,10 @@ void SDLogger::writeCSVHeaderIfMissing(const String &path)
 
     File file = SD.open(path, FILE_WRITE);
     if (!file)
+    {
+        writeFailures_.fetch_add(1, std::memory_order_relaxed);
         return;
+    }
 
     // Column names/order come from TelemetrySchema::kColumns (#32), the
     // same table logTelemetry() formats each row from - this reproduces
@@ -331,7 +347,11 @@ void SDLogger::loggingTask(void *parameter)
         }
 
         if (xSemaphoreTake(sdMutex_, pdMS_TO_TICKS(SdTuning::kWriterLockTimeoutMs)) != pdTRUE)
-            continue; // a reader is hogging the bus; drop this line rather than stall forever
+        {
+            // No netLog() here: that would recurse back through logEvent().
+            droppedLockTimeout_.fetch_add(1, std::memory_order_relaxed);
+            continue;
+        }
 
         if (msg.type == MsgType::Telemetry)
         {
@@ -343,6 +363,10 @@ void SDLogger::loggingTask(void *parameter)
                 file.printf("%s,%s\n", timeStr, msg.data);
                 file.close();
             }
+            else
+            {
+                writeFailures_.fetch_add(1, std::memory_order_relaxed);
+            }
         }
         else if (msg.type == MsgType::Event)
         {
@@ -351,6 +375,10 @@ void SDLogger::loggingTask(void *parameter)
             {
                 file.printf("[%s] %s", timeStr, msg.data);
                 file.close();
+            }
+            else
+            {
+                writeFailures_.fetch_add(1, std::memory_order_relaxed);
             }
         }
 

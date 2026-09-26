@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <array>
 #include <cmath>
 #include <WiFi.h>
 #include <ArduinoOTA.h>
@@ -257,8 +258,8 @@ static void pollBasicInfo(BmsPollState &st)
 
 static void pollCells(BmsPollState &st)
 {
-  std::vector<float> cellVolts;
-  if (!bms.readCellVoltages(kPackCells, cellVolts))
+  std::array<uint16_t, kPackCells> cellMv;
+  if (!bms.readCellVoltages(kPackCells, cellMv.data()))
     return;
 
   if (MutexLock lock{dataMutex, kBmsCfgReadLockTimeout})
@@ -266,7 +267,7 @@ static void pollCells(BmsPollState &st)
 
   // Moving average with reseed-on-window-change (CellSmoother.h, which also
   // clamps the window to its buffer).
-  CellSmoother::Result r = cellSmoother.update(cellVolts.data(), (int)cellVolts.size(), st.vSamples);
+  CellSmoother::Result r = cellSmoother.update(cellMv.data(), (int)cellMv.size(), st.vSamples);
   if (r.reseeded)
     netLog("[BMS] Cell filter seeded from current reading (window %d samples)\n", st.vSamples);
 

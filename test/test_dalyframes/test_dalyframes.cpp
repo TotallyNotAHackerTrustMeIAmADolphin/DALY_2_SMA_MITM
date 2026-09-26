@@ -230,13 +230,15 @@ static void test_parse_alarm_status_every_named_bit_sets_rawbyte_and_any(void)
     }
 }
 
-// --- cellVoltagesPlausible ---
+// --- cellVoltagesPlausible (#70: operates on mV directly, the Daly's own
+// unit and CellFrameCollector::mv()'s - no float NaN/negative case is
+// reachable any more, since a uint16_t can't hold either) ---
 
 static void test_cell_voltages_plausible_all_good(void)
 {
-    float cells[16];
+    uint16_t cells[16];
     for (int i = 0; i < 16; i++)
-        cells[i] = 3.30f;
+        cells[i] = 3300;
     int badIndex = -99;
     TEST_ASSERT_TRUE(DalyFrames::cellVoltagesPlausible(cells, 16, badIndex));
     TEST_ASSERT_EQUAL_INT(-1, badIndex);
@@ -244,10 +246,10 @@ static void test_cell_voltages_plausible_all_good(void)
 
 static void test_cell_voltages_plausible_low_cell_fails_with_index(void)
 {
-    float cells[16];
+    uint16_t cells[16];
     for (int i = 0; i < 16; i++)
-        cells[i] = 3.30f;
-    cells[5] = 1.4f; // below kCellMinPlausibleMv (1.5V)
+        cells[i] = 3300;
+    cells[5] = 1400; // below kCellMinPlausibleMv (1500)
     int badIndex = -99;
     TEST_ASSERT_FALSE(DalyFrames::cellVoltagesPlausible(cells, 16, badIndex));
     TEST_ASSERT_EQUAL_INT(5, badIndex);
@@ -255,43 +257,21 @@ static void test_cell_voltages_plausible_low_cell_fails_with_index(void)
 
 static void test_cell_voltages_plausible_high_cell_fails_with_index(void)
 {
-    float cells[16];
+    uint16_t cells[16];
     for (int i = 0; i < 16; i++)
-        cells[i] = 3.30f;
-    cells[11] = 4.6f; // above kCellMaxPlausibleMv (4.5V)
+        cells[i] = 3300;
+    cells[11] = 4600; // above kCellMaxPlausibleMv (4500)
     int badIndex = -99;
     TEST_ASSERT_FALSE(DalyFrames::cellVoltagesPlausible(cells, 16, badIndex));
     TEST_ASSERT_EQUAL_INT(11, badIndex);
 }
 
-static void test_cell_voltages_plausible_nan_rejected(void)
-{
-    float cells[16];
-    for (int i = 0; i < 16; i++)
-        cells[i] = 3.30f;
-    cells[3] = NAN;
-    int badIndex = -99;
-    TEST_ASSERT_FALSE(DalyFrames::cellVoltagesPlausible(cells, 16, badIndex));
-    TEST_ASSERT_EQUAL_INT(3, badIndex);
-}
-
-static void test_cell_voltages_plausible_negative_rejected(void)
-{
-    float cells[16];
-    for (int i = 0; i < 16; i++)
-        cells[i] = 3.30f;
-    cells[7] = -1.0f;
-    int badIndex = -99;
-    TEST_ASSERT_FALSE(DalyFrames::cellVoltagesPlausible(cells, 16, badIndex));
-    TEST_ASSERT_EQUAL_INT(7, badIndex);
-}
-
 static void test_cell_voltages_plausible_huge_rejected(void)
 {
-    float cells[16];
+    uint16_t cells[16];
     for (int i = 0; i < 16; i++)
-        cells[i] = 3.30f;
-    cells[9] = 70.0f;
+        cells[i] = 3300;
+    cells[9] = 60000;
     int badIndex = -99;
     TEST_ASSERT_FALSE(DalyFrames::cellVoltagesPlausible(cells, 16, badIndex));
     TEST_ASSERT_EQUAL_INT(9, badIndex);
@@ -299,11 +279,11 @@ static void test_cell_voltages_plausible_huge_rejected(void)
 
 static void test_cell_voltages_plausible_exact_bounds_accepted(void)
 {
-    float cells[16];
+    uint16_t cells[16];
     for (int i = 0; i < 16; i++)
-        cells[i] = 3.30f;
-    cells[0] = 1.5f;
-    cells[1] = 4.5f;
+        cells[i] = 3300;
+    cells[0] = 1500;
+    cells[1] = 4500;
     int badIndex = -99;
     TEST_ASSERT_TRUE(DalyFrames::cellVoltagesPlausible(cells, 16, badIndex));
     TEST_ASSERT_EQUAL_INT(-1, badIndex);
@@ -719,8 +699,6 @@ int main(int, char **)
     RUN_TEST(test_cell_voltages_plausible_all_good);
     RUN_TEST(test_cell_voltages_plausible_low_cell_fails_with_index);
     RUN_TEST(test_cell_voltages_plausible_high_cell_fails_with_index);
-    RUN_TEST(test_cell_voltages_plausible_nan_rejected);
-    RUN_TEST(test_cell_voltages_plausible_negative_rejected);
     RUN_TEST(test_cell_voltages_plausible_huge_rejected);
     RUN_TEST(test_cell_voltages_plausible_exact_bounds_accepted);
     RUN_TEST(test_frame_assembler_clean_frame);

@@ -1,6 +1,5 @@
 #pragma once
 #include <Arduino.h>
-#include <vector>
 #include "DalyFrames.h"
 #include "LogSink.h"
 
@@ -21,7 +20,9 @@ public:
     void setDebugCallback(LogSink cb);
 
     bool readBasicInfo(DalyBasicInfo &info);
-    bool readCellVoltages(uint8_t expectedCells, std::vector<float> &cellVoltages);
+    // cellMv must have at least expectedCells entries; filled in millivolts
+    // on success, zeroed on a plausibility-gate rejection.
+    bool readCellVoltages(uint8_t expectedCells, uint16_t *cellMv);
     bool readMosfetStatus(DalyMosfetStatus &status);
     bool readAlarmStatus(DalyAlarmStatus &status);
 

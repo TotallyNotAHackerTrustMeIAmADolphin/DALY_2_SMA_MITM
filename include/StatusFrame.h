@@ -8,6 +8,7 @@
 
 #include <stdint.h>
 #include <math.h>
+#include <algorithm>
 #include "SystemConfig.h"
 #include "Glideslope.h"
 #include "SMAFrames.h"
@@ -202,9 +203,9 @@ namespace StatusFrame
 
             v.ccl = Glideslope::calculateCCL(cfg, s.maxCellSmoothedV, s.maxCellRawV, s.cellSpreadMv, fresh, maintenanceActive);
             v.dcl = Glideslope::calculateDCL(cfg, s.minCellSmoothedV, s.minCellRawV, s.cellSpreadMv, fresh, maintenanceActive);
-            // Maintenance forces the fixed absorption target; otherwise the
-            // configured per-cell limits x cell count.
-            v.cvl = maintenanceActive ? kMaintCvlDeciV : Glideslope::toDeciVolts(cfg.cvMaxCharge * kPackCells);
+            // Maintenance: fixed absorption target, never above the normal CVL (#60).
+            uint16_t normalCvl = Glideslope::toDeciVolts(cfg.cvMaxCharge * kPackCells);
+            v.cvl = maintenanceActive ? std::min(kMaintCvlDeciV, normalCvl) : normalCvl;
             v.dvl = Glideslope::toDeciVolts(cfg.cvMinDischarge * kPackCells);
             return v;
         }

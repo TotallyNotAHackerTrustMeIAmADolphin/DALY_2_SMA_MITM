@@ -367,14 +367,12 @@ namespace DalyFrames
     // Plausibility gate for a set of cell voltages (see kCellMinPlausibleMv/
     // kCellMaxPlausibleMv above). Returns false on the first cell outside
     // the envelope and reports its index via badIndex (-1 when every cell
-    // passes). Compares directly in volts, not a rounded uint16_t mv count,
-    // so a NaN input fails every comparison and is rejected rather than
-    // hitting undefined behaviour in a float-to-integer cast.
-    inline bool cellVoltagesPlausible(const float *v, int n, int &badIndex)
+    // passes). Compares directly in millivolts.
+    inline bool cellVoltagesPlausible(const uint16_t *mv, int n, int &badIndex)
     {
         for (int i = 0; i < n; i++)
         {
-            if (!(v[i] >= kCellMinPlausibleMv / 1000.0f && v[i] <= kCellMaxPlausibleMv / 1000.0f))
+            if (mv[i] < kCellMinPlausibleMv || mv[i] > kCellMaxPlausibleMv)
             {
                 badIndex = i;
                 return false;

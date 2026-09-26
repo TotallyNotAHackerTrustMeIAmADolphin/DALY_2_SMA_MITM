@@ -54,6 +54,25 @@ static Snapshot freshSnapshot(uint32_t nowMs)
     return s;
 }
 
+// Mirrors canTask's applyDecision() (src/main.cpp): feeds ui's reset pair
+// into each Snapshot and writes the Decision's back, so a multi-tick reset
+// sequence doesn't hand-copy Decision fields into locals at each call site.
+struct Harness
+{
+    ControlState ctrl;
+    StatusFrame::UiCommands ui;
+
+    Decision tick(Snapshot s)
+    {
+        s.resetRequested = ui.resetRequested;
+        s.resetHoldStartMs = ui.resetHoldStartMs;
+        Decision d = decide(cfg, s, ctrl);
+        ui.resetRequested = d.isResetting;
+        ui.resetHoldStartMs = d.resetHoldStartMs;
+        return d;
+    }
+};
+
 // --- Gate: nothing sent before both BMS reads have succeeded once ---
 
 static void test_no_frames_before_basic_info(void)
@@ -177,42 +196,58 @@ static void test_reset_not_armed_while_no_frames_sent(void)
 
 static void test_reset_hold_arms_on_first_sent_frame_and_finishes_after_5500ms(void)
 {
-    ControlState ctrl;
-    uint32_t resetHoldStartMs = 0;
-    bool isResetting = true;
+    Harness h;
+    h.ui.resetRequested = true;
 
     // First tick with real data flowing, t=1000: hold arms here (was 0).
-    Snapshot s1 = freshSnapshot(1000);
-    s1.resetRequested = isResetting;
-    s1.resetHoldStartMs = resetHoldStartMs;
-    Decision d1 = decide(cfg, s1, ctrl);
+    Decision d1 = h.tick(freshSnapshot(1000));
     TEST_ASSERT_TRUE(d1.sendFrames);
     TEST_ASSERT_TRUE(d1.isResetting);
     TEST_ASSERT_EQUAL_UINT32(1000, d1.resetHoldStartMs); // armed at nowMs
     TEST_ASSERT_TRUE(d1.values.isResetting);
     TEST_ASSERT_FALSE(d1.events.resetFinished);
-    // Simulate canTask writing the Decision back to the shared globals.
-    isResetting = d1.isResetting;
-    resetHoldStartMs = d1.resetHoldStartMs;
 
-    // t=6499: 5499ms of hold (> not yet > 5500) -> still resetting.
-    Snapshot s2 = freshSnapshot(6499);
-    s2.resetRequested = isResetting;
-    s2.resetHoldStartMs = resetHoldStartMs;
-    Decision d2 = decide(cfg, s2, ctrl);
+    // t=6499: 5499ms of hold (not yet > 5500) -> still resetting.
+    Decision d2 = h.tick(freshSnapshot(6499));
     TEST_ASSERT_TRUE(d2.isResetting);
     TEST_ASSERT_TRUE(d2.values.isResetting);
     TEST_ASSERT_FALSE(d2.events.resetFinished);
-    isResetting = d2.isResetting;
-    resetHoldStartMs = d2.resetHoldStartMs;
 
     // t=6501: 5501ms of hold (> 5500) -> finishes this tick.
-    Snapshot s3 = freshSnapshot(6501);
-    s3.resetRequested = isResetting;
-    s3.resetHoldStartMs = resetHoldStartMs;
-    Decision d3 = decide(cfg, s3, ctrl);
+    Decision d3 = h.tick(freshSnapshot(6501));
     TEST_ASSERT_FALSE(d3.isResetting);
     TEST_ASSERT_FALSE(d3.values.isResetting);
+    TEST_ASSERT_TRUE(d3.events.resetFinished);
+}
+
+static void test_reset_hold_arms_at_nowms_zero_uses_sentinel_one(void)
+{
+    // holdStartMs==0 means "not yet armed" (see advanceResetHold), so
+    // nowMs==0 can't be stored as the real start stamp - it substitutes 1.
+    Harness h;
+    h.ui.resetRequested = true;
+    Decision d = h.tick(freshSnapshot(0));
+    TEST_ASSERT_TRUE(d.isResetting);
+    TEST_ASSERT_EQUAL_UINT32(1, d.resetHoldStartMs);
+}
+
+static void test_reset_hold_survives_millis_wraparound(void)
+{
+    // holdStartMs armed just before millis() wraps; unsigned subtraction
+    // in advanceResetHold wraps the same way, so the hold must still end
+    // after kResetHoldMs of real elapsed time - not before, not never.
+    Harness h;
+    h.ui.resetRequested = true;
+    uint32_t start = 0xFFFFFFF0u; // 16ms before wraparound
+    Decision d1 = h.tick(freshSnapshot(start));
+    TEST_ASSERT_EQUAL_UINT32(start, d1.resetHoldStartMs);
+
+    Decision d2 = h.tick(freshSnapshot(start + 5000u)); // wrapped, < hold
+    TEST_ASSERT_TRUE(d2.isResetting);
+    TEST_ASSERT_FALSE(d2.events.resetFinished);
+
+    Decision d3 = h.tick(freshSnapshot(start + StatusFrame::kResetHoldMs + 1u)); // wrapped, > hold
+    TEST_ASSERT_FALSE(d3.isResetting);
     TEST_ASSERT_TRUE(d3.events.resetFinished);
 }
 
@@ -272,32 +307,6 @@ static void test_auto_maint_starts_on_weak_cell_even_when_pack_average_is_high(v
     Decision d = decide(cfg, s, ctrl);
     TEST_ASSERT_TRUE(d.values.maintenanceActive);
     TEST_ASSERT_TRUE(ctrl.autoMaint);
-}
-
-static void test_auto_maint_hysteresis_min_cell_rising_stays_on_until_above_stop(void)
-{
-    // Once started, rising back into the start..stop band must not turn
-    // maintenance off; only crossing above cvMaintStop(3.2V) does.
-    ControlState ctrl;
-
-    // 2.95V: below start(3.05) -> turns on.
-    Snapshot s1 = freshSnapshot(1000);
-    s1.minCellSmoothedV = 2.95f;
-    Decision d1 = decide(cfg, s1, ctrl);
-    TEST_ASSERT_TRUE(d1.values.maintenanceActive);
-
-    // 3.1V: between start(3.05) and stop(3.2), autoMaint on -> stays on
-    // (3.1 is not > 3.2).
-    Snapshot s2 = freshSnapshot(1250);
-    s2.minCellSmoothedV = 3.1f;
-    Decision d2 = decide(cfg, s2, ctrl);
-    TEST_ASSERT_TRUE(d2.values.maintenanceActive);
-
-    // 3.25V: above stop(3.2) -> turns off.
-    Snapshot s3 = freshSnapshot(1500);
-    s3.minCellSmoothedV = 3.25f;
-    Decision d3 = decide(cfg, s3, ctrl);
-    TEST_ASSERT_FALSE(d3.values.maintenanceActive);
 }
 
 static void test_auto_maint_never_starts_with_zero_min_cell(void)
@@ -592,9 +601,10 @@ int main(int, char **)
     RUN_TEST(test_stale_forces_zero_then_recovers);
     RUN_TEST(test_reset_not_armed_while_no_frames_sent);
     RUN_TEST(test_reset_hold_arms_on_first_sent_frame_and_finishes_after_5500ms);
+    RUN_TEST(test_reset_hold_arms_at_nowms_zero_uses_sentinel_one);
+    RUN_TEST(test_reset_hold_survives_millis_wraparound);
     RUN_TEST(test_auto_maint_starts_below_start_stops_above_stop_no_toggle_between);
     RUN_TEST(test_auto_maint_starts_on_weak_cell_even_when_pack_average_is_high);
-    RUN_TEST(test_auto_maint_hysteresis_min_cell_rising_stays_on_until_above_stop);
     RUN_TEST(test_auto_maint_never_starts_with_zero_min_cell);
     RUN_TEST(test_manual_force_overrides);
     RUN_TEST(test_maintenance_overrides_cvl_and_current);

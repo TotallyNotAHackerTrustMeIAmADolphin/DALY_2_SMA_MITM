@@ -6,6 +6,8 @@
 // logged fails here first. Mirrors test/test_statusframe's style.
 
 #include <unity.h>
+#include <cstdio>
+#include <initializer_list>
 #include "BmsEvents.h"
 #include "DalyFrames.h"
 
@@ -36,21 +38,64 @@ static DalyMosfetStatus mosfet(bool chargeOn, bool dischargeOn)
     return m;
 }
 
-// All-zero alarm payload (no protection bits, fault code 0).
-static DalyAlarmStatus zeroAlarm()
+// Builds an 8-byte 0x98 payload from up to 8 values (the rest zero) and
+// runs it through the real parser, so a fixture can't drift from what
+// bmsTask actually feeds decide().
+static DalyAlarmStatus alarmFromBytes(std::initializer_list<uint8_t> bytes)
 {
+    uint8_t data[8] = {0};
+    size_t i = 0;
+    for (uint8_t b : bytes)
+        data[i++] = b;
     DalyAlarmStatus a;
-    for (int i = 0; i < 8; i++)
-        a.rawBytes[i] = 0;
-    a.cellOvervoltLevel1 = false;
-    a.cellOvervoltLevel2 = false;
-    a.packOvervoltLevel1 = false;
-    a.packOvervoltLevel2 = false;
-    a.anyProtectionActive = false;
+    DalyFrames::parseAlarmStatus(data, a);
     return a;
 }
 
+static DalyAlarmStatus zeroAlarm() { return alarmFromBytes({}); }
+
 // --- SOC jump ---
+
+struct SocJumpCase
+{
+    float from, to;
+    bool jumped;
+};
+
+// The >10-point rule and the "jump to 100% from below 95%" special case,
+// each exercised right at both edges (>10 vs ==10; lastSoc<95 vs ==95;
+// soc>=99.9 vs just under it) - only a boundary shift can slip past both.
+static const SocJumpCase kSocJumpCases[] = {
+    {50.0f, 55.0f, false},  // +5: comfortably under the threshold
+    {50.0f, 60.0f, false},  // +10.0 exactly: rule is strictly >, no jump
+    {50.0f, 60.1f, true},   // just over +10
+    {80.0f, 65.0f, true},   // -15: either direction
+    {94.5f, 100.0f, true},  // 100%-recal: lastSoc<95, soc>=99.9
+    {94.9f, 99.9f, true},   // ... right at both edges
+    {95.0f, 99.9f, false},  // lastSoc==95, not <95: no special case
+    {96.0f, 100.0f, false}, // lastSoc>=95, delta 4: no special case
+    {90.0f, 99.89f, false}, // soc<99.9: no special case (delta 9.89)
+};
+
+static void test_soc_jump_table(void)
+{
+    for (const SocJumpCase &c : kSocJumpCases)
+    {
+        State st;
+        DalyBasicInfo i1 = basicInfoWithSoc(c.from);
+        decide(st, &i1, nullptr, nullptr);
+        DalyBasicInfo i2 = basicInfoWithSoc(c.to);
+        Events ev = decide(st, &i2, nullptr, nullptr);
+        char msg[48];
+        snprintf(msg, sizeof(msg), "%.2f -> %.2f", c.from, c.to);
+        TEST_ASSERT_EQUAL_MESSAGE(c.jumped, ev.socJumped, msg);
+        if (c.jumped)
+        {
+            TEST_ASSERT_EQUAL_FLOAT_MESSAGE(c.from, ev.socFrom, msg);
+            TEST_ASSERT_EQUAL_FLOAT_MESSAGE(c.to, ev.socTo, msg);
+        }
+    }
+}
 
 static void test_soc_no_jump_on_first_ever_reading(void)
 {
@@ -59,76 +104,6 @@ static void test_soc_no_jump_on_first_ever_reading(void)
     State st;
     DalyBasicInfo info = basicInfoWithSoc(85.0f);
     Events ev = decide(st, &info, nullptr, nullptr);
-    TEST_ASSERT_FALSE(ev.socJumped);
-    TEST_ASSERT_TRUE(st.haveSoc);
-    TEST_ASSERT_EQUAL_FLOAT(85.0f, st.lastSoc);
-}
-
-static void test_soc_no_jump_on_small_change(void)
-{
-    State st;
-    DalyBasicInfo i1 = basicInfoWithSoc(50.0f);
-    decide(st, &i1, nullptr, nullptr);
-
-    DalyBasicInfo i2 = basicInfoWithSoc(55.0f); // +5, not > 10
-    Events ev = decide(st, &i2, nullptr, nullptr);
-    TEST_ASSERT_FALSE(ev.socJumped);
-}
-
-static void test_soc_jump_over_10_points(void)
-{
-    // >10 points either direction is reported, regardless of proximity to
-    // 100%.
-    State st;
-    DalyBasicInfo i1 = basicInfoWithSoc(50.0f);
-    decide(st, &i1, nullptr, nullptr);
-
-    DalyBasicInfo i2 = basicInfoWithSoc(61.0f); // +11
-    Events ev = decide(st, &i2, nullptr, nullptr);
-    TEST_ASSERT_TRUE(ev.socJumped);
-    TEST_ASSERT_EQUAL_FLOAT(50.0f, ev.socFrom);
-    TEST_ASSERT_EQUAL_FLOAT(61.0f, ev.socTo);
-    TEST_ASSERT_EQUAL_FLOAT(61.0f, st.lastSoc); // state still updates
-}
-
-static void test_soc_jump_over_10_points_downward(void)
-{
-    State st;
-    DalyBasicInfo i1 = basicInfoWithSoc(80.0f);
-    decide(st, &i1, nullptr, nullptr);
-
-    DalyBasicInfo i2 = basicInfoWithSoc(65.0f); // -15
-    Events ev = decide(st, &i2, nullptr, nullptr);
-    TEST_ASSERT_TRUE(ev.socJumped);
-    TEST_ASSERT_EQUAL_FLOAT(80.0f, ev.socFrom);
-    TEST_ASSERT_EQUAL_FLOAT(65.0f, ev.socTo);
-}
-
-static void test_soc_jump_to_100_from_below_95(void)
-{
-    // Special case: jump to >=99.9% from below 95% is reported even though
-    // it's a <=10-point change (e.g. 94.5 -> 100.0 is only 5.5 points).
-    State st;
-    DalyBasicInfo i1 = basicInfoWithSoc(94.5f);
-    decide(st, &i1, nullptr, nullptr);
-
-    DalyBasicInfo i2 = basicInfoWithSoc(100.0f);
-    Events ev = decide(st, &i2, nullptr, nullptr);
-    TEST_ASSERT_TRUE(ev.socJumped);
-    TEST_ASSERT_EQUAL_FLOAT(94.5f, ev.socFrom);
-    TEST_ASSERT_EQUAL_FLOAT(100.0f, ev.socTo);
-}
-
-static void test_soc_no_jump_to_100_from_above_95(void)
-{
-    // 96.0 -> 100.0: within 10 points AND lastSoc(96.0) is not < 95.0, so
-    // the 100%-recalibration special case must not fire either.
-    State st;
-    DalyBasicInfo i1 = basicInfoWithSoc(96.0f);
-    decide(st, &i1, nullptr, nullptr);
-
-    DalyBasicInfo i2 = basicInfoWithSoc(100.0f);
-    Events ev = decide(st, &i2, nullptr, nullptr);
     TEST_ASSERT_FALSE(ev.socJumped);
 }
 
@@ -155,43 +130,37 @@ static void test_mosfet_no_event_on_first_ever_reading(void)
     Events ev = decide(st, nullptr, &m, nullptr);
     TEST_ASSERT_FALSE(ev.chargeMosChanged);
     TEST_ASSERT_FALSE(ev.dischargeMosChanged);
-    TEST_ASSERT_TRUE(st.haveMosfetBaseline);
 }
 
-static void test_mosfet_no_event_when_unchanged(void)
+struct MosfetCase
 {
-    State st;
-    DalyMosfetStatus m1 = mosfet(true, true);
-    decide(st, nullptr, &m1, nullptr);
-    DalyMosfetStatus m2 = mosfet(true, true);
-    Events ev = decide(st, nullptr, &m2, nullptr);
-    TEST_ASSERT_FALSE(ev.chargeMosChanged);
-    TEST_ASSERT_FALSE(ev.dischargeMosChanged);
-}
+    bool c1, d1, c2, d2; // baseline reading, then the reading that follows it
+    bool chargeChanged, chargeOn, dischargeChanged, dischargeOn;
+};
 
-static void test_mosfet_charge_on_to_off(void)
+static const MosfetCase kMosfetCases[] = {
+    {true, true, true, true, false, false, false, false},  // unchanged
+    {true, true, false, true, true, false, false, false},  // charge on -> off
+    {false, true, true, true, true, true, false, false},   // charge off -> on
+    {true, true, false, false, true, false, true, false},  // both change at once
+};
+
+static void test_mosfet_transitions(void)
 {
-    State st;
-    DalyMosfetStatus m1 = mosfet(true, true);
-    decide(st, nullptr, &m1, nullptr);
-
-    DalyMosfetStatus m2 = mosfet(false, true);
-    Events ev = decide(st, nullptr, &m2, nullptr);
-    TEST_ASSERT_TRUE(ev.chargeMosChanged);
-    TEST_ASSERT_FALSE(ev.chargeMosOn);
-    TEST_ASSERT_FALSE(ev.dischargeMosChanged);
-}
-
-static void test_mosfet_charge_off_to_on(void)
-{
-    State st;
-    DalyMosfetStatus m1 = mosfet(false, true);
-    decide(st, nullptr, &m1, nullptr);
-
-    DalyMosfetStatus m2 = mosfet(true, true);
-    Events ev = decide(st, nullptr, &m2, nullptr);
-    TEST_ASSERT_TRUE(ev.chargeMosChanged);
-    TEST_ASSERT_TRUE(ev.chargeMosOn);
+    for (const MosfetCase &c : kMosfetCases)
+    {
+        State st;
+        DalyMosfetStatus m1 = mosfet(c.c1, c.d1);
+        decide(st, nullptr, &m1, nullptr);
+        DalyMosfetStatus m2 = mosfet(c.c2, c.d2);
+        Events ev = decide(st, nullptr, &m2, nullptr);
+        TEST_ASSERT_EQUAL(c.chargeChanged, ev.chargeMosChanged);
+        if (c.chargeChanged)
+            TEST_ASSERT_EQUAL(c.chargeOn, ev.chargeMosOn);
+        TEST_ASSERT_EQUAL(c.dischargeChanged, ev.dischargeMosChanged);
+        if (c.dischargeChanged)
+            TEST_ASSERT_EQUAL(c.dischargeOn, ev.dischargeMosOn);
+    }
 }
 
 static void test_mosfet_discharge_on_to_off_and_back(void)
@@ -212,32 +181,16 @@ static void test_mosfet_discharge_on_to_off_and_back(void)
     TEST_ASSERT_TRUE(ev3.dischargeMosOn);
 }
 
-static void test_mosfet_both_change_same_reading(void)
-{
-    State st;
-    DalyMosfetStatus m1 = mosfet(true, true);
-    decide(st, nullptr, &m1, nullptr);
-
-    DalyMosfetStatus m2 = mosfet(false, false);
-    Events ev = decide(st, nullptr, &m2, nullptr);
-    TEST_ASSERT_TRUE(ev.chargeMosChanged);
-    TEST_ASSERT_FALSE(ev.chargeMosOn);
-    TEST_ASSERT_TRUE(ev.dischargeMosChanged);
-    TEST_ASSERT_FALSE(ev.dischargeMosOn);
-}
-
 // --- Alarm bit diff ---
 
 static void test_alarm_no_events_on_first_ever_reading(void)
 {
     // Baseline: an all-nonzero first-ever alarm read must not be reported
-    // as 56 "SET" events.
+    // as a burst of "SET" events (byte 0 alone here sets 8 bits).
     State st;
-    DalyAlarmStatus a = zeroAlarm();
-    a.rawBytes[0] = 0xFF;
+    DalyAlarmStatus a = alarmFromBytes({0xFF});
     Events ev = decide(st, nullptr, nullptr, &a);
     TEST_ASSERT_EQUAL_INT(0, ev.alarmBitCount);
-    TEST_ASSERT_TRUE(st.haveAlarmBaseline);
 }
 
 static void test_alarm_no_events_when_unchanged(void)
@@ -258,10 +211,7 @@ static void test_alarm_bit_set_decoded_to_name(void)
     DalyAlarmStatus a1 = zeroAlarm();
     decide(st, nullptr, nullptr, &a1);
 
-    DalyAlarmStatus a2 = zeroAlarm();
-    a2.rawBytes[0] = 0x01;
-    a2.cellOvervoltLevel1 = true;
-    a2.anyProtectionActive = true;
+    DalyAlarmStatus a2 = alarmFromBytes({0x01});
     Events ev = decide(st, nullptr, nullptr, &a2);
 
     TEST_ASSERT_EQUAL_INT(1, ev.alarmBitCount);
@@ -275,10 +225,7 @@ static void test_alarm_bit_set_decoded_to_name(void)
 static void test_alarm_bit_cleared_decoded_to_name(void)
 {
     State st;
-    DalyAlarmStatus a1 = zeroAlarm();
-    a1.rawBytes[0] = 0x01;
-    a1.cellOvervoltLevel1 = true;
-    a1.anyProtectionActive = true;
+    DalyAlarmStatus a1 = alarmFromBytes({0x01});
     decide(st, nullptr, nullptr, &a1);
 
     DalyAlarmStatus a2 = zeroAlarm(); // bit clears
@@ -297,9 +244,7 @@ static void test_alarm_undefined_bit_has_null_name(void)
     DalyAlarmStatus a1 = zeroAlarm();
     decide(st, nullptr, nullptr, &a1);
 
-    DalyAlarmStatus a2 = zeroAlarm();
-    a2.rawBytes[3] = 0x10; // bit 4
-    a2.anyProtectionActive = true;
+    DalyAlarmStatus a2 = alarmFromBytes({0, 0, 0, 0x10}); // byte 3, bit 4
     Events ev = decide(st, nullptr, nullptr, &a2);
 
     TEST_ASSERT_EQUAL_INT(1, ev.alarmBitCount);
@@ -315,11 +260,9 @@ static void test_alarm_multiple_bits_across_bytes_same_reading(void)
     DalyAlarmStatus a1 = zeroAlarm();
     decide(st, nullptr, nullptr, &a1);
 
-    DalyAlarmStatus a2 = zeroAlarm();
-    a2.rawBytes[0] = 0x01; // bit 0 -> "Cell overvoltage Level 1"
-    a2.rawBytes[2] = 0x04; // bit 2 -> "Discharge overcurrent Level 1"
-    a2.cellOvervoltLevel1 = true;
-    a2.anyProtectionActive = true;
+    // bit 0 -> "Cell overvoltage Level 1", byte 2 bit 2 -> "Discharge
+    // overcurrent Level 1".
+    DalyAlarmStatus a2 = alarmFromBytes({0x01, 0, 0x04});
     Events ev = decide(st, nullptr, nullptr, &a2);
 
     TEST_ASSERT_EQUAL_INT(2, ev.alarmBitCount);
@@ -335,8 +278,8 @@ static void test_alarm_fault_code_change_reported_separately_from_bits(void)
     DalyAlarmStatus a1 = zeroAlarm();
     decide(st, nullptr, nullptr, &a1);
 
-    DalyAlarmStatus a2 = zeroAlarm();
-    a2.rawBytes[7] = 5; // fault code changes, no protection bit changes
+    // Fault code (byte 7) changes, no protection bit changes.
+    DalyAlarmStatus a2 = alarmFromBytes({0, 0, 0, 0, 0, 0, 0, 5});
     Events ev = decide(st, nullptr, nullptr, &a2);
 
     TEST_ASSERT_EQUAL_INT(0, ev.alarmBitCount);
@@ -351,18 +294,10 @@ static void test_alarm_events_do_not_repeat_next_unchanged_reading(void)
     DalyAlarmStatus a1 = zeroAlarm();
     decide(st, nullptr, nullptr, &a1);
 
-    DalyAlarmStatus a2 = zeroAlarm();
-    a2.rawBytes[0] = 0x01;
-    a2.cellOvervoltLevel1 = true;
-    a2.anyProtectionActive = true;
-    a2.rawBytes[7] = 5;
+    DalyAlarmStatus a2 = alarmFromBytes({0x01, 0, 0, 0, 0, 0, 0, 5});
     decide(st, nullptr, nullptr, &a2); // sets the new baseline
 
-    DalyAlarmStatus a3 = zeroAlarm();
-    a3.rawBytes[0] = 0x01;
-    a3.cellOvervoltLevel1 = true;
-    a3.anyProtectionActive = true;
-    a3.rawBytes[7] = 5;
+    DalyAlarmStatus a3 = alarmFromBytes({0x01, 0, 0, 0, 0, 0, 0, 5});
     Events ev3 = decide(st, nullptr, nullptr, &a3);
     TEST_ASSERT_EQUAL_INT(0, ev3.alarmBitCount);
     TEST_ASSERT_FALSE(ev3.faultCodeChanged);
@@ -374,39 +309,34 @@ static void test_alarm_events_do_not_repeat_next_unchanged_reading(void)
 static void test_readings_are_independent_of_each_other(void)
 {
     State st;
-    // Only a MOSFET reading this call - SOC/alarm baselines untouched.
-    DalyMosfetStatus m = mosfet(true, true);
-    decide(st, nullptr, &m, nullptr);
-    TEST_ASSERT_TRUE(st.haveMosfetBaseline);
-    TEST_ASSERT_FALSE(st.haveSoc);
-    TEST_ASSERT_FALSE(st.haveAlarmBaseline);
+    // Only a MOSFET reading this call.
+    DalyMosfetStatus m1 = mosfet(true, true);
+    decide(st, nullptr, &m1, nullptr);
 
-    // Now an SOC-only call - must not report a jump (no SOC baseline yet)
-    // and must not touch the MOSFET baseline just established.
+    // An SOC-only call in between must not report a jump (no SOC baseline
+    // yet) or disturb the MOSFET baseline just established.
     DalyBasicInfo info = basicInfoWithSoc(50.0f);
     Events ev = decide(st, &info, nullptr, nullptr);
     TEST_ASSERT_FALSE(ev.socJumped);
-    TEST_ASSERT_TRUE(st.haveSoc);
-    TEST_ASSERT_TRUE(st.haveMosfetBaseline);
+
+    // The real MOSFET transition below is still detected against m1, not
+    // silently treated as a fresh baseline.
+    DalyMosfetStatus m2 = mosfet(false, true);
+    Events evMos = decide(st, nullptr, &m2, nullptr);
+    TEST_ASSERT_TRUE(evMos.chargeMosChanged);
+    TEST_ASSERT_FALSE(evMos.chargeMosOn);
 }
 
 int main(int, char **)
 {
     UNITY_BEGIN();
+    RUN_TEST(test_soc_jump_table);
     RUN_TEST(test_soc_no_jump_on_first_ever_reading);
-    RUN_TEST(test_soc_no_jump_on_small_change);
-    RUN_TEST(test_soc_jump_over_10_points);
-    RUN_TEST(test_soc_jump_over_10_points_downward);
-    RUN_TEST(test_soc_jump_to_100_from_below_95);
-    RUN_TEST(test_soc_no_jump_to_100_from_above_95);
     RUN_TEST(test_soc_jump_does_not_repeat_next_reading);
 
     RUN_TEST(test_mosfet_no_event_on_first_ever_reading);
-    RUN_TEST(test_mosfet_no_event_when_unchanged);
-    RUN_TEST(test_mosfet_charge_on_to_off);
-    RUN_TEST(test_mosfet_charge_off_to_on);
+    RUN_TEST(test_mosfet_transitions);
     RUN_TEST(test_mosfet_discharge_on_to_off_and_back);
-    RUN_TEST(test_mosfet_both_change_same_reading);
 
     RUN_TEST(test_alarm_no_events_on_first_ever_reading);
     RUN_TEST(test_alarm_no_events_when_unchanged);

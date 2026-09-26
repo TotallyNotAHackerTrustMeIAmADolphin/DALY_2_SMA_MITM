@@ -183,51 +183,29 @@ static void test_encode_status_ticker_not_yet_due_no_heartbeat(void)
 
 // --- decodeFrame (readMessages's 0x305 mode / 0x300 grid decoding) ---
 
-static void test_decode_0x305_mode_bulk(void)
+struct ModeCase
 {
-    uint8_t data[8] = {1, 0, 0, 0, 0, 0, 0, 0};
-    RxUpdate update;
-    TEST_ASSERT_TRUE(SMAFrames::decodeFrame(0x305, data, 8, update));
-    TEST_ASSERT_TRUE(update.hasChargeMode);
-    TEST_ASSERT_EQUAL_STRING("Bulk", update.chargeMode);
-    TEST_ASSERT_FALSE(update.hasGridPresent);
-}
+    uint8_t byte;
+    const char *mode;
+};
 
-static void test_decode_0x305_mode_absorption(void)
-{
-    uint8_t data[8] = {2, 0, 0, 0, 0, 0, 0, 0};
-    RxUpdate update;
-    TEST_ASSERT_TRUE(SMAFrames::decodeFrame(0x305, data, 8, update));
-    TEST_ASSERT_EQUAL_STRING("Absorption", update.chargeMode);
-}
+// #104: anything but 1-4 used to fall through to "Equalize", so a 0 or
+// garbage byte showed as an equalize charge on the dashboard.
+static const ModeCase kModeCases[] = {
+    {0, "Unknown"}, {1, "Bulk"}, {2, "Absorption"}, {3, "Float"},
+    {4, "Equalize"}, {5, "Unknown"}, {99, "Unknown"}, {0xFF, "Unknown"},
+};
 
-static void test_decode_0x305_mode_float(void)
+static void test_decode_0x305_mode_table(void)
 {
-    uint8_t data[8] = {3, 0, 0, 0, 0, 0, 0, 0};
-    RxUpdate update;
-    TEST_ASSERT_TRUE(SMAFrames::decodeFrame(0x305, data, 8, update));
-    TEST_ASSERT_EQUAL_STRING("Float", update.chargeMode);
-}
-
-static void test_decode_0x305_mode_equalize(void)
-{
-    uint8_t data[8] = {4, 0, 0, 0, 0, 0, 0, 0};
-    RxUpdate update;
-    TEST_ASSERT_TRUE(SMAFrames::decodeFrame(0x305, data, 8, update));
-    TEST_ASSERT_EQUAL_STRING("Equalize", update.chargeMode);
-}
-
-static void test_decode_0x305_mode_unrecognized_byte_is_unknown(void)
-{
-    // #104: anything but 1-4 used to fall through to "Equalize", so a 0 or
-    // garbage byte showed as an equalize charge on the dashboard.
-    const uint8_t modes[] = {0, 5, 99, 0xFF};
-    for (uint8_t m : modes)
+    for (const ModeCase &c : kModeCases)
     {
-        uint8_t data[8] = {m, 0, 0, 0, 0, 0, 0, 0};
+        uint8_t data[8] = {c.byte, 0, 0, 0, 0, 0, 0, 0};
         RxUpdate update;
         TEST_ASSERT_TRUE(SMAFrames::decodeFrame(0x305, data, 8, update));
-        TEST_ASSERT_EQUAL_STRING("Unknown", update.chargeMode);
+        TEST_ASSERT_TRUE(update.hasChargeMode);
+        TEST_ASSERT_FALSE(update.hasGridPresent);
+        TEST_ASSERT_EQUAL_STRING(c.mode, update.chargeMode);
     }
 }
 
@@ -309,11 +287,7 @@ int main(int, char **)
     RUN_TEST(test_encode_status_negative_current);
     RUN_TEST(test_encode_status_ticker_rollover_emits_heartbeat_frames);
     RUN_TEST(test_encode_status_ticker_not_yet_due_no_heartbeat);
-    RUN_TEST(test_decode_0x305_mode_bulk);
-    RUN_TEST(test_decode_0x305_mode_absorption);
-    RUN_TEST(test_decode_0x305_mode_float);
-    RUN_TEST(test_decode_0x305_mode_equalize);
-    RUN_TEST(test_decode_0x305_mode_unrecognized_byte_is_unknown);
+    RUN_TEST(test_decode_0x305_mode_table);
     RUN_TEST(test_decode_0x305_zero_dlc_ignored);
     RUN_TEST(test_decode_0x300_grid_present_true);
     RUN_TEST(test_decode_0x300_grid_present_false);

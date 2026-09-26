@@ -294,7 +294,7 @@ struct SystemConfig
     };
 
     // Pure, tested in test/test_systemconfig/. saveConfig() refuses a
-    // failing result; loadConfig() logs it.
+    // failing result; ConfigStore::load() logs it.
     static ValidationResult validate(const SystemConfig &cfg)
     {
         ValidationResult r;

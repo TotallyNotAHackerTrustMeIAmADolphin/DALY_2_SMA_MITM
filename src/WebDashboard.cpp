@@ -5,6 +5,7 @@
 #include "Diagnostics.h"
 #include "SettingFormat.h"
 #include "ConfigStore.h"
+#include "ConfigForm.h"
 #include <SD.h>
 #include <cstdarg>
 #include <cstddef>
@@ -31,13 +32,6 @@ namespace
         char buf[24];
         formatSettingFixed(s, v, buf, sizeof(buf));
         return String(buf);
-    }
-
-    // "Max Charge Vpc must be between 2.500 and 3.550 V."
-    String rangeMessage(const SettingBase &s)
-    {
-        return String(s.label()) + " must be between " + formatNumber(s, s.min()) + " and " +
-               formatNumber(s, s.max()) + " " + s.unit() + ".";
     }
 
     // The setting's <input> plus a "min-max unit - default" line under it,
@@ -170,61 +164,23 @@ void WebDashboard::broadcastTelemetry(const DashboardData &data)
 
 void WebDashboard::saveConfig(AsyncWebServerRequest *request)
 {
-    // canTask reads *_cfg under dataMutex and only waits 20 ms for it per
-    // 250 ms SMA frame, so this holds the lock for nothing but the publish
-    // (`*_cfg = copy`): parsing, validation and building the error text
-    // (heap allocations) run unlocked, on a local copy. That's safe because
-    // this handler is the only writer of *_cfg and always runs on the
-    // async_tcp task, so *_cfg can't change between the copy and the
-    // publish, and reading it here without the lock races no writer. The
-    // NVS write (flash erase/write, tens of ms) also runs after the lock is
-    // released (#21). `present[]` (parallel to all()) remembers which
-    // settings were in the request, so only those are written to NVS.
-    bool present[SystemConfig::kNumSettings] = {false};
-
     // Captured before copy is mutated below, so it holds the pre-save value
     // of every setting for the post-save "[CFG] <label>: <old> -> <new>"
-    // log lines - reading *_cfg here without the lock is fine, per the
-    // comment above (this handler is the only writer).
+    // log lines - reading *_cfg here without the lock is fine (this handler
+    // is the only writer of *_cfg and always runs on the async_tcp task, so
+    // *_cfg can't change underneath it).
     const SystemConfig before = *_cfg;
     SystemConfig copy = *_cfg;
-    std::array<SettingBase *, SystemConfig::kNumSettings> settings = copy.all();
+
     std::vector<String> errors;
+    ConfigForm::Result result = ConfigForm::apply(
+        copy,
+        [request](const char *key) -> const char *
+        { return request->hasParam(key) ? request->getParam(key)->value().c_str() : nullptr; },
+        [&errors](const char *msg)
+        { errors.push_back(String(msg)); });
 
-    // Only settings present in the request are parsed (Setting::parse()
-    // range-checks through set()) and later written to NVS; everything
-    // else keeps its value from *_cfg.
-    for (size_t i = 0; i < settings.size(); i++)
-    {
-        SettingBase &s = *settings[i];
-        if (!request->hasParam(s.key()))
-            continue;
-        present[i] = true;
-
-        switch (s.parse(request->getParam(s.key())->value().c_str()))
-        {
-        case SettingBase::ParseResult::Ok:
-            break;
-        case SettingBase::ParseResult::NotANumber:
-            errors.push_back(String(s.label()) + " is not a valid number.");
-            break;
-        case SettingBase::ParseResult::OutOfRange:
-            errors.push_back(rangeMessage(s));
-            break;
-        }
-    }
-
-    // #53/#55: the rules relating two settings. Only once every setting
-    // parsed: otherwise the copy still holds the old value of a rejected
-    // one, and a rule about it would describe a config nobody submitted.
-    if (errors.empty())
-    {
-        SystemConfig::ValidationResult validation = SystemConfig::validate(copy);
-        validation.forEachMessage([&errors](const char *msg)
-                                   { errors.push_back(String(msg)); });
-    }
-
-    if (!errors.empty())
+    if (!result.ok)
     {
         String body;
         for (const String &msg : errors)
@@ -238,6 +194,11 @@ void WebDashboard::saveConfig(AsyncWebServerRequest *request)
         request->send(400, "text/plain", body + "Nothing saved.\n");
         return;
     }
+
+    // canTask reads *_cfg under dataMutex and only waits 20 ms for it per
+    // 250 ms SMA frame, so this holds the lock for nothing but the publish
+    // itself; the NVS write (flash erase/write, tens of ms) runs after the
+    // lock is released (#21).
     if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(300)) != pdTRUE)
     {
         debugLog("[WEB] /save refused: config busy\n");
@@ -247,34 +208,12 @@ void WebDashboard::saveConfig(AsyncWebServerRequest *request)
     *_cfg = copy;
     xSemaphoreGive(dataMutex);
 
-    ConfigStore::store(copy, present);
+    ConfigStore::store(copy, result.present);
 
-    // Log every setting that actually changed, by name, old -> new - only
-    // now that the save has fully succeeded (published under the lock and
-    // written to NVS), never for a refused save. One debugLog call per
-    // changed setting: its buffer is 256 bytes, so one call with embedded
-    // newlines would both truncate and leave continuation lines
-    // untimestamped, same reasoning as the /save-refused loop above.
-    uint32_t changed = SystemConfig::changedMask(before, copy);
-    if (changed == 0)
-    {
-        debugLog("[CFG] Saved, no changes\n");
-    }
-    else
-    {
-        std::array<const SettingBase *, SystemConfig::kNumSettings> beforeSettings = before.all();
-        for (size_t i = 0; i < settings.size(); i++)
-        {
-            if (!(changed & ((uint32_t)1 << i)))
-                continue;
-            const SettingBase &s = *settings[i];
-            char oldBuf[24];
-            char newBuf[24];
-            formatSettingValue(*beforeSettings[i], beforeSettings[i]->value(), oldBuf, sizeof(oldBuf));
-            formatSettingValue(s, s.value(), newBuf, sizeof(newBuf));
-            debugLog("[CFG] %s: %s -> %s %s\n", s.label(), oldBuf, newBuf, s.unit());
-        }
-    }
+    // Only now that the save has fully succeeded (published under the lock
+    // and written to NVS), never for a refused save.
+    ConfigForm::logChanges(before, copy, [this](const char *line)
+                            { debugLog("%s", line); });
 
     request->redirect("/");
 }

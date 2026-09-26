@@ -27,6 +27,7 @@
 // well outside bmsTask/CellSmoother's own scope (pack voltage, CVL/DVL).
 constexpr int MAX_CELLS = CellSmoother::MAX_CELLS;
 constexpr int MAX_SAMPLES = CellSmoother::MAX_SAMPLES;
+static_assert(MAX_SAMPLES == kMaxVSamples, "SystemConfig::validate() range for vSamples must match CellSmoother");
 
 // Single source of truth for the local time zone - used both by setup()'s
 // early setenv("TZ", ...) (before NTP has run) and setupNetwork()'s

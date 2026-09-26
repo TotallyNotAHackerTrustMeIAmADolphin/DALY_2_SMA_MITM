@@ -3,9 +3,11 @@
 #include "SDLogger.h"
 #include "TelemetrySchema.h"
 #include <SD.h>
+#include <cerrno>
 #include <cstdarg>
 #include <cstddef>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include "esp_core_dump.h"
 #include "esp_partition.h"
@@ -15,44 +17,16 @@
 
 namespace
 {
-    // One row per NVS-persisted setting (issue #34). `key` is both the NVS
-    // storage key and the /save HTTP GET parameter name for every field
-    // below (they've always been the same string). `placeholder` is the
-    // !!VAL_XXX!! token substituted into config_html by the /config route;
-    // nullptr means the field has no UI representation.
-    //
-    // KIND_UINT16 exists (rather than folding sps/spm into KIND_INT) because
-    // they're stored via Preferences::getUInt/putUInt, not getInt/putInt -
-    // NVS enforces the stored type, so reading a UInt-written key with
-    // getInt would fail against a device's existing NVS content.
-    //
-    // Keys as of #34 (unchanged from before this refactor):
-    //   ca cvt cag ta cmv cmsv cmpp mam da cdvt clag ld_v2 cmdv vs to sps spm
-    // `to` (bmsTimeout) is on the /config page since #35 (it was NVS-only
-    // before). A field with placeholder = nullptr would be NVS-only again:
-    // never substituted into the page, never present in a /save request.
-    struct ConfigField
-    {
-        const char *key;
-        enum Kind
-        {
-            KIND_FLOAT,
-            KIND_INT,
-            KIND_UINT16
-        } kind;
-        size_t offset; // offsetof(SystemConfig, <member>)
-        float defF;
-        int defI; // also holds the default for KIND_UINT16 fields
-        const char *placeholder;
-        uint8_t decimals; // String(float, decimals) formatting for /config; KIND_INT/KIND_UINT16 ignore this
-    };
+    // The settings themselves (key, default, min/max, step, label) live in
+    // one table, kConfigFields in include/SystemConfig.h - loadConfig(),
+    // saveConfig(), the /config page and SystemConfig::validate() all read
+    // it. KIND_UINT16 fields (sps/spm) are stored via Preferences::getUInt/
+    // putUInt, not getInt/putInt: NVS enforces the stored type, so reading
+    // a UInt-written key with getInt would fail against existing NVS.
 
-    // One row per SystemConfig::ValidationResult flag that can be set, each
-    // with a human-readable message naming the offending field(s) (#53).
-    // Shared by saveConfig()'s 400 response (#55) and loadConfig()'s startup
-    // log (#56) so the flag->message mapping only lives in one place; each
-    // caller decides how to emit the lines (concatenated into one HTTP body,
-    // or one netLog call per line).
+    // Messages for the ValidationResult rules that relate two fields. Range
+    // violations of a single field get theirs from its table row (see
+    // forEachViolation()).
     struct ValidationMessage
     {
         bool SystemConfig::ValidationResult::*flag;
@@ -60,8 +34,6 @@ namespace
     };
 
     const ValidationMessage kValidationMessages[] = {
-        {&SystemConfig::ValidationResult::hasNaN,
-         "A config value is NaN (corrupted NVS?) - check every setting."},
         {&SystemConfig::ValidationResult::maintStartBelowMinDischarge,
          "Maint. Start Vpc must be above Min Discharge Vpc (#12)."},
         {&SystemConfig::ValidationResult::chargeTaperOrderBad,
@@ -70,32 +42,96 @@ namespace
          "Discharge thresholds must be ordered: Start D-Taper Vpc > Low Alarm Gate Vpc > Min Discharge Vpc."},
         {&SystemConfig::ValidationResult::maintHysteresisBad,
          "Maint. Stop Vpc must be above Maint. Start Vpc (#12)."},
-        {&SystemConfig::ValidationResult::chargeHeadroomBad,
-         "Max Charge Vpc must be at most 3.550 V (Daly OV protection 3.65 V minus 100 mV margin, #8)."},
-        {&SystemConfig::ValidationResult::hasNegativeCurrent,
-         "Current setpoints (charge/discharge/trickle/limp/maintenance) must not be negative."},
+        {&SystemConfig::ValidationResult::spreadOrderBad,
+         "Cell spread: start derating must be below full derating (#24)."},
     };
 
-    const ConfigField kConfigFields[] = {
-        // key      kind                       offset                                    defF    defI  placeholder      decimals
-        {"ca", ConfigField::KIND_FLOAT, offsetof(SystemConfig, maxChargeA), 250.0f, 0, "!!VAL_CA!!", 0},
-        {"cvt", ConfigField::KIND_FLOAT, offsetof(SystemConfig, cvStartTaper), 3.375f, 0, "!!VAL_VT!!", 3},
-        {"cag", ConfigField::KIND_FLOAT, offsetof(SystemConfig, cvHighAlarmGate), 3.425f, 0, "!!VAL_AG!!", 3},
-        {"ta", ConfigField::KIND_FLOAT, offsetof(SystemConfig, trickleA), 2.0f, 0, "!!VAL_TA!!", 1},
-        {"cmv", ConfigField::KIND_FLOAT, offsetof(SystemConfig, cvMaxCharge), 3.450f, 0, "!!VAL_MV!!", 3},
-        {"cmsv", ConfigField::KIND_FLOAT, offsetof(SystemConfig, cvMaintStart), 3.030f, 0, "!!VAL_MSV!!", 3},
-        {"cmpp", ConfigField::KIND_FLOAT, offsetof(SystemConfig, cvMaintStop), 3.220f, 0, "!!VAL_MPP!!", 3},
-        {"mam", ConfigField::KIND_FLOAT, offsetof(SystemConfig, maintAmps), 20.0f, 0, "!!VAL_MAM!!", 0},
-        {"da", ConfigField::KIND_FLOAT, offsetof(SystemConfig, maxDischargeA), 500.0f, 0, "!!VAL_DA!!", 0},
-        {"cdvt", ConfigField::KIND_FLOAT, offsetof(SystemConfig, cvStartDTaper), 3.100f, 0, "!!VAL_DVT!!", 3},
-        {"clag", ConfigField::KIND_FLOAT, offsetof(SystemConfig, cvLowAlarmGate), 3.065f, 0, "!!VAL_LAG!!", 3},
-        {"ld_v2", ConfigField::KIND_FLOAT, offsetof(SystemConfig, limpDischargeA), 15.0f, 0, "!!VAL_LIMP!!", 0},
-        {"cmdv", ConfigField::KIND_FLOAT, offsetof(SystemConfig, cvMinDischarge), 3.000f, 0, "!!VAL_MDV!!", 3},
-        {"vs", ConfigField::KIND_INT, offsetof(SystemConfig, vSamples), 0, 12, "!!VAL_VS!!", 0},
-        {"to", ConfigField::KIND_INT, offsetof(SystemConfig, bmsTimeout), 0, 60, "!!VAL_TO!!", 0},
-        {"sps", ConfigField::KIND_UINT16, offsetof(SystemConfig, spreadStartMv), 0, 60, "!!VAL_SPS!!", 0},
-        {"spm", ConfigField::KIND_UINT16, offsetof(SystemConfig, spreadMaxMv), 0, 150, "!!VAL_SPM!!", 0},
+    // A number formatted with the field's precision (limits and values).
+    String formatNumber(const ConfigField &f, float v)
+    {
+        if (f.kind == ConfigField::KIND_FLOAT)
+            return String(v, (unsigned int)f.decimals);
+        return String((long)v);
+    }
+
+    // "Max Charge Vpc must be between 2.500 and 3.550 V."
+    String rangeMessage(const ConfigField &f)
+    {
+        return String(f.label) + " must be between " + formatNumber(f, f.min) + " and " +
+               formatNumber(f, f.max) + " " + f.unit + ".";
+    }
+
+    // Calls emit(message) once per violation in r - range violations first
+    // (one per field, in table order), then the two-field rules. Shared by
+    // saveConfig()'s 400 response and loadConfig()'s boot log.
+    template <typename Emit>
+    void forEachViolation(const SystemConfig::ValidationResult &r, Emit emit)
+    {
+        for (size_t i = 0; i < kNumConfigFields; i++)
+            if (r.outOfRange & (1u << i))
+                emit(rangeMessage(kConfigFields[i]));
+        for (const ValidationMessage &vm : kValidationMessages)
+            if (r.*(vm.flag))
+                emit(String(vm.message));
+    }
+
+    // The field's <input>, generated from its table row so the browser
+    // enforces the same min/max/step validate() does. A coarse step without
+    // a min used to make the browser count steps from the stored value
+    // (stored 51, step 5: typing 60 was refused).
+    String inputTag(const ConfigField &f, const SystemConfig &cfg)
+    {
+        return String("<input type=\"number\" name=\"") + f.key + "\" step=\"" + f.step +
+               "\" min=\"" + formatNumber(f, f.min) + "\" max=\"" + formatNumber(f, f.max) +
+               "\" value=\"" + formatNumber(f, configFieldValue(cfg, f)) + "\">";
+    }
+
+    enum ParseResult
+    {
+        PARSE_OK,
+        PARSE_NOT_A_NUMBER,
+        PARSE_OUT_OF_RANGE
     };
+
+    // Strict parsing for /save (#61). String::toInt()/toFloat() return 0
+    // for garbage or an empty field, and toInt() into a uint16_t wrapped
+    // (-60 -> 65476, which switched spread derating off). strtol/strtof
+    // must consume the whole string; integers are range-checked against the
+    // field's min/max before they are narrowed, so nothing can wrap. Floats
+    // are stored as parsed - validate() range-checks them (NaN/inf too).
+    ParseResult parseField(const ConfigField &f, const String &val, SystemConfig &cfg)
+    {
+        const char *str = val.c_str();
+        char *end = nullptr;
+        while (*str == ' ')
+            str++;
+        if (*str == '\0')
+            return PARSE_NOT_A_NUMBER;
+        uint8_t *member = reinterpret_cast<uint8_t *>(&cfg) + f.offset;
+        if (f.kind == ConfigField::KIND_FLOAT)
+        {
+            float v = strtof(str, &end);
+            while (*end == ' ')
+                end++;
+            if (end == str || *end != '\0')
+                return PARSE_NOT_A_NUMBER;
+            *reinterpret_cast<float *>(member) = v;
+            return PARSE_OK;
+        }
+        errno = 0;
+        long v = strtol(str, &end, 10);
+        while (*end == ' ')
+            end++;
+        if (end == str || *end != '\0')
+            return PARSE_NOT_A_NUMBER;
+        if (errno == ERANGE || v < (long)f.min || v > (long)f.max)
+            return PARSE_OUT_OF_RANGE;
+        if (f.kind == ConfigField::KIND_UINT16)
+            *reinterpret_cast<uint16_t *>(member) = (uint16_t)v;
+        else
+            *reinterpret_cast<int *>(member) = (int)v;
+        return PARSE_OK;
+    }
 }
 
 WebDashboard::WebDashboard(uint16_t port)
@@ -219,21 +255,20 @@ void WebDashboard::loadConfig(SystemConfig &configOut)
     // or canTask exist, so there is no concurrent reader yet.
     _prefs.begin("bms-bridge", false);
 
-    // Read from NVS or set defaults - see kConfigFields above for the key/
-    // default list.
+    // Read from NVS or set defaults (kConfigFields in SystemConfig.h).
     for (const ConfigField &f : kConfigFields)
     {
         uint8_t *member = reinterpret_cast<uint8_t *>(_cfg) + f.offset;
         switch (f.kind)
         {
         case ConfigField::KIND_FLOAT:
-            *reinterpret_cast<float *>(member) = _prefs.getFloat(f.key, f.defF);
+            *reinterpret_cast<float *>(member) = _prefs.getFloat(f.key, f.def);
             break;
         case ConfigField::KIND_INT:
-            *reinterpret_cast<int *>(member) = _prefs.getInt(f.key, f.defI);
+            *reinterpret_cast<int *>(member) = _prefs.getInt(f.key, (int)f.def);
             break;
         case ConfigField::KIND_UINT16:
-            *reinterpret_cast<uint16_t *>(member) = (uint16_t)_prefs.getUInt(f.key, (uint32_t)f.defI);
+            *reinterpret_cast<uint16_t *>(member) = (uint16_t)_prefs.getUInt(f.key, (uint32_t)f.def);
             break;
         }
     }
@@ -244,14 +279,8 @@ void WebDashboard::loadConfig(SystemConfig &configOut)
     // and log it - never blocks boot, just surfaces a corrupted/inconsistent
     // NVS setpoint set for a human to notice and fix via /config or /save.
     SystemConfig::ValidationResult validation = SystemConfig::validate(*_cfg);
-    if (!validation.ok())
-    {
-        for (const ValidationMessage &vm : kValidationMessages)
-        {
-            if (validation.*(vm.flag))
-                debugLog("[CFG] Loaded config fails validation: %s\n", vm.message);
-        }
-    }
+    forEachViolation(validation, [this](const String &msg)
+                     { debugLog("[CFG] Loaded config fails validation: %s\n", msg.c_str()); });
 }
 
 void WebDashboard::saveConfig(AsyncWebServerRequest *request)
@@ -273,8 +302,7 @@ void WebDashboard::saveConfig(AsyncWebServerRequest *request)
     // `present[]` (parallel to kConfigFields, by index) remembers which
     // fields were actually in the request, since a value in `copy` alone
     // can't distinguish "submitted, same as before" from "not submitted".
-    constexpr size_t kNumFields = sizeof(kConfigFields) / sizeof(kConfigFields[0]);
-    bool present[kNumFields] = {false};
+    bool present[kNumConfigFields] = {false};
 
     if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(300)) != pdTRUE)
     {
@@ -284,10 +312,11 @@ void WebDashboard::saveConfig(AsyncWebServerRequest *request)
     }
 
     SystemConfig copy = *_cfg;
+    std::vector<String> errors;
 
     // Only fields present in the request are parsed and later written to
     // NVS; everything else keeps its value from *_cfg.
-    for (size_t i = 0; i < kNumFields; i++)
+    for (size_t i = 0; i < kNumConfigFields; i++)
     {
         const ConfigField &f = kConfigFields[i];
         if (!request->hasParam(f.key))
@@ -295,38 +324,41 @@ void WebDashboard::saveConfig(AsyncWebServerRequest *request)
         present[i] = true;
 
         const String &val = request->getParam(f.key)->value();
-        uint8_t *member = reinterpret_cast<uint8_t *>(&copy) + f.offset;
-        switch (f.kind)
+        switch (parseField(f, val, copy))
         {
-        case ConfigField::KIND_FLOAT:
-            *reinterpret_cast<float *>(member) = val.toFloat();
+        case PARSE_OK:
             break;
-        case ConfigField::KIND_INT:
-            *reinterpret_cast<int *>(member) = val.toInt();
+        case PARSE_NOT_A_NUMBER:
+            errors.push_back(String(f.label) + " is not a valid number.");
             break;
-        case ConfigField::KIND_UINT16:
-            *reinterpret_cast<uint16_t *>(member) = (uint16_t)val.toInt();
+        case PARSE_OUT_OF_RANGE:
+            errors.push_back(rangeMessage(f));
             break;
         }
     }
 
-    // #53/#55: full sanity check (ordering, hysteresis, NaN, charge headroom
-    // margin, negative current), not just the old single #12 comparison.
-    SystemConfig::ValidationResult validation = SystemConfig::validate(copy);
-    if (!validation.ok())
+    // #53/#55/#61: every field against its own min/max (kConfigFields) plus
+    // the rules relating two fields. Skipped when a field didn't parse: the
+    // copy still holds the old value there, so the result would be about a
+    // config nobody submitted. Collect-all either way.
+    if (errors.empty())
+    {
+        SystemConfig::ValidationResult validation = SystemConfig::validate(copy);
+        forEachViolation(validation, [&errors](const String &msg)
+                         { errors.push_back(msg); });
+    }
+
+    if (!errors.empty())
     {
         xSemaphoreGive(dataMutex);
         String body;
-        for (const ValidationMessage &vm : kValidationMessages)
+        for (const String &msg : errors)
         {
-            if (validation.*(vm.flag))
-            {
-                body += String(vm.message) + "\n";
-                // One log line per violation: debugLog's buffer is 256
-                // bytes, and one call with embedded newlines would both
-                // truncate and leave the continuation lines untimestamped.
-                debugLog("[WEB] /save refused: %s\n", vm.message);
-            }
+            body += msg + "\n";
+            // One log line per violation: debugLog's buffer is 256 bytes,
+            // and one call with embedded newlines would both truncate and
+            // leave the continuation lines untimestamped.
+            debugLog("[WEB] /save refused: %s\n", msg.c_str());
         }
         request->send(400, "text/plain", body + "Nothing saved.\n");
         return;
@@ -335,7 +367,7 @@ void WebDashboard::saveConfig(AsyncWebServerRequest *request)
     xSemaphoreGive(dataMutex);
 
     _prefs.begin("bms-bridge", false);
-    for (size_t i = 0; i < kNumFields; i++)
+    for (size_t i = 0; i < kNumConfigFields; i++)
     {
         if (!present[i])
             continue;
@@ -421,21 +453,10 @@ void WebDashboard::setupRoutes()
     _server.on("/config", HTTP_GET, [this](AsyncWebServerRequest *request)
                {
         String h = String(config_html);
-        for (const ConfigField &f : kConfigFields) {
-            if (!f.placeholder) continue; // NVS-only field, no UI input
-            const uint8_t *member = reinterpret_cast<const uint8_t *>(_cfg) + f.offset;
-            switch (f.kind) {
-            case ConfigField::KIND_FLOAT:
-                h.replace(f.placeholder, String(*reinterpret_cast<const float *>(member), (unsigned int)f.decimals));
-                break;
-            case ConfigField::KIND_INT:
-                h.replace(f.placeholder, String(*reinterpret_cast<const int *>(member)));
-                break;
-            case ConfigField::KIND_UINT16:
-                h.replace(f.placeholder, String(*reinterpret_cast<const uint16_t *>(member)));
-                break;
-            }
-        }
+        // Each setting's whole <input> comes from its kConfigFields row
+        // (value, min, max, step), via its !!IN_<key>!! placeholder.
+        for (const ConfigField &f : kConfigFields)
+            h.replace(String("!!IN_") + f.key + "!!", inputTag(f, *_cfg));
         request->send(200, "text/html", h); });
 
     _server.on("/save", HTTP_GET, [this](AsyncWebServerRequest *request)

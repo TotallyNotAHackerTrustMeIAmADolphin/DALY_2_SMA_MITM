@@ -1,4 +1,5 @@
 #pragma once
+#include <stddef.h>
 #include <stdint.h>
 #include <math.h>
 
@@ -11,6 +12,17 @@ constexpr float kDalyOvervoltageV = 3.65f;
 // deployed 3.55V/100mV margin was already found to be one contributing
 // factor to the #8 SMA cluster fault and must not be narrowed further).
 constexpr float kMinChargeMarginV = 0.10f;
+
+// Lowest cell-voltage threshold accepted anywhere: LiFePO4 must not be
+// discharged below 2.5 V/cell (a "0.3" typo for 3.0 passes every ordering
+// check, so it needs a range).
+constexpr float kMinCellThresholdV = 2.50f;
+// Upper bound for every current setpoint: catches "2500" for "250"; well
+// above anything this pack/inverter uses.
+constexpr float kMaxCurrentA = 1000.0f;
+// Moving-average window; must match CellSmoother::MAX_SAMPLES
+// (static_assert in main.cpp).
+constexpr int kMaxVSamples = 20;
 
 // NVS-persisted settings (loaded/saved by WebDashboard). Kept free of
 // Arduino/FreeRTOS includes so the pure glideslope math in Glideslope.h,
@@ -40,80 +52,143 @@ struct SystemConfig {
     // in between spreadStartMv and spreadMaxMv.
     uint16_t spreadMaxMv = 150;
 
-    // Sanity-check flags for validate() below (#53). Each bool is set
-    // independently except hasNaN, which short-circuits every other check
-    // (a NaN field makes ordering/margin comparisons meaningless, so there's
-    // no point reporting spurious ordering violations alongside it).
-    struct ValidationResult {
-        bool hasNaN = false;
-        // #12: the Winter Force Charge trigger (min cell < cvMaintStart)
-        // must sit above the discharge floor, or the grid top-up can only
-        // start once discharge is already cut.
-        bool maintStartBelowMinDischarge = false;
-        // Charge taper thresholds must be in strictly increasing voltage
-        // order: full current below cvStartTaper, tapering down to trickle
-        // at cvHighAlarmGate, hard cutoff at cvMaxCharge.
-        bool chargeTaperOrderBad = false;
-        // Discharge taper thresholds must be in strictly decreasing voltage
-        // order: full current above cvStartDTaper, tapering down to limp at
-        // cvLowAlarmGate, hard cutoff at cvMinDischarge.
-        bool dischargeTaperOrderBad = false;
-        // Maintenance hysteresis (#12): stop threshold must be above start,
-        // or the mode would never release once triggered.
-        bool maintHysteresisBad = false;
-        // #8: cvMaxCharge must leave at least kMinChargeMarginV below the
-        // Daly's own cell overvoltage protection.
-        bool chargeHeadroomBad = false;
-        // A negative current setpoint (trickle/limp/maintenance/full charge
-        // or discharge amps) has no valid meaning - 0 A is allowed.
-        bool hasNegativeCurrent = false;
+    struct ValidationResult;
+    // Pure sanity check over one SystemConfig (defined below the field
+    // table): every field against its own min/max in kConfigFields, plus the
+    // rules that relate two fields. No Arduino/FreeRTOS dependency, tested in
+    // test/test_systemconfig/. Callers decide what to do with a failing
+    // result (WebDashboard's saveConfig() refuses it; loadConfig() logs it).
+    static ValidationResult validate(const SystemConfig &cfg);
+};
 
-        bool ok() const
-        {
-            return !hasNaN && !maintStartBelowMinDischarge && !chargeTaperOrderBad &&
-                   !dischargeTaperOrderBad && !maintHysteresisBad && !chargeHeadroomBad &&
-                   !hasNegativeCurrent;
-        }
-    };
-
-    // Pure sanity check over one SystemConfig - no Arduino/FreeRTOS
-    // dependency, so it runs under the native unit tests
-    // (test/test_systemconfig/) same as Glideslope.h. Doesn't mutate cfg;
-    // callers decide what to do with a failing result (WebDashboard's
-    // saveConfig() refuses to persist it; loadConfig() only logs).
-    static ValidationResult validate(const SystemConfig &cfg)
+// One row per setting: THE place where a setting's NVS key / form field
+// name, default, allowed range, display precision, step and label live.
+// WebDashboard uses it for loadConfig() (defaults), saveConfig() (parsing),
+// the /config page (each input is generated from its row, so the browser
+// enforces the same min/max) and validate() below checks every field
+// against it. Add a setting = add a row (plus a `!!IN_<key>!!` placeholder
+// in config_html). The ranges are sanity limits against typos and
+// rolled-over values (-60 mV stored as 65476 once switched spread derating
+// off, #61), not tuning advice.
+struct ConfigField
+{
+    enum Kind
     {
-        ValidationResult r;
+        KIND_FLOAT,
+        KIND_INT,
+        KIND_UINT16
+    };
+    const char *key; // NVS key and /save form field name - never rename (NVS)
+    Kind kind;
+    size_t offset; // offsetof(SystemConfig, <member>)
+    float def;
+    float min; // inclusive
+    float max; // inclusive
+    uint8_t decimals; // /config display precision (floats)
+    const char *step; // HTML step attribute
+    const char *label; // as on the /config page
+    const char *unit;
+};
 
-        const float *floats[] = {
-            &cfg.maxChargeA, &cfg.maxDischargeA, &cfg.cvStartTaper, &cfg.cvMaxCharge,
-            &cfg.cvStartDTaper, &cfg.cvMinDischarge, &cfg.cvHighAlarmGate, &cfg.cvLowAlarmGate,
-            &cfg.trickleA, &cfg.limpDischargeA, &cfg.cvMaintStart, &cfg.cvMaintStop,
-            &cfg.maintAmps,
-        };
-        for (const float *f : floats) {
-            if (isnan(*f)) {
-                r.hasNaN = true;
-                return r; // short-circuit: every other check is meaningless
-            }
-        }
+constexpr ConfigField kConfigFields[] = {
+    // key     kind                     member                                     default  min                 max                                    dec step     label                          unit
+    {"ca", ConfigField::KIND_FLOAT, offsetof(SystemConfig, maxChargeA), 250.0f, 0.0f, kMaxCurrentA, 0, "any", "Max Charge Amps", "A"},
+    {"cvt", ConfigField::KIND_FLOAT, offsetof(SystemConfig, cvStartTaper), 3.375f, kMinCellThresholdV, kDalyOvervoltageV, 3, "0.001", "Start Taper Vpc", "V"},
+    {"cag", ConfigField::KIND_FLOAT, offsetof(SystemConfig, cvHighAlarmGate), 3.425f, kMinCellThresholdV, kDalyOvervoltageV, 3, "0.001", "High Alarm Gate Vpc", "V"},
+    {"ta", ConfigField::KIND_FLOAT, offsetof(SystemConfig, trickleA), 2.0f, 0.0f, kMaxCurrentA, 1, "any", "Trickle Amps", "A"},
+    // Max is the #8 headroom rule: Daly OVP minus the minimum margin. In
+    // binary32 3.65f - 0.10f = 3.5500002 > 3.55f, so 3.550 passes and
+    // anything above (e.g. 3.5505) fails - no tolerance needed or wanted.
+    {"cmv", ConfigField::KIND_FLOAT, offsetof(SystemConfig, cvMaxCharge), 3.450f, kMinCellThresholdV, kDalyOvervoltageV - kMinChargeMarginV, 3, "0.001", "Max Charge Vpc", "V"},
+    {"cmsv", ConfigField::KIND_FLOAT, offsetof(SystemConfig, cvMaintStart), 3.030f, kMinCellThresholdV, kDalyOvervoltageV, 3, "0.001", "Maint. Start Vpc", "V"},
+    {"cmpp", ConfigField::KIND_FLOAT, offsetof(SystemConfig, cvMaintStop), 3.220f, kMinCellThresholdV, kDalyOvervoltageV, 3, "0.001", "Maint. Stop Vpc", "V"},
+    {"mam", ConfigField::KIND_FLOAT, offsetof(SystemConfig, maintAmps), 20.0f, 0.0f, kMaxCurrentA, 0, "any", "Maintenance Amps", "A"},
+    {"da", ConfigField::KIND_FLOAT, offsetof(SystemConfig, maxDischargeA), 500.0f, 0.0f, kMaxCurrentA, 0, "any", "Max Discharge Amps", "A"},
+    {"cdvt", ConfigField::KIND_FLOAT, offsetof(SystemConfig, cvStartDTaper), 3.100f, kMinCellThresholdV, kDalyOvervoltageV, 3, "0.001", "Start D-Taper Vpc", "V"},
+    {"clag", ConfigField::KIND_FLOAT, offsetof(SystemConfig, cvLowAlarmGate), 3.065f, kMinCellThresholdV, kDalyOvervoltageV, 3, "0.001", "Low Alarm Gate Vpc", "V"},
+    {"ld_v2", ConfigField::KIND_FLOAT, offsetof(SystemConfig, limpDischargeA), 15.0f, 0.0f, kMaxCurrentA, 0, "any", "Limp Discharge Amps", "A"},
+    {"cmdv", ConfigField::KIND_FLOAT, offsetof(SystemConfig, cvMinDischarge), 3.000f, kMinCellThresholdV, kDalyOvervoltageV, 3, "0.001", "Min Discharge Vpc", "V"},
+    {"vs", ConfigField::KIND_INT, offsetof(SystemConfig, vSamples), 12, 1, kMaxVSamples, 0, "1", "Voltage Window", "samples"},
+    // A negative timeout used to become a ~49-day window in isFresh(),
+    // disabling the stale-BMS 0 A fail-safe.
+    {"to", ConfigField::KIND_INT, offsetof(SystemConfig, bmsTimeout), 60, 5, 600, 0, "1", "BMS timeout", "s"},
+    // Above ~1000 mV a spread threshold can never be reached, which would
+    // switch spread derating (#24) off in effect.
+    {"sps", ConfigField::KIND_UINT16, offsetof(SystemConfig, spreadStartMv), 60, 0, 1000, 0, "1", "Cell spread: start derating", "mV"},
+    {"spm", ConfigField::KIND_UINT16, offsetof(SystemConfig, spreadMaxMv), 150, 0, 1000, 0, "1", "Cell spread: full derating", "mV"},
+};
+constexpr size_t kNumConfigFields = sizeof(kConfigFields) / sizeof(kConfigFields[0]);
+static_assert(kNumConfigFields <= 32, "ValidationResult::outOfRange is a 32-bit mask");
 
-        r.maintStartBelowMinDischarge = cfg.cvMaintStart <= cfg.cvMinDischarge;
-        r.chargeTaperOrderBad =
-            !(cfg.cvStartTaper < cfg.cvHighAlarmGate && cfg.cvHighAlarmGate < cfg.cvMaxCharge);
-        r.dischargeTaperOrderBad =
-            !(cfg.cvStartDTaper > cfg.cvLowAlarmGate && cfg.cvLowAlarmGate > cfg.cvMinDischarge);
-        r.maintHysteresisBad = cfg.cvMaintStart >= cfg.cvMaintStop;
+// A field's value as float (every int/uint16 setting fits exactly).
+inline float configFieldValue(const SystemConfig &cfg, const ConfigField &f)
+{
+    const uint8_t *m = reinterpret_cast<const uint8_t *>(&cfg) + f.offset;
+    switch (f.kind)
+    {
+    case ConfigField::KIND_INT:
+        return (float)*reinterpret_cast<const int *>(m);
+    case ConfigField::KIND_UINT16:
+        return (float)*reinterpret_cast<const uint16_t *>(m);
+    default:
+        return *reinterpret_cast<const float *>(m);
+    }
+}
 
-        // No tolerance on purpose: in IEEE binary32, 3.65f - 0.10f is
-        // 3.5500002 and 3.55f is 3.5499999, so the live 3.550 V ceiling
-        // passes a plain comparison and anything above it (e.g. 3.5505)
-        // fails. Adding slack here would only raise the safety ceiling.
-        r.chargeHeadroomBad = cfg.cvMaxCharge > (kDalyOvervoltageV - kMinChargeMarginV);
+struct SystemConfig::ValidationResult
+{
+    // Bit i set: kConfigFields[i] is outside its [min, max] - or NaN/inf,
+    // which fails the range comparison too.
+    uint32_t outOfRange = 0;
+    // Any field is NaN/inf. The rules below are skipped then: NaN compares
+    // false, so they would only add spurious violations.
+    bool hasNaN = false;
 
-        r.hasNegativeCurrent = cfg.trickleA < 0 || cfg.limpDischargeA < 0 ||
-                                cfg.maintAmps < 0 || cfg.maxChargeA < 0 || cfg.maxDischargeA < 0;
+    // Rules that relate two fields (a per-field range can't express them):
+    // #12: the Winter Force Charge trigger (min cell < cvMaintStart) must
+    // sit above the discharge floor, or the grid top-up can only start
+    // once discharge is already cut.
+    bool maintStartBelowMinDischarge = false;
+    // Charge side strictly increasing: full current below cvStartTaper,
+    // tapering to trickle at cvHighAlarmGate, hard cutoff at cvMaxCharge.
+    bool chargeTaperOrderBad = false;
+    // Discharge side strictly decreasing: cvStartDTaper > cvLowAlarmGate >
+    // cvMinDischarge.
+    bool dischargeTaperOrderBad = false;
+    // Maintenance hysteresis (#12): stop above start, or it never releases.
+    bool maintHysteresisBad = false;
+    // Spread derating (#24): start below full.
+    bool spreadOrderBad = false;
 
-        return r;
+    bool ok() const
+    {
+        return outOfRange == 0 && !hasNaN && !maintStartBelowMinDischarge && !chargeTaperOrderBad &&
+               !dischargeTaperOrderBad && !maintHysteresisBad && !spreadOrderBad;
     }
 };
+
+inline SystemConfig::ValidationResult SystemConfig::validate(const SystemConfig &cfg)
+{
+    ValidationResult r;
+
+    for (size_t i = 0; i < kNumConfigFields; i++)
+    {
+        float v = configFieldValue(cfg, kConfigFields[i]);
+        if (!isfinite(v))
+            r.hasNaN = true;
+        if (!(v >= kConfigFields[i].min && v <= kConfigFields[i].max))
+            r.outOfRange |= (1u << i);
+    }
+    if (r.hasNaN)
+        return r;
+
+    r.maintStartBelowMinDischarge = cfg.cvMaintStart <= cfg.cvMinDischarge;
+    r.chargeTaperOrderBad =
+        !(cfg.cvStartTaper < cfg.cvHighAlarmGate && cfg.cvHighAlarmGate < cfg.cvMaxCharge);
+    r.dischargeTaperOrderBad =
+        !(cfg.cvStartDTaper > cfg.cvLowAlarmGate && cfg.cvLowAlarmGate > cfg.cvMinDischarge);
+    r.maintHysteresisBad = cfg.cvMaintStart >= cfg.cvMaintStop;
+    r.spreadOrderBad = cfg.spreadStartMv >= cfg.spreadMaxMv;
+
+    return r;
+}

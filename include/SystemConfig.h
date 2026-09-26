@@ -217,8 +217,9 @@ struct SystemConfig
     Setting<float> limpDischargeA{"ld_v2", "Limp Amps", "A", 0.0f, kMaxCurrentA, 15.0f, 0, "any"};
     Setting<float> cvMinDischarge{"cmdv", "Min Discharge Vpc", "V", kMinCellThresholdV, kDalyOvervoltageV, 3.000f, 3, "0.001"};
     Setting<int> vSamples{"vs", "Voltage Window", "samples", 1, kMaxVSamples, 12, 0, "1"};
-    // A negative timeout used to become a ~49-day window in isFresh(),
-    // disabling the stale-BMS 0 A fail-safe.
+    // A negative timeout would become a ~49-day window in isFresh() via
+    // unsigned wraparound, disabling the stale-BMS 0 A fail-safe - the min
+    // above guards against it.
     Setting<int> bmsTimeout{"to", "BMS timeout", "s", 5, 600, 60, 0, "1"};
     // Raw (max-min) cell spread at which current-limit derating starts
     // (#24), and at which it bottoms out at trickle/limp current. Above

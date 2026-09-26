@@ -1,7 +1,5 @@
 #include "DalyRS485.h"
 #include <cstring>
-#include <cstdarg>
-#include <cstdio>
 
 namespace
 {
@@ -16,24 +14,6 @@ namespace
 
 DalyRS485::DalyRS485(HardwareSerial &serial)
     : _serial(&serial), _debugCb(nullptr) {}
-
-// Defined out-of-class (required for a non-constexpr reference static data
-// member): binds to the single table owned by DalyFrames::kAlarmBitNames().
-const char *const (&DalyRS485::kAlarmBitNames)[7][8] = DalyFrames::kAlarmBitNames();
-
-void DalyRS485::debugLog(const char *format, ...)
-{
-    if (!_debugCb)
-        return;
-
-    char loc_res[256];
-    va_list arg;
-    va_start(arg, format);
-    vsnprintf(loc_res, sizeof(loc_res), format, arg);
-    va_end(arg);
-
-    _debugCb(loc_res);
-}
 
 void DalyRS485::begin(int rxPin, int txPin, int sePin, int enPin, int pwr5vPin)
 {
@@ -57,7 +37,7 @@ void DalyRS485::begin(int rxPin, int txPin, int sePin, int enPin, int pwr5vPin)
     _serial->begin(kUartBaud, SERIAL_8N1, rxPin, txPin);
 }
 
-void DalyRS485::setDebugCallback(DalyDebugCallback cb)
+void DalyRS485::setDebugCallback(LogSink cb)
 {
     _debugCb = cb;
 }
@@ -101,7 +81,7 @@ bool DalyRS485::receiveFrame(DalyFrames::Cmd expected, uint8_t payload[DalyFrame
             }
             else if (logChecksumFailures && _frameAssembler.checksumFailedOnLastFeed())
             {
-                debugLog("[DALY-LIB] Stream checksum failed. Continuing...\n");
+                logTo(_debugCb, "[DALY-LIB] Stream checksum failed. Continuing...\n");
             }
         }
         else
@@ -178,7 +158,7 @@ bool DalyRS485::readCellVoltages(uint8_t expectedCells, std::vector<float> &cell
                 if (!_cellVoltagesRejecting)
                 {
                     uint16_t mv = (uint16_t)(cellVoltages[badIndex] * 1000.0f + 0.5f);
-                    debugLog("[BMS] Rejected cell frame: cell %d = %u mV outside 1.5-4.5 V\n", badIndex + 1, mv);
+                    logTo(_debugCb, "[BMS] Rejected cell frame: cell %d = %u mV outside 1.5-4.5 V\n", badIndex + 1, mv);
                     _cellVoltagesRejecting = true;
                 }
                 cellVoltages.assign(expectedCells, 0.0f);
@@ -187,14 +167,14 @@ bool DalyRS485::readCellVoltages(uint8_t expectedCells, std::vector<float> &cell
 
             if (_cellVoltagesRejecting)
             {
-                debugLog("[BMS] Cell frames plausible again\n");
+                logTo(_debugCb, "[BMS] Cell frames plausible again\n");
                 _cellVoltagesRejecting = false;
             }
 
             return true; // We got them all!
         }
 
-        debugLog("[DALY-LIB] Missed frames. Got %d/%d. Retrying...\n", collector.framesReceived(), collector.expectedFrames());
+        logTo(_debugCb, "[DALY-LIB] Missed frames. Got %d/%d. Retrying...\n", collector.framesReceived(), collector.expectedFrames());
         vTaskDelay(pdMS_TO_TICKS(kCellVoltageRetryPauseMs)); // Pause before retry
     }
     return false;
@@ -209,7 +189,7 @@ bool DalyRS485::readMosfetStatus(DalyMosfetStatus &status)
 
     if (!DalyFrames::parseMosfetStatus(data, status))
     {
-        debugLog("[DALY-LIB] 0x93 MOSFET bytes out of expected range (%d,%d). Ignoring frame.\n", data[1], data[2]);
+        logTo(_debugCb, "[DALY-LIB] 0x93 MOSFET bytes out of expected range (%d,%d). Ignoring frame.\n", data[1], data[2]);
         return false;
     }
     return true;

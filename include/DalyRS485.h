@@ -2,12 +2,11 @@
 #include <Arduino.h>
 #include <vector>
 #include "DalyFrames.h"
-
-typedef void (*DalyDebugCallback)(const char *msg);
+#include "LogSink.h"
 
 // The plain data structs and pure byte-level parsers live in DalyFrames.h,
 // so both compile and run under `pio test -e native`. These using-
-// declarations keep the unqualified names working for existing callers.
+// declarations keep the unqualified names below working.
 using DalyFrames::DalyAlarmStatus;
 using DalyFrames::DalyBasicInfo;
 using DalyFrames::DalyMosfetStatus;
@@ -19,26 +18,16 @@ public:
 
     void begin(int rxPin, int txPin, int sePin = -1, int enPin = -1, int pwr5vPin = -1);
 
-    void setDebugCallback(DalyDebugCallback cb);
+    void setDebugCallback(LogSink cb);
 
     bool readBasicInfo(DalyBasicInfo &info);
     bool readCellVoltages(uint8_t expectedCells, std::vector<float> &cellVoltages);
     bool readMosfetStatus(DalyMosfetStatus &status);
     bool readAlarmStatus(DalyAlarmStatus &status);
 
-    // Reference to the table owned by DalyFrames::kAlarmBitNames(), kept as
-    // a static member here so callers keep using
-    // `DalyRS485::kAlarmBitNames[b][bit]`.
-    static const char *const (&kAlarmBitNames)[7][8];
-
-    // See DalyFrames::kCellMinPlausibleMv/kCellMaxPlausibleMv for the
-    // rationale; readCellVoltages() rejects the whole read when it fails.
-    static constexpr uint16_t kCellMinPlausibleMv = DalyFrames::kCellMinPlausibleMv;
-    static constexpr uint16_t kCellMaxPlausibleMv = DalyFrames::kCellMaxPlausibleMv;
-
 private:
     HardwareSerial *_serial;
-    DalyDebugCallback _debugCb; // Stores the callback function
+    LogSink _debugCb;
     DalyFrames::FrameAssembler _frameAssembler;
 
     // Edge-triggered flag for the "Rejected cell frame"/"plausible again"
@@ -62,6 +51,4 @@ private:
     // writing the 8-byte payload into `payload` on success. One attempt,
     // no retry.
     bool query(DalyFrames::Cmd cmd, uint8_t payload[DalyFrames::kPayloadLen], unsigned long timeoutMs);
-
-    void debugLog(const char *format, ...) __attribute__((format(printf, 2, 3)));
 };

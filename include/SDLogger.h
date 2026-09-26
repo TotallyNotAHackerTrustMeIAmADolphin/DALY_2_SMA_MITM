@@ -5,11 +5,7 @@
 #include <memory>
 #include "SystemState.h"
 #include "MutexLock.h"
-
-// Matches DalyRS485/SMA_CAN's existing setDebugCallback pattern, so SD
-// mount/init failures reach netLog() (Serial+web console) instead of
-// only the USB serial port.
-typedef void (*SDDebugCallback)(const char *msg);
+#include "LogSink.h"
 
 // Background SD-card logger for BMS/SMA telemetry and system events.
 // Writes happen on a single dedicated FreeRTOS task, fed by a queue, so
@@ -42,11 +38,9 @@ public:
     // Returns false if no card is present / mount fails.
     static bool begin();
 
-    static bool isReady();
-
     // Attach a logging function, called for mount/init failures. Set this
     // before begin() to have those failures reach netLog() too.
-    static void setDebugCallback(SDDebugCallback cb);
+    static void setDebugCallback(LogSink cb);
 
     // Enqueues a telemetry snapshot for the CSV log. Safe to call from any task.
     static void logTelemetry(const DashboardData &data);
@@ -105,5 +99,5 @@ private:
     static std::atomic<uint32_t> droppedQueueFull_;
     static std::atomic<uint32_t> droppedLockTimeout_;
     static std::atomic<uint32_t> writeFailures_;
-    static SDDebugCallback debugCb;
+    static LogSink debugCb;
 };

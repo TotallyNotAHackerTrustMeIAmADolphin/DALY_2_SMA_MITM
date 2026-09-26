@@ -10,9 +10,7 @@
 
 // Single source of truth for the nav bar shared by every page below - each
 // PROGMEM literal splices these in via adjacent string-literal concatenation
-// (a compile-time, zero-runtime-cost operation), so a page can never drift
-// out of sync with the others the way the standalone "Back to Dashboard"
-// links and the once-forgotten body margin:0 did.
+// (compile-time, zero runtime cost), so the pages can't drift out of sync.
 #define NAV_CSS ".nav { background: #1e1e1e; padding: 10px; border-bottom: 2px solid #333; margin-bottom: 10px; text-align: center; } .nav a { color: #4caf50; text-decoration: none; margin: 0 15px; font-weight: bold; }"
 #define NAV_BAR "<div class=\"nav\"><a href=\"/\">DASHBOARD</a> | <a href=\"/config\">CONFIGURATION</a> | <a href=\"/logs\">LOGS</a> | <a href=\"/graphs\">GRAPHS</a></div>"
 
@@ -32,17 +30,13 @@
 #define FILE_TOOLBAR(reloadFn) "<div class=\"toolbar\"><select id=\"fileSelect\"></select><button class=\"btn\" onclick=\"" reloadFn "()\">Reload</button><a id=\"downloadLink\" class=\"btn\" style=\"text-decoration:none;\" href=\"#\" download>Download</a></div>"
 
 // Single source of truth for the "fetch a file list, filter it, optionally
-// populate a <select>, auto-select the newest" JS pasted (and drifted -
-// see #46) across index_html's loadRecentLog(), logs_html's loadList() and
-// graphs_html's loadList(); also holds fetchOk(), the fetch-then-throw-on-
-// non-2xx wrapper every page's fetch call used to repeat inline.
-// (a #define's raw-string value can't span real newlines with this
-// toolchain's preprocessor - unlike a raw string literal used directly in
-// one of the page bodies below - so this one is kept to a single physical
-// line, and JS comments are kept out of it, since a `//` comment would run
-// to the end of that line and swallow the rest of the macro. See the doc
-// comment above for what it does.)
-#define SHARED_LIST_JS R"jssrc( async function fetchOk(url) { const res = await fetch(url); if (!res.ok) throw new Error('HTTP ' + res.status); return res; } async function fetchAndPopulateSelect(url, filterFn, selectEl, statusEl, labelFn) { let files = await (await fetchOk(url)).json(); if (filterFn) files = files.filter(filterFn); if (statusEl) statusEl.innerText = ''; if (selectEl) { selectEl.innerHTML = ''; files.forEach(f => { const opt = document.createElement('option'); opt.value = f.name; opt.text = labelFn ? labelFn(f) : f.name; selectEl.appendChild(opt); }); if (files.length) selectEl.selectedIndex = files.length - 1; } return files; } )jssrc"
+// populate a <select>, auto-select the newest" JS shared by index_html's
+// loadRecentLog(), logs_html's loadList() and graphs_html's loadList();
+// also holds fetchOk(), the fetch-then-throw-on-non-2xx wrapper shared by
+// every page's fetch call (#46). Kept to one physical line with no JS
+// comments in it: a #define's raw-string value can't span real newlines,
+// and a `//` comment would swallow the rest of the macro.
+#define SHARED_LIST_JS R"jssrc( async function fetchOk(url, init) { const res = await fetch(url, init); if (!res.ok) throw new Error('HTTP ' + res.status); return res; } async function fetchAndPopulateSelect(url, filterFn, selectEl, statusEl, labelFn) { let files = await (await fetchOk(url)).json(); if (filterFn) files = files.filter(filterFn); if (statusEl) statusEl.innerText = ''; if (selectEl) { selectEl.innerHTML = ''; files.forEach(f => { const opt = document.createElement('option'); opt.value = f.name; opt.text = labelFn ? labelFn(f) : f.name; selectEl.appendChild(opt); }); if (files.length) selectEl.selectedIndex = files.length - 1; } return files; } )jssrc"
 
 // logs_html/graphs_html only: armDownload() is their repeated "bail if
 // nothing's selected, else point #downloadLink at it" guard; initFilePage()
@@ -93,8 +87,8 @@ const char index_html[] PROGMEM = HTML_HEAD("BMS Bridge Pro") R"rawliteral(
 </div>
 
 <div class="card" style="margin: 0 15px;">
-  <a href="/toggleMaint" class="btn btn-blue" id="mbtn">TRIGGER FORCE CHARGE</a>
-  <button class="btn btn-red" onclick="if(confirm('Simulate battery disconnect?')) fetch('/resetSMA')">CLEAR SMA ERROR (Reset)</button>
+  <button class="btn btn-blue" id="mbtn" onclick="postAction('/toggleMaint')">TRIGGER FORCE CHARGE</button>
+  <button class="btn btn-red" onclick="if(confirm('Simulate battery disconnect?')) postAction('/resetSMA')">CLEAR SMA ERROR (Reset)</button>
 </div>
 <div id="console">Loading history...<br></div>
 <script>
@@ -111,6 +105,13 @@ const char index_html[] PROGMEM = HTML_HEAD("BMS Bridge Pro") R"rawliteral(
     while (con.childNodes.length > CON_MAX_LINES) con.removeChild(con.firstChild);
   }
   function conReset(text) { con.textContent = ''; conAppend(text); }
+
+  // POSTs a UI action (toggleMaint/resetSMA); a 503 means the device held
+  // dataMutex too long to apply it, so the caller can just try again.
+  async function postAction(url) {
+    try { await fetchOk(url, { method: 'POST' }); }
+    catch (e) { alert('Action failed: ' + e.message); }
+  }
 
   // Seed the console with the tail of today's SD .log file on load, so it
   // shows recent history instead of only events that happen to fire after

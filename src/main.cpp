@@ -1,5 +1,4 @@
 #include <Arduino.h>
-#include <cstring>
 #include <cmath>
 #include <WiFi.h>
 #include <ArduinoOTA.h>
@@ -20,6 +19,7 @@
 #include "MutexLock.h"
 #include "Interval.h"
 #include "LocalClock.h"
+#include "LogSink.h"
 
 static_assert(kPackCells <= DalyFrames::kMaxCollectorCells, "DalyRS485 can't collect every cell of the pack");
 
@@ -75,6 +75,18 @@ constexpr TickType_t kCanTickLockTimeout = pdMS_TO_TICKS(20);
 constexpr TickType_t kLoopLockTimeout = pdMS_TO_TICKS(20);
 
 // --- CENTRAL LOGGING ---
+// Serial + SSE only, no timestamp, no SD - netLog() below is the only
+// caller. Nothing else may call this directly, or its line skips the SD log.
+static void netOut(const char *line)
+{
+  Serial.print(line);
+  if (netReady)
+  {
+    if (MutexLock lock{netOutMutex, kNetOutLockTimeout})
+      webUI.broadcastLog(line);
+  }
+}
+
 // printf format checking: a Setting<T> (or any wrong type) passed for a
 // %d/%f is a compile warning instead of garbage in the log - varargs never
 // apply Setting's conversion to T.
@@ -84,8 +96,12 @@ void netLog(const char *format, ...)
   char loc_res[256];
   va_list arg;
   va_start(arg, format);
-  vsnprintf(loc_res, sizeof(loc_res), format, arg);
+  int n = vsnprintf(loc_res, sizeof(loc_res), format, arg);
   va_end(arg);
+  // Truncated: force back the trailing '\n' a longer line would have had,
+  // so it can't run onto whatever the next line writes.
+  if (n >= (int)sizeof(loc_res))
+    loc_res[sizeof(loc_res) - 2] = '\n';
 
   struct tm timeinfo;
   bool haveClock = LocalClock::localNow(timeinfo);
@@ -102,16 +118,14 @@ void netLog(const char *format, ...)
     snprintf(final_res, sizeof(final_res), "[WAITING FOR NTP...] %s", loc_res);
   }
 
-  Serial.print(final_res);
-  if (netReady)
-  {
-    if (MutexLock lock{netOutMutex, kNetOutLockTimeout})
-      webUI.broadcastLog(final_res);
-  }
+  netOut(final_res);
   SDLogger::logEvent(loc_res);
 }
 
-void libraryLogger(const char *msg) { netLog("%s", msg); }
+// The LogSink for every module: same timestamp/Serial/SSE/SD path as
+// netLog(). SDLogger's writer task must never call it (it would recurse
+// into its own queue).
+void netLogLine(const char *line) { netLog("%s", line); }
 
 // SSE telemetry push, serialized with netLog's network sinks (netOutMutex).
 void pushTelemetry(const DashboardData &data)
@@ -123,39 +137,38 @@ void pushTelemetry(const DashboardData &data)
 }
 
 // --- UI EVENT HANDLER ---
-void handleUIAction(const char *action)
+// Returns whether it applied (false = dataMutex busy); the route answers
+// 200/503.
+bool handleUIAction(UiAction action)
 {
-  if (strcmp(action, "toggleMaint") == 0)
+  bool applied = false, maintOn = false;
+  if (MutexLock lock{dataMutex, kUiLockTimeout})
   {
-    bool applied = false, newState = false;
-    if (MutexLock lock{dataMutex, kUiLockTimeout})
+    applied = true;
+    switch (action)
     {
+    case UiAction::ToggleMaint:
       uiCommands.manualMaintForce = !uiCommands.manualMaintForce;
-      newState = uiCommands.manualMaintForce;
-      applied = true;
-    }
-    if (applied)
-      netLog("[USER] Manual Force Charge: %s\n", newState ? "ON" : "OFF");
-    else
-      netLog("[USER] %s ignored: state busy\n", action);
-  }
-  else if (strcmp(action, "resetSMA") == 0)
-  {
-    bool applied = false;
-    if (MutexLock lock{dataMutex, kUiLockTimeout})
-    {
+      maintOn = uiCommands.manualMaintForce;
+      break;
+    case UiAction::ResetSma:
       // 0 = "not armed yet": canTask starts the hold from the first status
       // frame it actually sends with the reset (DVL 0), so a request made
       // while the BMS is still silent isn't consumed by the wait.
       uiCommands.resetHoldStartMs = 0;
       uiCommands.resetRequested = true;
-      applied = true;
+      break;
     }
-    if (applied)
-      netLog("[USER] Manual Cluster Reset Triggered.\n");
-    else
-      netLog("[USER] %s ignored: state busy\n", action);
   }
+
+  const char *name = action == UiAction::ToggleMaint ? "toggleMaint" : "resetSMA";
+  if (!applied)
+    netLog("[USER] %s ignored: state busy\n", name);
+  else if (action == UiAction::ToggleMaint)
+    netLog("[USER] Manual Force Charge: %s\n", maintOn ? "ON" : "OFF");
+  else
+    netLog("[USER] Manual Cluster Reset Triggered.\n");
+  return applied;
 }
 
 // Periodic work, in ms (Interval fires once more than the period passed).
@@ -557,28 +570,28 @@ void setup()
   // Config and SD need no network - load them before the BMS/CAN tasks,
   // which need the setpoints (and a place to log) right away.
   webUI.setActionCallback(handleUIAction);
-  webUI.setDebugCallback(netLog);
+  webUI.setDebugCallback(netLogLine);
 
-  SDLogger::setDebugCallback(libraryLogger);
+  SDLogger::setDebugCallback(netLogLine);
   bool sdOk = SDLogger::begin();
   netLog(sdOk ? "[SYS] SD card logging initialized.\n"
               : "[SYS] SD card logging unavailable (no card or mount failed).\n");
 
   // After SDLogger::begin(): the "[CFG] Loaded config fails validation"
   // lines only reach the SD .log once it is initialised.
-  ConfigStore::load(cfg, netLog);
+  ConfigStore::load(cfg, netLogLine);
 
   // Right after the SD log exists to receive it, not deferred to loop(),
   // so a reset within the first 60s of a cold boot still gets logged.
-  Diagnostics::setDebugCallback(netLog);
+  Diagnostics::setDebugCallback(netLogLine);
   Diagnostics::logBootDiagnostics();
 
   // BMS and CAN come up before the network: setupNetwork() can block up to
   // ~15s, and the SMA should get frames as soon as real BMS data exists.
-  bms.setDebugCallback(libraryLogger);
+  bms.setDebugCallback(netLogLine);
   bms.begin(RS485_RX, RS485_TX, RS485_SE, RS485_EN, PIN_5V_EN);
 
-  inverter.setDebugCallback(libraryLogger);
+  inverter.setDebugCallback(netLogLine);
   inverter.begin((gpio_num_t)CAN_TX, (gpio_num_t)CAN_RX, (gpio_num_t)CAN_SE);
 
   // No handle output needed here - Diagnostics::logHealth() looks these up

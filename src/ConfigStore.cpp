@@ -7,7 +7,7 @@ namespace
     constexpr const char *kNvsNamespace = "bms-bridge";
 }
 
-void ConfigStore::load(SystemConfig &cfg, LogFn log)
+void ConfigStore::load(SystemConfig &cfg, LogSink log)
 {
     Preferences prefs;
     prefs.begin(kNvsNamespace, false);
@@ -31,9 +31,8 @@ void ConfigStore::load(SystemConfig &cfg, LogFn log)
                                                                           : PT_BLOB; // putFloat = putBytes
         if (stored != expected)
         {
-            if (log)
-                log("[CFG] Stored %s has NVS type %d, expected %d - using the default %s\n",
-                    s->label(), (int)stored, (int)expected, defBuf);
+            logTo(log, "[CFG] Stored %s has NVS type %d, expected %d - using the default %s\n",
+                  s->label(), (int)stored, (int)expected, defBuf);
             continue;
         }
 
@@ -50,7 +49,7 @@ void ConfigStore::load(SystemConfig &cfg, LogFn log)
             v = prefs.getFloat(s->key(), (float)s->def());
             break;
         }
-        if (!s->set(v) && log)
+        if (!s->set(v))
         {
             // v/default are values (round-trip); min/max are limits the
             // owner typed, so they print the same fixed text /config does.
@@ -58,8 +57,8 @@ void ConfigStore::load(SystemConfig &cfg, LogFn log)
             formatSettingValue(*s, v, valBuf, sizeof(valBuf));
             formatSettingFixed(*s, s->min(), minBuf, sizeof(minBuf));
             formatSettingFixed(*s, s->max(), maxBuf, sizeof(maxBuf));
-            log("[CFG] Stored %s (%s) is outside %s-%s %s - using the default %s\n",
-                s->label(), valBuf, minBuf, maxBuf, s->unit(), defBuf);
+            logTo(log, "[CFG] Stored %s (%s) is outside %s-%s %s - using the default %s\n",
+                  s->label(), valBuf, minBuf, maxBuf, s->unit(), defBuf);
         }
     }
 
@@ -67,9 +66,8 @@ void ConfigStore::load(SystemConfig &cfg, LogFn log)
 
     // #56: set() already range-checked every setting; only the rules
     // relating two settings can still fail. Logged only - never blocks boot.
-    if (log)
-        SystemConfig::validate(cfg).forEachMessage([log](const char *msg)
-                                                     { log("[CFG] Loaded config fails validation: %s\n", msg); });
+    SystemConfig::validate(cfg).forEachMessage([log](const char *msg)
+                                                 { logTo(log, "[CFG] Loaded config fails validation: %s\n", msg); });
 }
 
 void ConfigStore::store(const SystemConfig &cfg, const bool present[SystemConfig::kNumSettings])

@@ -3,12 +3,9 @@
 #include "esp_system.h"
 #include "esp_ota_ops.h"
 #include "CoreDumpInfo.h"
+#include "LogSink.h"
 
 class AsyncWebServer; // registerRoutes() only takes a reference
-
-// Matches netLog()'s own variadic signature, so it can be wired straight to
-// netLog with setDebugCallback(netLog) below, no formatting shim needed.
-typedef void (*DiagDebugCallback)(const char *fmt, ...);
 
 // Boot-reason/core-dump diagnostics, the periodic health log, and the OTA
 // rollback-confirmation safety net, callback-wired to netLog like
@@ -17,8 +14,8 @@ typedef void (*DiagDebugCallback)(const char *fmt, ...);
 class Diagnostics
 {
 public:
-    // Attach a logging sink (netLog). Call before any other method here.
-    static void setDebugCallback(DiagDebugCallback cb);
+    // Attach a logging sink (netLogLine). Call before any other method here.
+    static void setDebugCallback(LogSink cb);
 
     static const char *resetReasonName(esp_reset_reason_t r);
     static const char *otaStateName(esp_ota_img_states_t s);
@@ -63,13 +60,7 @@ public:
     static void confirmImageIfReady(bool wifiUp, bool bmsUp);
 
 private:
-    // Formats like printf and forwards to debugCb (a no-op if unset) as a
-    // single "%s" argument, so a log line containing a literal '%' isn't
-    // reinterpreted as one of debugCb's own format specifiers (it's itself
-    // variadic - netLog).
-    static void debugLog(const char *format, ...) __attribute__((format(printf, 1, 2)));
-
-    static DiagDebugCallback debugCb;
+    static LogSink debugCb;
 };
 
 // Defers Arduino's default of marking every new OTA image valid at

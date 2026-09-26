@@ -6,10 +6,9 @@
 #include "SettingFormat.h"
 #include "ConfigStore.h"
 #include "ConfigForm.h"
+#include "MutexLock.h"
 #include <SD.h>
-#include <cstdarg>
 #include <cstddef>
-#include <cstdio>
 
 namespace
 {
@@ -18,6 +17,9 @@ namespace
     // default, and whose set() refuses anything outside that range.
     // ConfigStore::load(), saveConfig() and the /config page just loop over
     // cfg.all().
+
+    // saveConfig()'s dataMutex take - see the comment at its call site.
+    constexpr TickType_t kSaveLockTimeout = pdMS_TO_TICKS(300);
 
     // A value or limit of s, formatted with its display precision - for the
     // /config page and range text, not the [CFG] log (see formatSettingValue).
@@ -46,24 +48,6 @@ namespace
 WebDashboard::WebDashboard(uint16_t port)
     : _server(port), _events("/events") {}
 
-void WebDashboard::debugLog(const char *format, ...)
-{
-    if (!_debugCb)
-        return;
-
-    char loc_res[256];
-    va_list arg;
-    va_start(arg, format);
-    vsnprintf(loc_res, sizeof(loc_res), format, arg);
-    va_end(arg);
-
-    // "%s" as the format string, loc_res as its argument - not
-    // _debugCb(loc_res) - so a log line containing a literal '%' (e.g. a
-    // percentage) isn't reinterpreted as a format specifier by netLog's own
-    // vsnprintf. Same guard as main.cpp's libraryLogger(): netLog("%s", msg).
-    _debugCb("%s", loc_res);
-}
-
 void WebDashboard::begin(SystemConfig *cfg)
 {
     // /config and /save (registered by setupRoutes() below) dereference
@@ -71,7 +55,7 @@ void WebDashboard::begin(SystemConfig *cfg)
     // null deref.
     if (cfg == nullptr)
     {
-        debugLog("[WEB] begin() called with a null config - server not started\n");
+        logTo(_debugCb, "[WEB] begin() called with a null config - server not started\n");
         return;
     }
     _cfg = cfg;
@@ -87,7 +71,7 @@ void WebDashboard::setActionCallback(ActionCallback cb)
     _actionCb = cb;
 }
 
-void WebDashboard::setDebugCallback(WebDebugCallback cb)
+void WebDashboard::setDebugCallback(LogSink cb)
 {
     _debugCb = cb;
 }
@@ -129,10 +113,10 @@ void WebDashboard::saveConfig(AsyncWebServerRequest *request)
         for (const String &msg : errors)
         {
             body += msg + "\n";
-            // One log line per violation: debugLog's buffer is 256 bytes,
-            // and one call with embedded newlines would both truncate and
-            // leave the continuation lines untimestamped.
-            debugLog("[WEB] /save refused: %s\n", msg.c_str());
+            // One log line per violation: logTo's buffer is 256 bytes, and
+            // one call with embedded newlines would both truncate and leave
+            // the continuation lines untimestamped.
+            logTo(_debugCb, "[WEB] /save refused: %s\n", msg.c_str());
         }
         request->send(400, "text/plain", body + "Nothing saved.\n");
         return;
@@ -142,21 +126,23 @@ void WebDashboard::saveConfig(AsyncWebServerRequest *request)
     // 250 ms SMA frame, so this holds the lock for nothing but the publish
     // itself; the NVS write (flash erase/write, tens of ms) runs after the
     // lock is released (#21).
-    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(300)) != pdTRUE)
+    if (MutexLock lock{dataMutex, kSaveLockTimeout})
     {
-        debugLog("[WEB] /save refused: config busy\n");
+        *_cfg = copy;
+    }
+    else
+    {
+        logTo(_debugCb, "[WEB] /save refused: config busy\n");
         request->send(503, "text/plain", "Device busy, please try Save again");
         return;
     }
-    *_cfg = copy;
-    xSemaphoreGive(dataMutex);
 
     ConfigStore::store(copy, result.present);
 
     // Only now that the save has fully succeeded (published under the lock
     // and written to NVS), never for a refused save.
     ConfigForm::logChanges(before, copy, [this](const char *line)
-                            { debugLog("%s", line); });
+                            { logTo(_debugCb, "%s", line); });
 
     request->redirect("/");
 }
@@ -229,18 +215,24 @@ void WebDashboard::handleIndex(AsyncWebServerRequest *request)
     request->send(200, "text/html", index_html);
 }
 
+namespace
+{
+    // Both action routes differ only in which UiAction they apply.
+    void respondToAction(AsyncWebServerRequest *request, ActionCallback cb, UiAction action)
+    {
+        bool applied = cb && cb(action);
+        request->send(applied ? 200 : 503, "text/plain", applied ? "OK" : "Device busy, try again");
+    }
+}
+
 void WebDashboard::handleToggleMaint(AsyncWebServerRequest *request)
 {
-    if (_actionCb)
-        _actionCb("toggleMaint");
-    request->redirect("/");
+    respondToAction(request, _actionCb, UiAction::ToggleMaint);
 }
 
 void WebDashboard::handleResetSMA(AsyncWebServerRequest *request)
 {
-    if (_actionCb)
-        _actionCb("resetSMA");
-    request->send(200, "text/plain", "OK");
+    respondToAction(request, _actionCb, UiAction::ResetSma);
 }
 
 void WebDashboard::handleConfigPage(AsyncWebServerRequest *request)
@@ -382,9 +374,9 @@ void WebDashboard::handleGraph(AsyncWebServerRequest *request)
 void WebDashboard::setupRoutes()
 {
     _server.on("/", HTTP_GET, handleIndex);
-    _server.on("/toggleMaint", HTTP_GET, [this](AsyncWebServerRequest *r)
+    _server.on("/toggleMaint", HTTP_POST, [this](AsyncWebServerRequest *r)
                { handleToggleMaint(r); });
-    _server.on("/resetSMA", HTTP_GET, [this](AsyncWebServerRequest *r)
+    _server.on("/resetSMA", HTTP_POST, [this](AsyncWebServerRequest *r)
                { handleResetSMA(r); });
     _server.on("/config", HTTP_GET, [this](AsyncWebServerRequest *r)
                { handleConfigPage(r); });

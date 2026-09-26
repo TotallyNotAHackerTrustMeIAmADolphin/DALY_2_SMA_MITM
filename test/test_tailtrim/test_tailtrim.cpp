@@ -25,7 +25,7 @@ static void feedInChunks(Trimmer &trimmer, const std::string &content, size_t ch
 
 // --- content shorter than maxBytes: left completely untouched ---
 
-void test_content_shorter_than_maxbytes_untouched(void)
+static void test_content_shorter_than_maxbytes_untouched(void)
 {
     // Deliberately starts with a line containing a newline near the front
     // - finish() must NOT strip it, since truncation never happened.
@@ -43,7 +43,7 @@ void test_content_shorter_than_maxbytes_untouched(void)
 
 // --- content exceeding maxBytes across multiple chunks: correct trim point ---
 
-void test_content_exceeding_maxbytes_trims_to_last_n_bytes(void)
+static void test_content_exceeding_maxbytes_trims_to_last_n_bytes(void)
 {
     // 4 lines of 11 bytes each ("A"x10 + '\n', etc) = 44 bytes total.
     const std::string content = "AAAAAAAAAA\nBBBBBBBBBB\nCCCCCCCCCC\nDDDDDDDDDD\n";
@@ -61,7 +61,7 @@ void test_content_exceeding_maxbytes_trims_to_last_n_bytes(void)
 
 // --- leading-partial-line-drop only fires when truncation actually occurred ---
 
-void test_finish_drops_leading_partial_line_only_when_truncated(void)
+static void test_finish_drops_leading_partial_line_only_when_truncated(void)
 {
     const std::string content = "AAAAAAAAAA\nBBBBBBBBBB\nCCCCCCCCCC\nDDDDDDDDDD\n"; // 44 bytes
 
@@ -95,7 +95,7 @@ void test_finish_drops_leading_partial_line_only_when_truncated(void)
 // A retained tail that happens to end exactly on a newline must not be
 // wiped out entirely by finish() (same guard as the pre-refactor code:
 // only drop the leading newline if it isn't the very last byte).
-void test_finish_keeps_content_when_only_newline_is_last_byte(void)
+static void test_finish_keeps_content_when_only_newline_is_last_byte(void)
 {
     // maxBytes chosen so the retained tail is exactly "\nZZZZZZZZZZ" ...
     // construct content so that after trimming, the buffer is a single

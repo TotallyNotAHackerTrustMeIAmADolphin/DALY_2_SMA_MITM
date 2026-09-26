@@ -10,7 +10,7 @@ void tearDown(void) {}
 
 // --- First call: raw passthrough + reseed (regression for the boot swing) ---
 
-void test_first_update_returns_raw_exactly_and_reseeds(void)
+static void test_first_update_returns_raw_exactly_and_reseeds(void)
 {
     CellSmoother sm;
     float raw[CellSmoother::MAX_CELLS];
@@ -45,7 +45,7 @@ void test_first_update_returns_raw_exactly_and_reseeds(void)
 
 // --- Full window of constant input converges to (and stays at) that value ---
 
-void test_constant_input_average_equals_it(void)
+static void test_constant_input_average_equals_it(void)
 {
     CellSmoother sm;
     float v[1] = {3.300f};
@@ -60,7 +60,7 @@ void test_constant_input_average_equals_it(void)
 
 // --- Step input: hand-derived intermediate average after k updates ---
 
-void test_step_input_converges_after_window_updates(void)
+static void test_step_input_converges_after_window_updates(void)
 {
     CellSmoother sm;
     float v0[1] = {3.000f};
@@ -88,7 +88,7 @@ void test_step_input_converges_after_window_updates(void)
 
 // --- Window change reseeds from the current reading and resets the index ---
 
-void test_window_change_reseeds_and_resets_index(void)
+static void test_window_change_reseeds_and_resets_index(void)
 {
     CellSmoother sm;
     float a[2] = {3.000f, 3.100f};
@@ -115,7 +115,7 @@ void test_window_change_reseeds_and_resets_index(void)
 
 // --- Shrinking then growing the window again must not pull stale values back in ---
 
-void test_shrink_then_grow_does_not_pull_stale_values_back(void)
+static void test_shrink_then_grow_does_not_pull_stale_values_back(void)
 {
     CellSmoother sm;
     float seed[1] = {3.000f};
@@ -143,7 +143,7 @@ void test_shrink_then_grow_does_not_pull_stale_values_back(void)
 
 // --- Raw min/max/spread over 16 distinct cells ---
 
-void test_raw_min_max_spread_with_16_distinct_cells(void)
+static void test_raw_min_max_spread_with_16_distinct_cells(void)
 {
     CellSmoother sm;
     float raw[CellSmoother::MAX_CELLS];
@@ -160,7 +160,7 @@ void test_raw_min_max_spread_with_16_distinct_cells(void)
 
 // --- n < MAX_CELLS handled: only the first n cells are touched ---
 
-void test_n_less_than_max_cells_handled(void)
+static void test_n_less_than_max_cells_handled(void)
 {
     CellSmoother sm;
     float raw[4] = {3.10f, 3.20f, 3.05f, 3.15f};
@@ -189,7 +189,7 @@ void test_n_less_than_max_cells_handled(void)
 
 // --- n > MAX_CELLS is clamped, not read out of bounds ---
 
-void test_n_greater_than_max_cells_clamped(void)
+static void test_n_greater_than_max_cells_clamped(void)
 {
     CellSmoother sm;
     float raw[20];

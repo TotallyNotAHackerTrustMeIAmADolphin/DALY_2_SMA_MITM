@@ -34,32 +34,32 @@ void tearDown(void) {}
 
 // --- CCL taper (carried over from the old device-side test) ---
 
-void test_ccl_full_below_taper(void) { TEST_ASSERT_EQUAL(1000, calculateCCL(cfg, 3.0f, 3.0f, 0, true, false)); }
-void test_ccl_full_at_taper_start(void) { TEST_ASSERT_EQUAL(1000, calculateCCL(cfg, 3.3f, 3.3f, 0, true, false)); }
-void test_ccl_trickle_at_alarm_gate(void) { TEST_ASSERT_EQUAL(50, calculateCCL(cfg, 3.4f, 3.4f, 0, true, false)); }
-void test_ccl_mid_taper(void)
+static void test_ccl_full_below_taper(void) { TEST_ASSERT_EQUAL(1000, calculateCCL(cfg, 3.0f, 3.0f, 0, true, false)); }
+static void test_ccl_full_at_taper_start(void) { TEST_ASSERT_EQUAL(1000, calculateCCL(cfg, 3.3f, 3.3f, 0, true, false)); }
+static void test_ccl_trickle_at_alarm_gate(void) { TEST_ASSERT_EQUAL(50, calculateCCL(cfg, 3.4f, 3.4f, 0, true, false)); }
+static void test_ccl_mid_taper(void)
 {
     // midpoint of 3.3..3.4 -> average of 100A and 5A = 52.5A
     TEST_ASSERT_EQUAL(525, calculateCCL(cfg, 3.35f, 3.35f, 0, true, false));
 }
-void test_ccl_zero_at_hard_max(void) { TEST_ASSERT_EQUAL(0, calculateCCL(cfg, 3.5f, 3.5f, 0, true, false)); }
-void test_ccl_maintenance_overrides(void) { TEST_ASSERT_EQUAL(200, calculateCCL(cfg, 3.0f, 3.0f, 0, true, true)); }
+static void test_ccl_zero_at_hard_max(void) { TEST_ASSERT_EQUAL(0, calculateCCL(cfg, 3.5f, 3.5f, 0, true, false)); }
+static void test_ccl_maintenance_overrides(void) { TEST_ASSERT_EQUAL(200, calculateCCL(cfg, 3.0f, 3.0f, 0, true, true)); }
 
 // --- DCL taper ---
 
-void test_dcl_full_above_taper(void) { TEST_ASSERT_EQUAL(2000, calculateDCL(cfg, 3.3f, 3.3f, 0, true, false)); }
-void test_dcl_limp_at_alarm_gate(void) { TEST_ASSERT_EQUAL(150, calculateDCL(cfg, 3.1f, 3.1f, 0, true, false)); }
-void test_dcl_mid_taper(void)
+static void test_dcl_full_above_taper(void) { TEST_ASSERT_EQUAL(2000, calculateDCL(cfg, 3.3f, 3.3f, 0, true, false)); }
+static void test_dcl_limp_at_alarm_gate(void) { TEST_ASSERT_EQUAL(150, calculateDCL(cfg, 3.1f, 3.1f, 0, true, false)); }
+static void test_dcl_mid_taper(void)
 {
     // midpoint of 3.1..3.2 -> average of 200A and 15A = 107.5A
     TEST_ASSERT_EQUAL(1075, calculateDCL(cfg, 3.15f, 3.15f, 0, true, false));
 }
-void test_dcl_zero_at_hard_min(void) { TEST_ASSERT_EQUAL(0, calculateDCL(cfg, 3.0f, 3.0f, 0, true, false)); }
-void test_dcl_zero_in_maintenance(void) { TEST_ASSERT_EQUAL(0, calculateDCL(cfg, 3.3f, 3.3f, 0, true, true)); }
+static void test_dcl_zero_at_hard_min(void) { TEST_ASSERT_EQUAL(0, calculateDCL(cfg, 3.0f, 3.0f, 0, true, false)); }
+static void test_dcl_zero_in_maintenance(void) { TEST_ASSERT_EQUAL(0, calculateDCL(cfg, 3.3f, 3.3f, 0, true, true)); }
 
 // --- Raw vs. smoothed split (#9): hard cutoff/gate use raw, taper uses smoothed ---
 
-void test_ccl_zero_when_raw_above_max_but_smoothed_below(void)
+static void test_ccl_zero_when_raw_above_max_but_smoothed_below(void)
 {
     // rawMaxV(3.5) >= cvMaxCharge(3.5) -> 0A, even though smoothedMaxV(3.35)
     // is only mid-taper and would otherwise read ~52.5A. This is the #9
@@ -67,7 +67,7 @@ void test_ccl_zero_when_raw_above_max_but_smoothed_below(void)
     TEST_ASSERT_EQUAL(0, calculateCCL(cfg, 3.35f, 3.5f, 0, true, false));
 }
 
-void test_ccl_trickle_when_raw_at_gate_but_smoothed_below_taper(void)
+static void test_ccl_trickle_when_raw_at_gate_but_smoothed_below_taper(void)
 {
     // rawMaxV(3.4) >= cvHighAlarmGate(3.4) -> trickle, even though
     // smoothedMaxV(3.2) is at/below cvStartTaper(3.3) and would otherwise
@@ -75,7 +75,7 @@ void test_ccl_trickle_when_raw_at_gate_but_smoothed_below_taper(void)
     TEST_ASSERT_EQUAL(50, calculateCCL(cfg, 3.2f, 3.4f, 0, true, false));
 }
 
-void test_ccl_trickle_when_smoothed_at_gate_but_raw_below(void)
+static void test_ccl_trickle_when_smoothed_at_gate_but_raw_below(void)
 {
     // rawMaxV(3.3) is below both cvMaxCharge and cvHighAlarmGate, so the
     // raw checks don't fire; the taper then runs on smoothedMaxV(3.4):
@@ -86,7 +86,7 @@ void test_ccl_trickle_when_smoothed_at_gate_but_raw_below(void)
     TEST_ASSERT_EQUAL(50, calculateCCL(cfg, 3.4f, 3.3f, 0, true, false));
 }
 
-void test_ccl_taper_uses_smoothed_not_raw(void)
+static void test_ccl_taper_uses_smoothed_not_raw(void)
 {
     // Neither raw check fires (rawMaxV 3.30 is below both cvMaxCharge and
     // cvHighAlarmGate). The taper then uses smoothedMaxV(3.35), the same
@@ -95,14 +95,14 @@ void test_ccl_taper_uses_smoothed_not_raw(void)
     TEST_ASSERT_EQUAL(525, calculateCCL(cfg, 3.35f, 3.30f, 0, true, false));
 }
 
-void test_dcl_zero_when_raw_below_min_but_smoothed_above(void)
+static void test_dcl_zero_when_raw_below_min_but_smoothed_above(void)
 {
     // rawMinV(3.0) <= cvMinDischarge(3.0) -> 0A, even though
     // smoothedMinV(3.15) is mid-taper and would otherwise read ~107.5A.
     TEST_ASSERT_EQUAL(0, calculateDCL(cfg, 3.15f, 3.0f, 0, true, false));
 }
 
-void test_dcl_limp_when_raw_at_gate_but_smoothed_above_taper(void)
+static void test_dcl_limp_when_raw_at_gate_but_smoothed_above_taper(void)
 {
     // rawMinV(3.1) <= cvLowAlarmGate(3.1) -> limp, even though
     // smoothedMinV(3.3) is above cvStartDTaper(3.2) and would otherwise
@@ -110,7 +110,7 @@ void test_dcl_limp_when_raw_at_gate_but_smoothed_above_taper(void)
     TEST_ASSERT_EQUAL(150, calculateDCL(cfg, 3.3f, 3.1f, 0, true, false));
 }
 
-void test_dcl_limp_when_smoothed_at_gate_but_raw_above(void)
+static void test_dcl_limp_when_smoothed_at_gate_but_raw_above(void)
 {
     // rawMinV(3.15) is above both cvMinDischarge and cvLowAlarmGate, so the
     // raw checks don't fire; the taper then runs on smoothedMinV(3.1):
@@ -119,7 +119,7 @@ void test_dcl_limp_when_smoothed_at_gate_but_raw_above(void)
     TEST_ASSERT_EQUAL(150, calculateDCL(cfg, 3.1f, 3.15f, 0, true, false));
 }
 
-void test_dcl_taper_uses_smoothed_not_raw(void)
+static void test_dcl_taper_uses_smoothed_not_raw(void)
 {
     // Neither raw check fires (rawMinV 3.20 is above both cvMinDischarge and
     // cvLowAlarmGate). The taper then uses smoothedMinV(3.15), the same
@@ -128,7 +128,7 @@ void test_dcl_taper_uses_smoothed_not_raw(void)
     TEST_ASSERT_EQUAL(1075, calculateDCL(cfg, 3.15f, 3.20f, 0, true, false));
 }
 
-void test_nan_raw_voltage_is_zero(void)
+static void test_nan_raw_voltage_is_zero(void)
 {
     // A NaN raw reading (e.g. a corrupted latest BMS read) must force 0A
     // even when the smoothed value is otherwise fine.
@@ -141,26 +141,26 @@ void test_nan_raw_voltage_is_zero(void)
 // setUp() leaves spreadStartMv/spreadMaxMv at their SystemConfig defaults:
 // 60 and 150.
 
-void test_spread_factor_at_start(void)
+static void test_spread_factor_at_start(void)
 {
     // At (or below) startMv, no derating: 1.0.
     TEST_ASSERT_EQUAL_FLOAT(1.0f, spreadFactor(60, 60, 150));
 }
 
-void test_spread_factor_at_max(void)
+static void test_spread_factor_at_max(void)
 {
     // At (or above) maxMv, fully derated: 0.0.
     TEST_ASSERT_EQUAL_FLOAT(0.0f, spreadFactor(150, 60, 150));
 }
 
-void test_spread_factor_midpoint(void)
+static void test_spread_factor_midpoint(void)
 {
     // 105mV is the midpoint of 60..150 -> 1.0 - (105-60)/(150-60)
     //   = 1.0 - 45/90 = 0.5.
     TEST_ASSERT_EQUAL_FLOAT(0.5f, spreadFactor(105, 60, 150));
 }
 
-void test_spread_factor_degenerate_config(void)
+static void test_spread_factor_degenerate_config(void)
 {
     // maxMv(50) <= startMv(100): treated as a step, not a division by a
     // non-positive span - 1.0 strictly below startMv, 0.0 at/above it.
@@ -169,7 +169,7 @@ void test_spread_factor_degenerate_config(void)
     TEST_ASSERT_EQUAL_FLOAT(0.0f, spreadFactor(150, 100, 50));
 }
 
-void test_ccl_derated_by_spread_at_midpoint(void)
+static void test_ccl_derated_by_spread_at_midpoint(void)
 {
     // 3.0V is below cvStartTaper(3.3) -> full-current branch. spread=105mV
     // is the start..max midpoint -> factor 0.5. 100A * 0.5 = 50A -> 500,
@@ -177,28 +177,28 @@ void test_ccl_derated_by_spread_at_midpoint(void)
     TEST_ASSERT_EQUAL(500, calculateCCL(cfg, 3.0f, 3.0f, 105, true, false));
 }
 
-void test_ccl_derated_by_spread_never_below_trickle(void)
+static void test_ccl_derated_by_spread_never_below_trickle(void)
 {
     // spread=150mV = spreadMaxMv -> factor 0.0. 100A * 0.0 = 0A, but
     // fmaxf(0, trickleA(5)) clamps back up to trickle -> 50.
     TEST_ASSERT_EQUAL(50, calculateCCL(cfg, 3.0f, 3.0f, 150, true, false));
 }
 
-void test_dcl_derated_by_spread_at_midpoint(void)
+static void test_dcl_derated_by_spread_at_midpoint(void)
 {
     // 3.3V is above cvStartDTaper(3.2) -> full-current branch (mirror of
     // test_dcl_full_above_taper). factor 0.5 -> 200A * 0.5 = 100A -> 1000.
     TEST_ASSERT_EQUAL(1000, calculateDCL(cfg, 3.3f, 3.3f, 105, true, false));
 }
 
-void test_dcl_derated_by_spread_never_below_limp(void)
+static void test_dcl_derated_by_spread_never_below_limp(void)
 {
     // factor 0.0 -> 200A * 0.0 = 0A, but fmaxf(0, limpDischargeA(15))
     // clamps back up to limp -> 150.
     TEST_ASSERT_EQUAL(150, calculateDCL(cfg, 3.3f, 3.3f, 150, true, false));
 }
 
-void test_ccl_gate_unaffected_by_spread(void)
+static void test_ccl_gate_unaffected_by_spread(void)
 {
     // rawMaxV(3.4) >= cvHighAlarmGate(3.4) -> trickle is returned before
     // the spread factor is even computed - a huge spread (200mV, well past
@@ -206,33 +206,33 @@ void test_ccl_gate_unaffected_by_spread(void)
     TEST_ASSERT_EQUAL(50, calculateCCL(cfg, 3.4f, 3.4f, 200, true, false));
 }
 
-void test_ccl_hard_cutoff_unaffected_by_spread(void)
+static void test_ccl_hard_cutoff_unaffected_by_spread(void)
 {
     // rawMaxV(3.5) >= cvMaxCharge(3.5) -> 0A regardless of spread.
     TEST_ASSERT_EQUAL(0, calculateCCL(cfg, 3.5f, 3.5f, 200, true, false));
 }
 
-void test_ccl_maintenance_unaffected_by_spread(void)
+static void test_ccl_maintenance_unaffected_by_spread(void)
 {
     // maintenanceActive short-circuits before the spread factor is
     // computed -> still maintAmps(20A) -> 200, not derated.
     TEST_ASSERT_EQUAL(200, calculateCCL(cfg, 3.0f, 3.0f, 200, true, true));
 }
 
-void test_dcl_gate_unaffected_by_spread(void)
+static void test_dcl_gate_unaffected_by_spread(void)
 {
     // rawMinV(3.1) <= cvLowAlarmGate(3.1) -> limp, unaffected by spread.
     // Same value as test_dcl_limp_at_alarm_gate.
     TEST_ASSERT_EQUAL(150, calculateDCL(cfg, 3.1f, 3.1f, 200, true, false));
 }
 
-void test_dcl_hard_cutoff_unaffected_by_spread(void)
+static void test_dcl_hard_cutoff_unaffected_by_spread(void)
 {
     // rawMinV(3.0) <= cvMinDischarge(3.0) -> 0A regardless of spread.
     TEST_ASSERT_EQUAL(0, calculateDCL(cfg, 3.0f, 3.0f, 200, true, false));
 }
 
-void test_dcl_maintenance_unaffected_by_spread(void)
+static void test_dcl_maintenance_unaffected_by_spread(void)
 {
     // maintenanceActive short-circuits before the spread factor is
     // computed -> still 0A (DCL is always 0 in maintenance), unaffected.
@@ -241,7 +241,7 @@ void test_dcl_maintenance_unaffected_by_spread(void)
 
 // --- Boundary values, clamp path, rounding and degenerate-config guard ---
 
-void test_ccl_just_above_taper_start(void)
+static void test_ccl_just_above_taper_start(void)
 {
     // 3.31V: slope = (3.4-3.31)/0.1 = 0.9 -> target = 5 + 0.9*(100-5)
     //        = 5 + 85.5 = 90.5A -> 905 (confirmed against a native float
@@ -249,18 +249,18 @@ void test_ccl_just_above_taper_start(void)
     TEST_ASSERT_EQUAL(905, calculateCCL(cfg, 3.31f, 3.31f, 0, true, false));
 }
 
-void test_ccl_trickle_between_gate_and_max(void)
+static void test_ccl_trickle_between_gate_and_max(void)
 {
     // 3.45V is above cvHighAlarmGate(3.4) and below cvMaxCharge(3.5) -> trickle.
     TEST_ASSERT_EQUAL(50, calculateCCL(cfg, 3.45f, 3.45f, 0, true, false));
 }
 
-void test_ccl_zero_above_hard_max(void)
+static void test_ccl_zero_above_hard_max(void)
 {
     TEST_ASSERT_EQUAL(0, calculateCCL(cfg, 3.6f, 3.6f, 0, true, false));
 }
 
-void test_dcl_full_at_taper_start_boundary(void)
+static void test_dcl_full_at_taper_start_boundary(void)
 {
     // `minCellV < cvStartDTaper` is false when equal (3.2 < 3.2 is false),
     // so 3.2V exactly falls through to the final `return maxDischargeA`
@@ -268,7 +268,7 @@ void test_dcl_full_at_taper_start_boundary(void)
     TEST_ASSERT_EQUAL(2000, calculateDCL(cfg, 3.2f, 3.2f, 0, true, false));
 }
 
-void test_dcl_just_below_taper_start(void)
+static void test_dcl_just_below_taper_start(void)
 {
     // 3.19V: slope = (3.19-3.1)/0.1 = 0.9 -> target = 15 + 0.9*(200-15)
     //        = 15 + 166.5 = 181.5A -> 1815 (confirmed against a native
@@ -276,18 +276,18 @@ void test_dcl_just_below_taper_start(void)
     TEST_ASSERT_EQUAL(1815, calculateDCL(cfg, 3.19f, 3.19f, 0, true, false));
 }
 
-void test_dcl_limp_between_min_and_gate(void)
+static void test_dcl_limp_between_min_and_gate(void)
 {
     // 3.05V is above cvMinDischarge(3.0) and at/below cvLowAlarmGate(3.1) -> limp.
     TEST_ASSERT_EQUAL(150, calculateDCL(cfg, 3.05f, 3.05f, 0, true, false));
 }
 
-void test_dcl_zero_below_hard_min(void)
+static void test_dcl_zero_below_hard_min(void)
 {
     TEST_ASSERT_EQUAL(0, calculateDCL(cfg, 2.9f, 2.9f, 0, true, false));
 }
 
-void test_ccl_equal_gate_and_taper_still_trickle(void)
+static void test_ccl_equal_gate_and_taper_still_trickle(void)
 {
     // A naive "cvHighAlarmGate == cvStartTaper" degenerate config does NOT
     // actually exercise the `div <= 0.0001f` guard: any voltage >= the
@@ -300,7 +300,7 @@ void test_ccl_equal_gate_and_taper_still_trickle(void)
     TEST_ASSERT_EQUAL(50, calculateCCL(cfg, 3.35f, 3.35f, 0, true, false));
 }
 
-void test_ccl_degenerate_taper_guard(void)
+static void test_ccl_degenerate_taper_guard(void)
 {
     // To actually exercise the `div <= 0.0001f` guard we need
     // cvStartTaper < maxCellV < cvHighAlarmGate (so neither boundary check
@@ -313,7 +313,7 @@ void test_ccl_degenerate_taper_guard(void)
     TEST_ASSERT_EQUAL(50, calculateCCL(cfg, v, v, 0, true, false));
 }
 
-void test_dcl_degenerate_taper_guard(void)
+static void test_dcl_degenerate_taper_guard(void)
 {
     // Mirrors test_ccl_degenerate_taper_guard. (A first guess that this
     // guard is unreachable for DCL - because "gate == taper" doesn't reach
@@ -328,7 +328,7 @@ void test_dcl_degenerate_taper_guard(void)
     TEST_ASSERT_EQUAL(150, calculateDCL(cfg, v, v, 0, true, false));
 }
 
-void test_ccl_inverted_gate_taper_trickle(void)
+static void test_ccl_inverted_gate_taper_trickle(void)
 {
     // Inverted config: gate(3.3) below taper(3.4). The
     // `maxCellV >= cfg.cvHighAlarmGate` check still fires first for any
@@ -339,7 +339,7 @@ void test_ccl_inverted_gate_taper_trickle(void)
     TEST_ASSERT_EQUAL(50, calculateCCL(cfg, 3.35f, 3.35f, 0, true, false));
 }
 
-void test_ccl_clamp_when_trickle_exceeds_max(void)
+static void test_ccl_clamp_when_trickle_exceeds_max(void)
 {
     // trickleA(50) > maxChargeA(10): target = 50 + 0.5*(10-50) = 30, but
     // fmaxf(target, trickleA) clamps back up to 50 -> 500.
@@ -348,7 +348,7 @@ void test_ccl_clamp_when_trickle_exceeds_max(void)
     TEST_ASSERT_EQUAL(500, calculateCCL(cfg, 3.35f, 3.35f, 0, true, false));
 }
 
-void test_dcl_clamp_when_limp_exceeds_max(void)
+static void test_dcl_clamp_when_limp_exceeds_max(void)
 {
     // limpDischargeA(100) > maxDischargeA(20): target = 100 + 0.5*(20-100)
     // = 60, but fmaxf(target, limpDischargeA) clamps back up to 100 -> 1000.
@@ -357,7 +357,7 @@ void test_dcl_clamp_when_limp_exceeds_max(void)
     TEST_ASSERT_EQUAL(1000, calculateDCL(cfg, 3.15f, 3.15f, 0, true, false));
 }
 
-void test_ccl_rounding_artifact(void)
+static void test_ccl_rounding_artifact(void)
 {
     // maxChargeA=12.35f is not exactly representable (its actual value is
     // 12.35000038...); multiplying by 10.0f in single precision gives
@@ -370,7 +370,7 @@ void test_ccl_rounding_artifact(void)
     TEST_ASSERT_EQUAL(124, calculateCCL(cfg, 3.0f, 3.0f, 0, true, false));
 }
 
-void test_fresh_at_boot_time_zero(void)
+static void test_fresh_at_boot_time_zero(void)
 {
     // A real read recorded at t=0 is fresh - only "never read"
     // (haveRead=false) must be stale at t=0, not haveRead=true at t=0.
@@ -381,14 +381,14 @@ void test_fresh_at_boot_time_zero(void)
 
 // --- Fail-safe: NaN voltage or threshold forces 0A ---
 
-void test_nan_voltage_is_zero(void)
+static void test_nan_voltage_is_zero(void)
 {
     float nanV = NAN;
     TEST_ASSERT_EQUAL(0, calculateCCL(cfg, nanV, nanV, 0, true, false));
     TEST_ASSERT_EQUAL(0, calculateDCL(cfg, nanV, nanV, 0, true, false));
 }
 
-void test_nan_threshold_is_zero(void)
+static void test_nan_threshold_is_zero(void)
 {
     cfg.cvHighAlarmGate.setUnchecked(NAN);
     TEST_ASSERT_EQUAL(0, calculateCCL(cfg, 3.3f, 3.3f, 0, true, false));
@@ -397,7 +397,7 @@ void test_nan_threshold_is_zero(void)
     TEST_ASSERT_EQUAL(0, calculateDCL(cfg, 3.15f, 3.15f, 0, true, false));
 }
 
-void test_nan_current_setpoint_is_zero(void)
+static void test_nan_current_setpoint_is_zero(void)
 {
     // round(NaN * 10) cast to uint16_t is undefined; the guard must catch
     // a NaN current setpoint too, including in maintenance mode.
@@ -415,13 +415,13 @@ void test_nan_current_setpoint_is_zero(void)
 // A float -> uint16_t cast of a negative value used to wrap to ~65500
 // (~6550A reported to the SMA). Every branch must come back 0 instead.
 
-void test_ccl_negative_trickle_at_gate_is_zero(void)
+static void test_ccl_negative_trickle_at_gate_is_zero(void)
 {
     cfg.trickleA.setUnchecked(-5.0f);
     TEST_ASSERT_EQUAL(0, calculateCCL(cfg, 3.4f, 3.4f, 0, true, false));
 }
 
-void test_ccl_negative_trickle_degenerate_taper_is_zero(void)
+static void test_ccl_negative_trickle_degenerate_taper_is_zero(void)
 {
     cfg.trickleA.setUnchecked(-5.0f);
     cfg.cvHighAlarmGate.setUnchecked(cfg.cvStartTaper);
@@ -429,13 +429,13 @@ void test_ccl_negative_trickle_degenerate_taper_is_zero(void)
     TEST_ASSERT_EQUAL(0, calculateCCL(cfg, 3.35f, 3.35f, 0, true, false));
 }
 
-void test_ccl_negative_maint_amps_is_zero(void)
+static void test_ccl_negative_maint_amps_is_zero(void)
 {
     cfg.maintAmps.setUnchecked(-20.0f);
     TEST_ASSERT_EQUAL(0, calculateCCL(cfg, 3.0f, 3.0f, 0, true, true));
 }
 
-void test_ccl_negative_max_and_trickle_is_zero(void)
+static void test_ccl_negative_max_and_trickle_is_zero(void)
 {
     // Taper and full-current branches: fmaxf(x, trickleA) no longer
     // guarantees a non-negative result once trickleA itself is negative.
@@ -445,13 +445,13 @@ void test_ccl_negative_max_and_trickle_is_zero(void)
     TEST_ASSERT_EQUAL(0, calculateCCL(cfg, 3.35f, 3.35f, 0, true, false));
 }
 
-void test_dcl_negative_limp_at_gate_is_zero(void)
+static void test_dcl_negative_limp_at_gate_is_zero(void)
 {
     cfg.limpDischargeA.setUnchecked(-15.0f);
     TEST_ASSERT_EQUAL(0, calculateDCL(cfg, 3.1f, 3.1f, 0, true, false));
 }
 
-void test_dcl_negative_limp_degenerate_taper_is_zero(void)
+static void test_dcl_negative_limp_degenerate_taper_is_zero(void)
 {
     cfg.limpDischargeA.setUnchecked(-15.0f);
     cfg.cvLowAlarmGate.setUnchecked(cfg.cvStartDTaper);
@@ -459,7 +459,7 @@ void test_dcl_negative_limp_degenerate_taper_is_zero(void)
     TEST_ASSERT_EQUAL(0, calculateDCL(cfg, 3.15f, 3.25f, 0, true, false));
 }
 
-void test_dcl_negative_max_and_limp_is_zero(void)
+static void test_dcl_negative_max_and_limp_is_zero(void)
 {
     cfg.maxDischargeA.setUnchecked(-200.0f);
     cfg.limpDischargeA.setUnchecked(-15.0f);
@@ -467,7 +467,7 @@ void test_dcl_negative_max_and_limp_is_zero(void)
     TEST_ASSERT_EQUAL(0, calculateDCL(cfg, 3.15f, 3.15f, 0, true, false));
 }
 
-void test_huge_setpoint_saturates_instead_of_wrapping(void)
+static void test_huge_setpoint_saturates_instead_of_wrapping(void)
 {
     // 7000A * 10 = 70000 > UINT16_MAX: saturate, don't wrap to 4464.
     cfg.maxChargeA.setUnchecked(7000.0f);
@@ -476,7 +476,7 @@ void test_huge_setpoint_saturates_instead_of_wrapping(void)
 
 // --- Fail-safe: no data / stale data forces 0A (#10) ---
 
-void test_limits_zero_when_not_fresh(void)
+static void test_limits_zero_when_not_fresh(void)
 {
     // Cell voltages that would otherwise mean full current both ways.
     TEST_ASSERT_EQUAL(0, calculateCCL(cfg, 3.3f, 3.3f, 0, false, false));
@@ -485,7 +485,7 @@ void test_limits_zero_when_not_fresh(void)
     TEST_ASSERT_EQUAL(0, calculateCCL(cfg, 3.3f, 3.3f, 0, false, true));
 }
 
-void test_never_read_is_stale_right_after_boot(void)
+static void test_never_read_is_stale_right_after_boot(void)
 {
     // The old check (millis() - 0 > timeout) passed for the first 60s after
     // boot; "no read yet" must be stale at any uptime.
@@ -493,14 +493,14 @@ void test_never_read_is_stale_right_after_boot(void)
     TEST_ASSERT_FALSE(isFresh(false, 0, 0, 60));
 }
 
-void test_fresh_within_timeout(void)
+static void test_fresh_within_timeout(void)
 {
     TEST_ASSERT_TRUE(isFresh(true, 100000, 100000, 60));
     TEST_ASSERT_TRUE(isFresh(true, 160000, 100000, 60)); // exactly at the limit
     TEST_ASSERT_FALSE(isFresh(true, 160001, 100000, 60));
 }
 
-void test_fresh_across_millis_wraparound(void)
+static void test_fresh_across_millis_wraparound(void)
 {
     // Read 1s before the 32-bit millis() wrap, checked 2s after it.
     TEST_ASSERT_TRUE(isFresh(true, 2000, 0xFFFFFFFFu - 999u, 60));

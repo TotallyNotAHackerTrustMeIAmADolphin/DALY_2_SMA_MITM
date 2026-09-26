@@ -69,7 +69,7 @@ void tearDown(void) {}
 
 // --- Header ---
 
-void test_header_matches_claude_md(void)
+static void test_header_matches_claude_md(void)
 {
     char buf[512];
     int n = formatHeader(buf, sizeof(buf));
@@ -77,7 +77,7 @@ void test_header_matches_claude_md(void)
     TEST_ASSERT_EQUAL_STRING(kExpectedHeader, buf);
 }
 
-void test_header_has_38_fields(void)
+static void test_header_has_38_fields(void)
 {
     TEST_ASSERT_EQUAL(38, countFields(kExpectedHeader));
     TEST_ASSERT_EQUAL(count(), countFields(kExpectedHeader));
@@ -85,7 +85,7 @@ void test_header_has_38_fields(void)
 
 // --- index() ---
 
-void test_index_first_seven_columns(void)
+static void test_index_first_seven_columns(void)
 {
     TEST_ASSERT_EQUAL(0, index("Timestamp"));
     TEST_ASSERT_EQUAL(1, index("PackV"));
@@ -96,7 +96,7 @@ void test_index_first_seven_columns(void)
     TEST_ASSERT_EQUAL(6, index("ReqI"));
 }
 
-void test_index_max_cell_raw(void)
+static void test_index_max_cell_raw(void)
 {
     // Position today: Timestamp(0)+10 base fields(1-10)+16 cells(11-26)+7
     // MOS/alarm columns(27-33) -> MinCellRaw is 34, MaxCellRaw is 35.
@@ -104,19 +104,19 @@ void test_index_max_cell_raw(void)
     TEST_ASSERT_EQUAL(35, index("MaxCellRaw"));
 }
 
-void test_index_unknown_name(void)
+static void test_index_unknown_name(void)
 {
     TEST_ASSERT_EQUAL(-1, index("nope"));
 }
 
 // --- count() / formatter output count ---
 
-void test_column_count_is_38(void)
+static void test_column_count_is_38(void)
 {
     TEST_ASSERT_EQUAL(38, count());
 }
 
-void test_formatter_output_count_matches_columns_minus_timestamp(void)
+static void test_formatter_output_count_matches_columns_minus_timestamp(void)
 {
     // Timestamp (index 0) has no real formatter (it's produced by the
     // logger from the row's write time, not from DashboardData) and
@@ -134,7 +134,7 @@ void test_formatter_output_count_matches_columns_minus_timestamp(void)
     TEST_ASSERT_EQUAL(count() - 1, produced);
 }
 
-void test_row_field_count_matches_header_field_count(void)
+static void test_row_field_count_matches_header_field_count(void)
 {
     // formatRow() only builds the part of the row after Timestamp (the
     // logger prepends that itself); prepending a stand-in timestamp here
@@ -178,7 +178,7 @@ static const char *kExpectedRow =
     "1,0,0,0,0,0,0,"
     "3.195,3.360,95,0.73";
 
-void test_sample_formats_to_known_row(void)
+static void test_sample_formats_to_known_row(void)
 {
     DashboardData d = makeSample();
     char row[480];
@@ -189,7 +189,7 @@ void test_sample_formats_to_known_row(void)
 
 // --- Missing-cell behavior (matches the pre-refactor cellCount bound) ---
 
-void test_missing_cells_are_omitted_not_padded(void)
+static void test_missing_cells_are_omitted_not_padded(void)
 {
     DashboardData d = makeSample();
     d.cellVoltages.resize(5); // only 5 of 16 cells read so far

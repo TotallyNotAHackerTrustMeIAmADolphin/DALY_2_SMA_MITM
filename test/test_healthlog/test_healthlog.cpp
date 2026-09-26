@@ -23,13 +23,13 @@ static Sample steady()
 void setUp(void) {}
 void tearDown(void) {}
 
-void test_first_sample_is_baseline(void)
+static void test_first_sample_is_baseline(void)
 {
     State st;
     TEST_ASSERT_EQUAL(kBaseline, decide(st, steady(), 60000).reason);
 }
 
-void test_steady_device_is_quiet(void)
+static void test_steady_device_is_quiet(void)
 {
     // The 2026-09-26 log: identical numbers every 10 min, free heap
     // wobbling by ~100 bytes. None of it should be logged.
@@ -43,7 +43,7 @@ void test_steady_device_is_quiet(void)
     }
 }
 
-void test_heartbeat_after_a_day(void)
+static void test_heartbeat_after_a_day(void)
 {
     State st;
     decide(st, steady(), 0);
@@ -53,7 +53,7 @@ void test_heartbeat_after_a_day(void)
     TEST_ASSERT_EQUAL(kNone, decide(st, steady(), kHeartbeatMs + kTen).reason);
 }
 
-void test_heartbeat_across_millis_wraparound(void)
+static void test_heartbeat_across_millis_wraparound(void)
 {
     State st;
     decide(st, steady(), 0xFFFFFFFFu - 1000u);
@@ -61,7 +61,7 @@ void test_heartbeat_across_millis_wraparound(void)
     TEST_ASSERT_EQUAL(kHeartbeat, decide(st, steady(), kHeartbeatMs - 1001u).reason);
 }
 
-void test_heap_low_water_drop_boundary(void)
+static void test_heap_low_water_drop_boundary(void)
 {
     State st;
     decide(st, steady(), 0);
@@ -72,7 +72,7 @@ void test_heap_low_water_drop_boundary(void)
     TEST_ASSERT_EQUAL(kHeapDrop, decide(st, s, 2 * kTen).reason);
 }
 
-void test_slow_heap_drift_accumulates_against_last_logged(void)
+static void test_slow_heap_drift_accumulates_against_last_logged(void)
 {
     // 1 KB per sample never crosses 4 KB step-to-step, but it does
     // against the last logged value.
@@ -89,7 +89,7 @@ void test_slow_heap_drift_accumulates_against_last_logged(void)
     TEST_ASSERT_EQUAL(4, logged);
 }
 
-void test_largest_block_shrink_boundary(void)
+static void test_largest_block_shrink_boundary(void)
 {
     State st;
     decide(st, steady(), 0);
@@ -100,7 +100,7 @@ void test_largest_block_shrink_boundary(void)
     TEST_ASSERT_EQUAL(kBlockDrop, decide(st, s, 2 * kTen).reason);
 }
 
-void test_largest_block_recovery_is_quiet(void)
+static void test_largest_block_recovery_is_quiet(void)
 {
     State st;
     decide(st, steady(), 0);
@@ -109,7 +109,7 @@ void test_largest_block_recovery_is_quiet(void)
     TEST_ASSERT_EQUAL(kNone, decide(st, s, kTen).reason);
 }
 
-void test_stack_drop_boundary(void)
+static void test_stack_drop_boundary(void)
 {
     State st;
     decide(st, steady(), 0);
@@ -122,7 +122,7 @@ void test_stack_drop_boundary(void)
     TEST_ASSERT_EQUAL(kNone, decide(st, s, 3 * kTen).reason);
 }
 
-void test_stack_low_wins_reason_and_names_task(void)
+static void test_stack_low_wins_reason_and_names_task(void)
 {
     State st;
     Sample s = steady();
@@ -136,7 +136,7 @@ void test_stack_low_wins_reason_and_names_task(void)
     TEST_ASSERT_EQUAL(kNone, decide(st, s, 2 * kTen).reason);
 }
 
-void test_stack_low_logs_every_further_drop(void)
+static void test_stack_low_logs_every_further_drop(void)
 {
     // Review finding: 500 -> 245 B is under the 256 B drop threshold but
     // eats half the remaining headroom. Below kStackLowBytes any drop logs.
@@ -151,7 +151,7 @@ void test_stack_low_logs_every_further_drop(void)
     TEST_ASSERT_EQUAL(kNone, decide(st, s, 3 * kTen).reason);
 }
 
-void test_exhausted_stack_zero_is_stack_low(void)
+static void test_exhausted_stack_zero_is_stack_low(void)
 {
     // Review finding: a found task at 0 bytes left used to look like
     // "task not found". kNoTask is the not-found marker now.
@@ -164,7 +164,7 @@ void test_exhausted_stack_zero_is_stack_low(void)
     TEST_ASSERT_EQUAL(kBms, d.task);
 }
 
-void test_late_starting_task_adopts_first_reading(void)
+static void test_late_starting_task_adopts_first_reading(void)
 {
     // async_tcp isn't running at the baseline. Its first healthy reading
     // is adopted quietly, and later drops are measured from it.
@@ -178,7 +178,7 @@ void test_late_starting_task_adopts_first_reading(void)
     TEST_ASSERT_EQUAL(kStackDrop, decide(st, s, 2 * kTen).reason);
 }
 
-void test_late_starting_task_already_low_is_flagged(void)
+static void test_late_starting_task_already_low_is_flagged(void)
 {
     State st;
     Sample s = steady();
@@ -190,7 +190,7 @@ void test_late_starting_task_already_low_is_flagged(void)
     TEST_ASSERT_EQUAL(kAsyncTcp, d.task);
 }
 
-void test_task_disappearing_is_logged(void)
+static void test_task_disappearing_is_logged(void)
 {
     // Review finding: a task that exits used to go silent.
     State st;
@@ -203,7 +203,7 @@ void test_task_disappearing_is_logged(void)
     TEST_ASSERT_EQUAL(kNone, decide(st, s, 2 * kTen).reason);
 }
 
-void test_block_reference_ratchets_up(void)
+static void test_block_reference_ratchets_up(void)
 {
     // Review finding: a baseline taken while buffers were held (60 KB)
     // must not hide a later 39 KB loss from the 94 KB steady state.

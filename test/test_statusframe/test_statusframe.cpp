@@ -77,7 +77,7 @@ static Snapshot freshSnapshot(uint32_t nowMs)
 
 // --- Gate: nothing sent before both BMS reads have succeeded once ---
 
-void test_no_frames_before_basic_info(void)
+static void test_no_frames_before_basic_info(void)
 {
     ControlState ctrl;
     Snapshot s = freshSnapshot(1000);
@@ -87,7 +87,7 @@ void test_no_frames_before_basic_info(void)
     TEST_ASSERT_FALSE(ctrl.framesEnabled);
 }
 
-void test_no_frames_before_cell_data(void)
+static void test_no_frames_before_cell_data(void)
 {
     ControlState ctrl;
     Snapshot s = freshSnapshot(1000);
@@ -99,7 +99,7 @@ void test_no_frames_before_cell_data(void)
 
 // --- Frames + full limits once fresh ---
 
-void test_frames_full_limits_once_fresh(void)
+static void test_frames_full_limits_once_fresh(void)
 {
     ControlState ctrl;
     Snapshot s = freshSnapshot(1000);
@@ -122,7 +122,7 @@ void test_frames_full_limits_once_fresh(void)
     TEST_ASSERT_TRUE(ctrl.framesEnabled);
 }
 
-void test_first_frames_fires_exactly_once(void)
+static void test_first_frames_fires_exactly_once(void)
 {
     ControlState ctrl;
     Decision d1 = decide(cfg, freshSnapshot(1000), ctrl);
@@ -135,7 +135,7 @@ void test_first_frames_fires_exactly_once(void)
 
 // --- Staleness: 0A both ways, wentStale once, freshAgain once ---
 
-void test_stale_forces_zero_then_recovers(void)
+static void test_stale_forces_zero_then_recovers(void)
 {
     ControlState ctrl;
 
@@ -179,7 +179,7 @@ void test_stale_forces_zero_then_recovers(void)
 
 // --- Reset hold: armed by the first sent frame, 5.5s, isResetting true throughout ---
 
-void test_reset_not_armed_while_no_frames_sent(void)
+static void test_reset_not_armed_while_no_frames_sent(void)
 {
     // Request arrives while the BMS has never reported - decide() must not
     // touch the hold timer (mirrors handleUIAction() arming
@@ -196,7 +196,7 @@ void test_reset_not_armed_while_no_frames_sent(void)
     TEST_ASSERT_EQUAL_UINT32(0, d.resetHoldStartMs); // still not armed
 }
 
-void test_reset_hold_arms_on_first_sent_frame_and_finishes_after_5500ms(void)
+static void test_reset_hold_arms_on_first_sent_frame_and_finishes_after_5500ms(void)
 {
     ControlState ctrl;
     uint32_t resetHoldStartMs = 0;
@@ -239,7 +239,7 @@ void test_reset_hold_arms_on_first_sent_frame_and_finishes_after_5500ms(void)
 
 // --- Auto-maintenance hysteresis ---
 
-void test_auto_maint_starts_below_start_stops_above_stop_no_toggle_between(void)
+static void test_auto_maint_starts_below_start_stops_above_stop_no_toggle_between(void)
 {
     // Thresholds (#12: compared directly against the smoothed minimum
     // cell voltage): start cvMaintStart=3.0V, stop cvMaintStop=3.2V.
@@ -278,7 +278,7 @@ void test_auto_maint_starts_below_start_stops_above_stop_no_toggle_between(void)
 
 // --- #12: trigger on the minimum cell, not the pack average ---
 
-void test_auto_maint_starts_on_weak_cell_even_when_pack_average_is_high(void)
+static void test_auto_maint_starts_on_weak_cell_even_when_pack_average_is_high(void)
 {
     // The exact scenario from #12: Cell 16 sags under discharge and hits
     // the discharge floor while the pack average is still well above the
@@ -295,7 +295,7 @@ void test_auto_maint_starts_on_weak_cell_even_when_pack_average_is_high(void)
     TEST_ASSERT_TRUE(ctrl.autoMaint);
 }
 
-void test_auto_maint_hysteresis_min_cell_rising_stays_on_until_above_stop(void)
+static void test_auto_maint_hysteresis_min_cell_rising_stays_on_until_above_stop(void)
 {
     // Once started, rising back into the start..stop band must not turn
     // maintenance off; only crossing above cvMaintStop(3.2V) does.
@@ -321,7 +321,7 @@ void test_auto_maint_hysteresis_min_cell_rising_stays_on_until_above_stop(void)
     TEST_ASSERT_FALSE(d3.maintenanceActive);
 }
 
-void test_auto_maint_never_starts_with_zero_min_cell(void)
+static void test_auto_maint_never_starts_with_zero_min_cell(void)
 {
     // minCellSmoothedV == 0 means "no data yet" (same sentinel used
     // elsewhere in Snapshot/Glideslope) - it must never satisfy
@@ -334,7 +334,7 @@ void test_auto_maint_never_starts_with_zero_min_cell(void)
     TEST_ASSERT_FALSE(ctrl.autoMaint);
 }
 
-void test_manual_force_overrides(void)
+static void test_manual_force_overrides(void)
 {
     // minCellSmoothedV=3.3V would leave autoMaint off; manualMaintForce
     // alone must still drive maintenanceActive.
@@ -346,7 +346,7 @@ void test_manual_force_overrides(void)
     TEST_ASSERT_TRUE(d.values.forceCharge);
 }
 
-void test_maintenance_overrides_cvl_and_current(void)
+static void test_maintenance_overrides_cvl_and_current(void)
 {
     ControlState ctrl;
     Snapshot s = freshSnapshot(1000);
@@ -364,7 +364,7 @@ void test_maintenance_overrides_cvl_and_current(void)
     TEST_ASSERT_EQUAL(0, d.values.dcl);
 }
 
-void test_maintenance_cvl_is_fixed_560_not_cvmaxcharge(void)
+static void test_maintenance_cvl_is_fixed_560_not_cvmaxcharge(void)
 {
     // With cvMaxCharge changed so cvMaxCharge*16*10 != 560, the maintenance
     // CVL must still read 560 - proves it's the fixed override, not the
@@ -386,7 +386,7 @@ void test_maintenance_cvl_is_fixed_560_not_cvmaxcharge(void)
 
 // --- Cell-spread derating ---
 
-void test_derate_factor_applied_once_ccl_at_spread_midpoint_is_half(void)
+static void test_derate_factor_applied_once_ccl_at_spread_midpoint_is_half(void)
 {
     // spreadMv=105 is the midpoint of the default 60..150 span -> factor
     // 0.5. maxCellSmoothedV/RawV=3.0V is below cvStartTaper -> full-current
@@ -400,7 +400,7 @@ void test_derate_factor_applied_once_ccl_at_spread_midpoint_is_half(void)
     TEST_ASSERT_EQUAL_FLOAT(0.5f, d.derateFactor);
 }
 
-void test_derating_started_once_ended_only_after_hysteresis(void)
+static void test_derating_started_once_ended_only_after_hysteresis(void)
 {
     // spreadStartMv=60 (default) -> "ended" requires spread <= 50.
     ControlState ctrl;

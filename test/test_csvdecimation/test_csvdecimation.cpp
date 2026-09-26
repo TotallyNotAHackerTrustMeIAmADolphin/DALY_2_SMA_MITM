@@ -17,7 +17,7 @@ void tearDown(void) {}
 
 // --- skip == 1: every line kept ---
 
-void test_skip1_all_lines_kept(void)
+static void test_skip1_all_lines_kept(void)
 {
     // Each line's 3 fields chosen so picking indices {0,1,2} in order
     // reproduces the line unchanged - a simple, self-checking case.
@@ -37,7 +37,7 @@ void test_skip1_all_lines_kept(void)
 
 // --- skip == N > 1: only every Nth line kept ---
 
-void test_skipN_only_every_nth_line_kept(void)
+static void test_skipN_only_every_nth_line_kept(void)
 {
     // 6 lines (index 0..5), skip=3: lineIdx 0 is always kept (keepLine_
     // starts true); index 1,2 dropped; index 3 kept (3 % 3 == 0); index
@@ -62,7 +62,7 @@ void test_skipN_only_every_nth_line_kept(void)
 
 // --- a line split across two feed() calls (chunk boundary mid-line) ---
 
-void test_chunk_boundary_mid_line(void)
+static void test_chunk_boundary_mid_line(void)
 {
     // "ABCDE,FGHIJ,KLMNO\n" split mid-second-field: chunk 1 ends inside
     // "FGHIJ", chunk 2 carries the rest plus the newline. The accumulated
@@ -89,7 +89,7 @@ void test_chunk_boundary_mid_line(void)
 
 // --- a line exceeding kLineBufSize (320) is safely truncated ---
 
-void test_oversized_line_safely_truncated(void)
+static void test_oversized_line_safely_truncated(void)
 {
     // Field 0 is short ("AAAA"), field 1 is 400 'B's - well past
     // kLineBufSize (320) once combined with the leading "AAAA,". Only the
@@ -113,7 +113,7 @@ void test_oversized_line_safely_truncated(void)
 
 // --- a final line with no trailing newline is only flushed by finish() ---
 
-void test_final_line_without_newline_flushed_by_finish(void)
+static void test_final_line_without_newline_flushed_by_finish(void)
 {
     const std::string input = "X,Y,Z\nP,Q,R"; // second line has no trailing '\n'
     const size_t fields[3] = {0, 1, 2};
@@ -134,7 +134,7 @@ void test_final_line_without_newline_flushed_by_finish(void)
 
 // finish() on an accumulator that never saw any input must not write anything.
 
-void test_finish_with_no_input_writes_nothing(void)
+static void test_finish_with_no_input_writes_nothing(void)
 {
     const size_t fields[1] = {0};
     Accumulator accum(fields, 1, /*skip=*/1);

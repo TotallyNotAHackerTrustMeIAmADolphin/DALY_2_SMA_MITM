@@ -6,6 +6,7 @@
 
 #include <unity.h>
 #include <cstring>
+#include <cmath>
 #include "DalyFrames.h"
 
 using DalyFrames::DalyAlarmStatus;
@@ -34,7 +35,7 @@ void tearDown(void) {}
 
 // --- checksumOk ---
 
-void test_checksum_ok(void)
+static void test_checksum_ok(void)
 {
     uint8_t data[8] = {1, 2, 3, 4, 5, 6, 7, 8};
     uint8_t frame[13];
@@ -42,7 +43,7 @@ void test_checksum_ok(void)
     TEST_ASSERT_TRUE(DalyFrames::checksumOk(frame));
 }
 
-void test_checksum_bad(void)
+static void test_checksum_bad(void)
 {
     uint8_t data[8] = {1, 2, 3, 4, 5, 6, 7, 8};
     uint8_t frame[13];
@@ -56,7 +57,7 @@ void test_checksum_bad(void)
 // packCurrent = (((data[4]<<8)|data[5]) - 30000) / 10.0 -> raw 30050 -> 5.0A
 // packSOC     = ((data[6]<<8)|data[7]) / 10.0  -> raw 855 = 0x0357 -> 85.5%
 
-void test_parse_basic_info(void)
+static void test_parse_basic_info(void)
 {
     // 552 = 0x0228, 30050 = 0x7562, 855 = 0x0357
     uint8_t data[8] = {0x02, 0x28, 0x00, 0x00, 0x75, 0x62, 0x03, 0x57};
@@ -67,7 +68,7 @@ void test_parse_basic_info(void)
     TEST_ASSERT_EQUAL_FLOAT(85.5f, info.packSOC);
 }
 
-void test_parse_basic_info_negative_current(void)
+static void test_parse_basic_info_negative_current(void)
 {
     // currentOffset 29500 = 0x733C -> (29500-30000)/10.0 = -50.0A (discharge)
     uint8_t data[8] = {0x00, 0x00, 0x00, 0x00, 0x73, 0x3C, 0x00, 0x00};
@@ -80,7 +81,7 @@ void test_parse_basic_info_negative_current(void)
 // data[0] = 1-based frame number; data[1..2]/[3..4]/[5..6] = 3 cell mV,
 // big-endian; data[7] unused.
 
-void test_parse_cell_frame(void)
+static void test_parse_cell_frame(void)
 {
     // frame 2, cells 3350 (0x0D16), 3360 (0x0D20), 3370 (0x0D2A) mV
     uint8_t data[8] = {2, 0x0D, 0x16, 0x0D, 0x20, 0x0D, 0x2A, 0x00};
@@ -95,7 +96,7 @@ void test_parse_cell_frame(void)
 
 // --- parseMosfetStatus (cmd 0x93) ---
 
-void test_parse_mosfet_status_accepted(void)
+static void test_parse_mosfet_status_accepted(void)
 {
     // [0] charge/discharge status (1=charge), [1] charge MOS on,
     // [2] discharge MOS off, [3..7] life cycle/capacity - not decoded.
@@ -106,7 +107,7 @@ void test_parse_mosfet_status_accepted(void)
     TEST_ASSERT_FALSE(status.dischargeMosOn);
 }
 
-void test_parse_mosfet_status_rejected_out_of_range(void)
+static void test_parse_mosfet_status_rejected_out_of_range(void)
 {
     // data[1] = 2 is neither the documented 0 (off) nor 1 (on) -> reject
     // the frame rather than guess.
@@ -115,7 +116,7 @@ void test_parse_mosfet_status_rejected_out_of_range(void)
     TEST_ASSERT_FALSE(DalyFrames::parseMosfetStatus(data, status));
 }
 
-void test_parse_mosfet_status_rejected_discharge_byte_out_of_range(void)
+static void test_parse_mosfet_status_rejected_discharge_byte_out_of_range(void)
 {
     uint8_t data[8] = {1, 0, 5, 0, 0, 0, 0, 0};
     DalyMosfetStatus status;
@@ -124,7 +125,7 @@ void test_parse_mosfet_status_rejected_discharge_byte_out_of_range(void)
 
 // --- parseAlarmStatus (cmd 0x98) ---
 
-void test_parse_alarm_status_all_zero(void)
+static void test_parse_alarm_status_all_zero(void)
 {
     uint8_t data[8] = {0, 0, 0, 0, 0, 0, 0, 0};
     DalyAlarmStatus status;
@@ -138,7 +139,7 @@ void test_parse_alarm_status_all_zero(void)
         TEST_ASSERT_EQUAL_UINT8(0, status.rawBytes[i]);
 }
 
-void test_parse_alarm_status_named_byte0_bits(void)
+static void test_parse_alarm_status_named_byte0_bits(void)
 {
     // bit0/1 = cell overvolt L1/L2, bit4/5 = pack overvolt L1/L2 (#25).
     uint8_t data[8] = {0x33, 0, 0, 0, 0, 0, 0, 0}; // 0011 0011: bits 0,1,4,5
@@ -151,7 +152,7 @@ void test_parse_alarm_status_named_byte0_bits(void)
     TEST_ASSERT_TRUE(status.anyProtectionActive);
 }
 
-void test_parse_alarm_status_fault_code_byte_not_scanned(void)
+static void test_parse_alarm_status_fault_code_byte_not_scanned(void)
 {
     // rawBytes[7] (the numeric fault code) is not a bitfield and must not
     // by itself flip anyProtectionActive - only bytes 0-6 are scanned.
@@ -165,7 +166,7 @@ void test_parse_alarm_status_fault_code_byte_not_scanned(void)
 // Every named bit in kAlarmBitNames() (#25), set one at a time, must show
 // up in the matching rawBytes bit and flip anyProtectionActive (all named
 // bits live in bytes 0-6).
-void test_parse_alarm_status_every_named_bit_sets_rawbyte_and_any(void)
+static void test_parse_alarm_status_every_named_bit_sets_rawbyte_and_any(void)
 {
     auto &names = DalyFrames::kAlarmBitNames();
     for (int b = 0; b < 7; b++)
@@ -188,7 +189,7 @@ void test_parse_alarm_status_every_named_bit_sets_rawbyte_and_any(void)
 
 // --- cellVoltagesPlausible ---
 
-void test_cell_voltages_plausible_all_good(void)
+static void test_cell_voltages_plausible_all_good(void)
 {
     float cells[16];
     for (int i = 0; i < 16; i++)
@@ -198,7 +199,7 @@ void test_cell_voltages_plausible_all_good(void)
     TEST_ASSERT_EQUAL_INT(-1, badIndex);
 }
 
-void test_cell_voltages_plausible_low_cell_fails_with_index(void)
+static void test_cell_voltages_plausible_low_cell_fails_with_index(void)
 {
     float cells[16];
     for (int i = 0; i < 16; i++)
@@ -209,7 +210,7 @@ void test_cell_voltages_plausible_low_cell_fails_with_index(void)
     TEST_ASSERT_EQUAL_INT(5, badIndex);
 }
 
-void test_cell_voltages_plausible_high_cell_fails_with_index(void)
+static void test_cell_voltages_plausible_high_cell_fails_with_index(void)
 {
     float cells[16];
     for (int i = 0; i < 16; i++)
@@ -218,6 +219,51 @@ void test_cell_voltages_plausible_high_cell_fails_with_index(void)
     int badIndex = -99;
     TEST_ASSERT_FALSE(DalyFrames::cellVoltagesPlausible(cells, 16, badIndex));
     TEST_ASSERT_EQUAL_INT(11, badIndex);
+}
+
+static void test_cell_voltages_plausible_nan_rejected(void)
+{
+    float cells[16];
+    for (int i = 0; i < 16; i++)
+        cells[i] = 3.30f;
+    cells[3] = NAN;
+    int badIndex = -99;
+    TEST_ASSERT_FALSE(DalyFrames::cellVoltagesPlausible(cells, 16, badIndex));
+    TEST_ASSERT_EQUAL_INT(3, badIndex);
+}
+
+static void test_cell_voltages_plausible_negative_rejected(void)
+{
+    float cells[16];
+    for (int i = 0; i < 16; i++)
+        cells[i] = 3.30f;
+    cells[7] = -1.0f;
+    int badIndex = -99;
+    TEST_ASSERT_FALSE(DalyFrames::cellVoltagesPlausible(cells, 16, badIndex));
+    TEST_ASSERT_EQUAL_INT(7, badIndex);
+}
+
+static void test_cell_voltages_plausible_huge_rejected(void)
+{
+    float cells[16];
+    for (int i = 0; i < 16; i++)
+        cells[i] = 3.30f;
+    cells[9] = 70.0f;
+    int badIndex = -99;
+    TEST_ASSERT_FALSE(DalyFrames::cellVoltagesPlausible(cells, 16, badIndex));
+    TEST_ASSERT_EQUAL_INT(9, badIndex);
+}
+
+static void test_cell_voltages_plausible_exact_bounds_accepted(void)
+{
+    float cells[16];
+    for (int i = 0; i < 16; i++)
+        cells[i] = 3.30f;
+    cells[0] = 1.5f;
+    cells[1] = 4.5f;
+    int badIndex = -99;
+    TEST_ASSERT_TRUE(DalyFrames::cellVoltagesPlausible(cells, 16, badIndex));
+    TEST_ASSERT_EQUAL_INT(-1, badIndex);
 }
 
 int main(int, char **)
@@ -238,5 +284,9 @@ int main(int, char **)
     RUN_TEST(test_cell_voltages_plausible_all_good);
     RUN_TEST(test_cell_voltages_plausible_low_cell_fails_with_index);
     RUN_TEST(test_cell_voltages_plausible_high_cell_fails_with_index);
+    RUN_TEST(test_cell_voltages_plausible_nan_rejected);
+    RUN_TEST(test_cell_voltages_plausible_negative_rejected);
+    RUN_TEST(test_cell_voltages_plausible_huge_rejected);
+    RUN_TEST(test_cell_voltages_plausible_exact_bounds_accepted);
     return UNITY_END();
 }

@@ -52,7 +52,7 @@ static DalyAlarmStatus zeroAlarm()
 
 // --- SOC jump ---
 
-void test_soc_no_jump_on_first_ever_reading(void)
+static void test_soc_no_jump_on_first_ever_reading(void)
 {
     // Baseline: the very first reading after boot must never be reported as
     // a jump, however far from 0 it is.
@@ -64,7 +64,7 @@ void test_soc_no_jump_on_first_ever_reading(void)
     TEST_ASSERT_EQUAL_FLOAT(85.0f, st.lastSoc);
 }
 
-void test_soc_no_jump_on_small_change(void)
+static void test_soc_no_jump_on_small_change(void)
 {
     State st;
     DalyBasicInfo i1 = basicInfoWithSoc(50.0f);
@@ -75,7 +75,7 @@ void test_soc_no_jump_on_small_change(void)
     TEST_ASSERT_FALSE(ev.socJumped);
 }
 
-void test_soc_jump_over_10_points(void)
+static void test_soc_jump_over_10_points(void)
 {
     // >10 points either direction is reported, regardless of proximity to
     // 100%.
@@ -91,7 +91,7 @@ void test_soc_jump_over_10_points(void)
     TEST_ASSERT_EQUAL_FLOAT(61.0f, st.lastSoc); // state still updates
 }
 
-void test_soc_jump_over_10_points_downward(void)
+static void test_soc_jump_over_10_points_downward(void)
 {
     State st;
     DalyBasicInfo i1 = basicInfoWithSoc(80.0f);
@@ -104,7 +104,7 @@ void test_soc_jump_over_10_points_downward(void)
     TEST_ASSERT_EQUAL_FLOAT(65.0f, ev.socTo);
 }
 
-void test_soc_jump_to_100_from_below_95(void)
+static void test_soc_jump_to_100_from_below_95(void)
 {
     // Special case: jump to >=99.9% from below 95% is reported even though
     // it's a <=10-point change (e.g. 94.5 -> 100.0 is only 5.5 points).
@@ -119,7 +119,7 @@ void test_soc_jump_to_100_from_below_95(void)
     TEST_ASSERT_EQUAL_FLOAT(100.0f, ev.socTo);
 }
 
-void test_soc_no_jump_to_100_from_above_95(void)
+static void test_soc_no_jump_to_100_from_above_95(void)
 {
     // 96.0 -> 100.0: within 10 points AND lastSoc(96.0) is not < 95.0, so
     // the 100%-recalibration special case must not fire either.
@@ -132,7 +132,7 @@ void test_soc_no_jump_to_100_from_above_95(void)
     TEST_ASSERT_FALSE(ev.socJumped);
 }
 
-void test_soc_jump_does_not_repeat_next_reading(void)
+static void test_soc_jump_does_not_repeat_next_reading(void)
 {
     State st;
     DalyBasicInfo i1 = basicInfoWithSoc(50.0f);
@@ -148,7 +148,7 @@ void test_soc_jump_does_not_repeat_next_reading(void)
 
 // --- MOSFET transitions ---
 
-void test_mosfet_no_event_on_first_ever_reading(void)
+static void test_mosfet_no_event_on_first_ever_reading(void)
 {
     State st;
     DalyMosfetStatus m = mosfet(true, true);
@@ -158,7 +158,7 @@ void test_mosfet_no_event_on_first_ever_reading(void)
     TEST_ASSERT_TRUE(st.haveMosfetBaseline);
 }
 
-void test_mosfet_no_event_when_unchanged(void)
+static void test_mosfet_no_event_when_unchanged(void)
 {
     State st;
     DalyMosfetStatus m1 = mosfet(true, true);
@@ -169,7 +169,7 @@ void test_mosfet_no_event_when_unchanged(void)
     TEST_ASSERT_FALSE(ev.dischargeMosChanged);
 }
 
-void test_mosfet_charge_on_to_off(void)
+static void test_mosfet_charge_on_to_off(void)
 {
     State st;
     DalyMosfetStatus m1 = mosfet(true, true);
@@ -182,7 +182,7 @@ void test_mosfet_charge_on_to_off(void)
     TEST_ASSERT_FALSE(ev.dischargeMosChanged);
 }
 
-void test_mosfet_charge_off_to_on(void)
+static void test_mosfet_charge_off_to_on(void)
 {
     State st;
     DalyMosfetStatus m1 = mosfet(false, true);
@@ -194,7 +194,7 @@ void test_mosfet_charge_off_to_on(void)
     TEST_ASSERT_TRUE(ev.chargeMosOn);
 }
 
-void test_mosfet_discharge_on_to_off_and_back(void)
+static void test_mosfet_discharge_on_to_off_and_back(void)
 {
     State st;
     DalyMosfetStatus m1 = mosfet(true, true);
@@ -212,7 +212,7 @@ void test_mosfet_discharge_on_to_off_and_back(void)
     TEST_ASSERT_TRUE(ev3.dischargeMosOn);
 }
 
-void test_mosfet_both_change_same_reading(void)
+static void test_mosfet_both_change_same_reading(void)
 {
     State st;
     DalyMosfetStatus m1 = mosfet(true, true);
@@ -228,7 +228,7 @@ void test_mosfet_both_change_same_reading(void)
 
 // --- Alarm bit diff ---
 
-void test_alarm_no_events_on_first_ever_reading(void)
+static void test_alarm_no_events_on_first_ever_reading(void)
 {
     // Baseline: an all-nonzero first-ever alarm read must not be reported
     // as 56 "SET" events.
@@ -240,7 +240,7 @@ void test_alarm_no_events_on_first_ever_reading(void)
     TEST_ASSERT_TRUE(st.haveAlarmBaseline);
 }
 
-void test_alarm_no_events_when_unchanged(void)
+static void test_alarm_no_events_when_unchanged(void)
 {
     State st;
     DalyAlarmStatus a1 = zeroAlarm();
@@ -251,7 +251,7 @@ void test_alarm_no_events_when_unchanged(void)
     TEST_ASSERT_FALSE(ev.faultCodeChanged);
 }
 
-void test_alarm_bit_set_decoded_to_name(void)
+static void test_alarm_bit_set_decoded_to_name(void)
 {
     // Byte 0 bit 0 = "Cell overvoltage Level 1" (kAlarmBitNames()[0][0]).
     State st;
@@ -272,7 +272,7 @@ void test_alarm_bit_set_decoded_to_name(void)
     TEST_ASSERT_EQUAL_STRING("Cell overvoltage Level 1", ev.alarmBits[0].name);
 }
 
-void test_alarm_bit_cleared_decoded_to_name(void)
+static void test_alarm_bit_cleared_decoded_to_name(void)
 {
     State st;
     DalyAlarmStatus a1 = zeroAlarm();
@@ -289,7 +289,7 @@ void test_alarm_bit_cleared_decoded_to_name(void)
     TEST_ASSERT_EQUAL_STRING("Cell overvoltage Level 1", ev.alarmBits[0].name);
 }
 
-void test_alarm_undefined_bit_has_null_name(void)
+static void test_alarm_undefined_bit_has_null_name(void)
 {
     // Byte 3 bits 4-7 are undefined in kAlarmBitNames() - still reported,
     // with name == nullptr so the caller falls back to byte.bit logging.
@@ -309,7 +309,7 @@ void test_alarm_undefined_bit_has_null_name(void)
     TEST_ASSERT_NULL(ev.alarmBits[0].name);
 }
 
-void test_alarm_multiple_bits_across_bytes_same_reading(void)
+static void test_alarm_multiple_bits_across_bytes_same_reading(void)
 {
     State st;
     DalyAlarmStatus a1 = zeroAlarm();
@@ -329,7 +329,7 @@ void test_alarm_multiple_bits_across_bytes_same_reading(void)
     TEST_ASSERT_EQUAL_STRING("Discharge overcurrent Level 1", ev.alarmBits[1].name);
 }
 
-void test_alarm_fault_code_change_reported_separately_from_bits(void)
+static void test_alarm_fault_code_change_reported_separately_from_bits(void)
 {
     State st;
     DalyAlarmStatus a1 = zeroAlarm();
@@ -345,7 +345,7 @@ void test_alarm_fault_code_change_reported_separately_from_bits(void)
     TEST_ASSERT_EQUAL_UINT8(5, ev.faultCodeTo);
 }
 
-void test_alarm_events_do_not_repeat_next_unchanged_reading(void)
+static void test_alarm_events_do_not_repeat_next_unchanged_reading(void)
 {
     State st;
     DalyAlarmStatus a1 = zeroAlarm();
@@ -371,7 +371,7 @@ void test_alarm_events_do_not_repeat_next_unchanged_reading(void)
 // --- Independence: a call with only one reading present must not disturb
 // the other two states' baselines ---
 
-void test_readings_are_independent_of_each_other(void)
+static void test_readings_are_independent_of_each_other(void)
 {
     State st;
     // Only a MOSFET reading this call - SOC/alarm baselines untouched.

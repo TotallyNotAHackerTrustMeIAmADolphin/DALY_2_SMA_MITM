@@ -25,7 +25,7 @@ static const CanFrame *findFrame(const TxFrameSet &set, uint32_t id)
 
 // --- encodeStatus (sendStatus's pre-#45 byte layout) ---
 
-void test_encode_status_normal_operation(void)
+static void test_encode_status_normal_operation(void)
 {
     // packVoltage 55.2V -> v_out = round(5520.0) = 5520 = 0x1590
     // packCurrent 5.0A  -> i_out = round(50.0)   = 50   = 0x0032
@@ -75,7 +75,7 @@ void test_encode_status_normal_operation(void)
     TEST_ASSERT_EQUAL_UINT8_ARRAY(expected359, f359->data, 8);
 }
 
-void test_encode_status_maintenance_sets_soc_sentinel_and_status_bytes(void)
+static void test_encode_status_maintenance_sets_soc_sentinel_and_status_bytes(void)
 {
     SMATxData data{};
     data.packVoltage = 50.0f;
@@ -105,7 +105,7 @@ void test_encode_status_maintenance_sets_soc_sentinel_and_status_bytes(void)
     TEST_ASSERT_EQUAL_UINT8(0x10, f359->data[0]); // maintenance bit set
 }
 
-void test_encode_status_resetting_overrides_maintenance_status_byte(void)
+static void test_encode_status_resetting_overrides_maintenance_status_byte(void)
 {
     // isResetting takes priority over maintenanceActive for the 0x351
     // status byte, same as the pre-#45 ternary chain.
@@ -122,7 +122,7 @@ void test_encode_status_resetting_overrides_maintenance_status_byte(void)
     TEST_ASSERT_EQUAL_UINT8(0x00, f351->data[6]);
 }
 
-void test_encode_status_negative_current(void)
+static void test_encode_status_negative_current(void)
 {
     // packCurrent -12.3A -> i_out = round(-123.0) = -123 = 0xFF85 (int16_t)
     SMATxData data{};
@@ -137,7 +137,7 @@ void test_encode_status_negative_current(void)
     TEST_ASSERT_EQUAL_UINT8(0xFF, f356->data[3]);
 }
 
-void test_encode_status_ticker_rollover_emits_heartbeat_frames(void)
+static void test_encode_status_ticker_rollover_emits_heartbeat_frames(void)
 {
     // tickerIn=10 -> tickerIn+1=11 > 10 -> resets to 0 and adds the
     // 0x35E ("SMA" ascii id) / 0x35F (manufacturer data) heartbeat pair.
@@ -162,7 +162,7 @@ void test_encode_status_ticker_rollover_emits_heartbeat_frames(void)
     TEST_ASSERT_EQUAL_UINT8_ARRAY(expected35F, f35F->data, 8);
 }
 
-void test_encode_status_ticker_not_yet_due_no_heartbeat(void)
+static void test_encode_status_ticker_not_yet_due_no_heartbeat(void)
 {
     SMATxData data{};
     uint8_t nextTicker;
@@ -176,7 +176,7 @@ void test_encode_status_ticker_not_yet_due_no_heartbeat(void)
 
 // --- decodeFrame (readMessages's 0x305 mode / 0x300 grid decoding) ---
 
-void test_decode_0x305_mode_bulk(void)
+static void test_decode_0x305_mode_bulk(void)
 {
     uint8_t data[8] = {1, 0, 0, 0, 0, 0, 0, 0};
     RxUpdate update;
@@ -186,7 +186,7 @@ void test_decode_0x305_mode_bulk(void)
     TEST_ASSERT_FALSE(update.hasGridPresent);
 }
 
-void test_decode_0x305_mode_absorption(void)
+static void test_decode_0x305_mode_absorption(void)
 {
     uint8_t data[8] = {2, 0, 0, 0, 0, 0, 0, 0};
     RxUpdate update;
@@ -194,7 +194,7 @@ void test_decode_0x305_mode_absorption(void)
     TEST_ASSERT_EQUAL_STRING("Absorption", update.chargeMode);
 }
 
-void test_decode_0x305_mode_float(void)
+static void test_decode_0x305_mode_float(void)
 {
     uint8_t data[8] = {3, 0, 0, 0, 0, 0, 0, 0};
     RxUpdate update;
@@ -202,7 +202,7 @@ void test_decode_0x305_mode_float(void)
     TEST_ASSERT_EQUAL_STRING("Float", update.chargeMode);
 }
 
-void test_decode_0x305_mode_equalize(void)
+static void test_decode_0x305_mode_equalize(void)
 {
     uint8_t data[8] = {4, 0, 0, 0, 0, 0, 0, 0};
     RxUpdate update;
@@ -210,7 +210,7 @@ void test_decode_0x305_mode_equalize(void)
     TEST_ASSERT_EQUAL_STRING("Equalize", update.chargeMode);
 }
 
-void test_decode_0x305_mode_unrecognized_byte_falls_back_to_equalize(void)
+static void test_decode_0x305_mode_unrecognized_byte_falls_back_to_equalize(void)
 {
     // The pre-#45 ternary chain's final else is a catch-all: any byte other
     // than 1/2/3 (4 included) decodes as "Equalize". Preserved as-is - #45
@@ -221,7 +221,7 @@ void test_decode_0x305_mode_unrecognized_byte_falls_back_to_equalize(void)
     TEST_ASSERT_EQUAL_STRING("Equalize", update.chargeMode);
 }
 
-void test_decode_0x305_zero_dlc_ignored(void)
+static void test_decode_0x305_zero_dlc_ignored(void)
 {
     uint8_t data[8] = {1, 0, 0, 0, 0, 0, 0, 0};
     RxUpdate update;
@@ -229,7 +229,7 @@ void test_decode_0x305_zero_dlc_ignored(void)
     TEST_ASSERT_FALSE(update.hasChargeMode);
 }
 
-void test_decode_0x300_grid_present_true(void)
+static void test_decode_0x300_grid_present_true(void)
 {
     uint8_t data[8] = {0x01, 0, 0, 0, 0, 0, 0, 0};
     RxUpdate update;
@@ -239,7 +239,7 @@ void test_decode_0x300_grid_present_true(void)
     TEST_ASSERT_FALSE(update.hasChargeMode);
 }
 
-void test_decode_0x300_grid_present_false(void)
+static void test_decode_0x300_grid_present_false(void)
 {
     uint8_t data[8] = {0x00, 0, 0, 0, 0, 0, 0, 0};
     RxUpdate update;
@@ -248,7 +248,7 @@ void test_decode_0x300_grid_present_false(void)
     TEST_ASSERT_FALSE(update.gridPresent);
 }
 
-void test_decode_0x300_only_bit0_matters(void)
+static void test_decode_0x300_only_bit0_matters(void)
 {
     // Other bits set, bit0 clear -> still reads as grid absent.
     uint8_t data[8] = {0xFE, 0, 0, 0, 0, 0, 0, 0};
@@ -257,7 +257,7 @@ void test_decode_0x300_only_bit0_matters(void)
     TEST_ASSERT_FALSE(update.gridPresent);
 }
 
-void test_decode_unknown_id_not_decoded(void)
+static void test_decode_unknown_id_not_decoded(void)
 {
     uint8_t data[8] = {1, 2, 3, 4, 5, 6, 7, 8};
     RxUpdate update;
@@ -268,24 +268,24 @@ void test_decode_unknown_id_not_decoded(void)
 
 // --- shouldRetryBusRecovery (checkBusHealth's _wasBusOff/_recoveryTimer) ---
 
-void test_retry_not_due_before_one_second(void)
+static void test_retry_not_due_before_one_second(void)
 {
     TEST_ASSERT_FALSE(SMAFrames::shouldRetryBusRecovery(500, true, 0));
 }
 
-void test_retry_due_after_one_second(void)
+static void test_retry_due_after_one_second(void)
 {
     TEST_ASSERT_TRUE(SMAFrames::shouldRetryBusRecovery(1001, true, 0));
 }
 
-void test_retry_boundary_exactly_one_second_not_yet_due(void)
+static void test_retry_boundary_exactly_one_second_not_yet_due(void)
 {
     // Pre-#45 uses a strict `>`, so exactly 1000ms elapsed is not yet due -
     // preserved exactly, not rounded to >=.
     TEST_ASSERT_FALSE(SMAFrames::shouldRetryBusRecovery(1000, true, 0));
 }
 
-void test_retry_never_due_when_bus_not_off(void)
+static void test_retry_never_due_when_bus_not_off(void)
 {
     TEST_ASSERT_FALSE(SMAFrames::shouldRetryBusRecovery(5000, false, 0));
 }

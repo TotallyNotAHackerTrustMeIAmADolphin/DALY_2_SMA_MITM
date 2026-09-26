@@ -18,6 +18,8 @@
 #include "WifiEvents.h"
 #include "MutexLock.h"
 
+static_assert(kPackCells <= DalyFrames::kMaxCollectorCells, "DalyRS485 can't collect every cell of the pack");
+
 // Bring in your Wi-Fi credentials AND network config (static IP, gateway,
 // subnet, DNS) - all of it lives in this one gitignored file now, so a
 // public checkout never reveals your home network layout. See

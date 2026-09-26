@@ -137,6 +137,11 @@ bool DalyRS485::readBasicInfo(DalyBasicInfo &info)
 
 bool DalyRS485::readCellVoltages(uint8_t expectedCells, std::vector<float> &cellVoltages)
 {
+    // The collector holds at most kMaxCollectorCells; reading mv() past
+    // that would be out of bounds.
+    if (expectedCells > DalyFrames::kMaxCollectorCells)
+        return false;
+
     if (cellVoltages.size() != expectedCells)
     {
         cellVoltages.clear();

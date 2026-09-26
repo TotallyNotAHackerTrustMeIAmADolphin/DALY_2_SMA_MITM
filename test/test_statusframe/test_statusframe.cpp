@@ -261,7 +261,7 @@ static void test_auto_maint_starts_on_weak_cell_even_when_pack_average_is_high(v
 {
     // The exact scenario from #12: Cell 16 sags under discharge and hits
     // the discharge floor while the pack average is still well above the
-    // old pack-voltage trigger (cvMaintStart(3.05) * kCellCount(16) =
+    // old pack-voltage trigger (cvMaintStart(3.05) * kPackCells(16) =
     // 48.8V). packVoltage=49.6V > 48.8V, so the retired pack-average
     // comparison would never have started maintenance here; the minimum
     // cell (2.99V) is what's actually below cvMaintStart(3.05V).

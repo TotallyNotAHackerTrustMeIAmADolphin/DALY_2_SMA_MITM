@@ -19,14 +19,6 @@
 
 namespace StatusFrame
 {
-    // main.cpp hardcodes 16 cells (its MAX_CELLS) into the CVL/DVL
-    // formulas below (the auto-maintenance hysteresis compares a per-cell
-    // voltage directly since #12, so it no longer needs a cell count);
-    // mirrored here as a named constant rather than a magic 16; NOT the
-    // DalyRS485 per-cell read count (that one stays MAX_CELLS in
-    // main.cpp), just the same value.
-    constexpr int kCellCount = 16;
-
     // Everything canTask reads out of currentData / the shared reset
     // globals under dataMutex to decide one 250ms tick's frame. Plain old
     // data, copied out under the lock so decide() itself never touches the
@@ -193,8 +185,8 @@ namespace StatusFrame
             v.dcl = Glideslope::calculateDCL(cfg, s.minCellSmoothedV, s.minCellRawV, s.cellSpreadMv, fresh, maintenanceActive);
             // Maintenance forces the fixed absorption target; otherwise the
             // configured per-cell limits x cell count.
-            v.cvl = maintenanceActive ? kMaintCvlDeciV : Glideslope::toDeciVolts(cfg.cvMaxCharge * kCellCount);
-            v.dvl = Glideslope::toDeciVolts(cfg.cvMinDischarge * kCellCount);
+            v.cvl = maintenanceActive ? kMaintCvlDeciV : Glideslope::toDeciVolts(cfg.cvMaxCharge * kPackCells);
+            v.dvl = Glideslope::toDeciVolts(cfg.cvMinDischarge * kPackCells);
             return v;
         }
 

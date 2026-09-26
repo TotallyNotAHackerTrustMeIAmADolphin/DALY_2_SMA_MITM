@@ -23,13 +23,6 @@
 // secrets_example.h for the template.
 #include "secrets.h"
 
-// Single source of truth is CellSmoother.h (#31); kept as plain constants
-// here too since canTask and other code below still reference MAX_CELLS
-// well outside bmsTask/CellSmoother's own scope (pack voltage, CVL/DVL).
-constexpr int MAX_CELLS = CellSmoother::MAX_CELLS;
-constexpr int MAX_SAMPLES = CellSmoother::MAX_SAMPLES;
-static_assert(MAX_SAMPLES == kMaxVSamples, "SystemConfig::validate() range for vSamples must match CellSmoother");
-
 // Single source of truth for the local time zone - used both by setup()'s
 // early setenv("TZ", ...) (before NTP has run) and setupNetwork()'s
 // configTzTime() (which drives the actual NTP sync), so the two can't drift
@@ -204,14 +197,14 @@ void bmsTask(void *pvParameters)
     vTaskDelay(pdMS_TO_TICKS(100));
 
     std::vector<float> cellVolts;
-    if (bms.readCellVoltages(MAX_CELLS, cellVolts))
+    if (bms.readCellVoltages(kPackCells, cellVolts))
     {
       static int lastKnownVSamples = 12; // falls back to this if the lock is briefly contended
       if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
         lastKnownVSamples = cfg.vSamples;
         xSemaphoreGive(dataMutex);
       }
-      int windowSize = max(1, min(MAX_SAMPLES, lastKnownVSamples));
+      int windowSize = max(1, min(CellSmoother::MAX_SAMPLES, lastKnownVSamples));
 
       // The moving-average/reseed-on-window-change logic (and the
       // documented boot-swing regression it guards against - CCL

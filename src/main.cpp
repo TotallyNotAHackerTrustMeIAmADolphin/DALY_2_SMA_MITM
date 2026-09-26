@@ -1,5 +1,4 @@
 #include <Arduino.h>
-#include <cstring>
 #include <cmath>
 #include <WiFi.h>
 #include <ArduinoOTA.h>
@@ -132,39 +131,39 @@ void pushTelemetry(const DashboardData &data)
 }
 
 // --- UI EVENT HANDLER ---
-void handleUIAction(const char *action)
+// Returns whether it applied (false = dataMutex busy), which the web route
+// turns into a 200 or 503. Log text is byte-identical to before the switch
+// to UiAction; "toggleMaint"/"resetSMA" here are only that log wording.
+bool handleUIAction(UiAction action)
 {
-  if (strcmp(action, "toggleMaint") == 0)
+  bool applied = false, maintOn = false;
+  if (MutexLock lock{dataMutex, kUiLockTimeout})
   {
-    bool applied = false, newState = false;
-    if (MutexLock lock{dataMutex, kUiLockTimeout})
+    applied = true;
+    switch (action)
     {
+    case UiAction::ToggleMaint:
       uiCommands.manualMaintForce = !uiCommands.manualMaintForce;
-      newState = uiCommands.manualMaintForce;
-      applied = true;
-    }
-    if (applied)
-      netLog("[USER] Manual Force Charge: %s\n", newState ? "ON" : "OFF");
-    else
-      netLog("[USER] %s ignored: state busy\n", action);
-  }
-  else if (strcmp(action, "resetSMA") == 0)
-  {
-    bool applied = false;
-    if (MutexLock lock{dataMutex, kUiLockTimeout})
-    {
+      maintOn = uiCommands.manualMaintForce;
+      break;
+    case UiAction::ResetSma:
       // 0 = "not armed yet": canTask starts the hold from the first status
       // frame it actually sends with the reset (DVL 0), so a request made
       // while the BMS is still silent isn't consumed by the wait.
       uiCommands.resetHoldStartMs = 0;
       uiCommands.resetRequested = true;
-      applied = true;
+      break;
     }
-    if (applied)
-      netLog("[USER] Manual Cluster Reset Triggered.\n");
-    else
-      netLog("[USER] %s ignored: state busy\n", action);
   }
+
+  const char *name = action == UiAction::ToggleMaint ? "toggleMaint" : "resetSMA";
+  if (!applied)
+    netLog("[USER] %s ignored: state busy\n", name);
+  else if (action == UiAction::ToggleMaint)
+    netLog("[USER] Manual Force Charge: %s\n", maintOn ? "ON" : "OFF");
+  else
+    netLog("[USER] Manual Cluster Reset Triggered.\n");
+  return applied;
 }
 
 // Periodic work, in ms (Interval fires once more than the period passed).

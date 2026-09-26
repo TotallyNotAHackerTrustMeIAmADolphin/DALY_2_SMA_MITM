@@ -3,8 +3,15 @@
 #include "SystemState.h"
 #include "LogSink.h"
 
-// Define a callback type for button actions (like resetSMA or toggleMaint)
-typedef void (*ActionCallback)(const char *action);
+// The dashboard's two buttons. main.cpp's handleUIAction() applies one
+// under dataMutex and returns whether it did (false = state busy), which
+// the /toggleMaint or /resetSMA route turns into a 200 or 503.
+enum class UiAction
+{
+    ToggleMaint,
+    ResetSma
+};
+using ActionCallback = bool (*)(UiAction);
 
 class WebDashboard
 {

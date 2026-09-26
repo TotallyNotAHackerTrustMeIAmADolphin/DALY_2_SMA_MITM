@@ -209,18 +209,24 @@ void WebDashboard::handleIndex(AsyncWebServerRequest *request)
     request->send(200, "text/html", index_html);
 }
 
+namespace
+{
+    // Both action routes differ only in which UiAction they apply.
+    void respondToAction(AsyncWebServerRequest *request, ActionCallback cb, UiAction action)
+    {
+        bool applied = cb && cb(action);
+        request->send(applied ? 200 : 503, "text/plain", applied ? "OK" : "Device busy, try again");
+    }
+}
+
 void WebDashboard::handleToggleMaint(AsyncWebServerRequest *request)
 {
-    if (_actionCb)
-        _actionCb("toggleMaint");
-    request->redirect("/");
+    respondToAction(request, _actionCb, UiAction::ToggleMaint);
 }
 
 void WebDashboard::handleResetSMA(AsyncWebServerRequest *request)
 {
-    if (_actionCb)
-        _actionCb("resetSMA");
-    request->send(200, "text/plain", "OK");
+    respondToAction(request, _actionCb, UiAction::ResetSma);
 }
 
 void WebDashboard::handleConfigPage(AsyncWebServerRequest *request)
@@ -362,9 +368,9 @@ void WebDashboard::handleGraph(AsyncWebServerRequest *request)
 void WebDashboard::setupRoutes()
 {
     _server.on("/", HTTP_GET, handleIndex);
-    _server.on("/toggleMaint", HTTP_GET, [this](AsyncWebServerRequest *r)
+    _server.on("/toggleMaint", HTTP_POST, [this](AsyncWebServerRequest *r)
                { handleToggleMaint(r); });
-    _server.on("/resetSMA", HTTP_GET, [this](AsyncWebServerRequest *r)
+    _server.on("/resetSMA", HTTP_POST, [this](AsyncWebServerRequest *r)
                { handleResetSMA(r); });
     _server.on("/config", HTTP_GET, [this](AsyncWebServerRequest *r)
                { handleConfigPage(r); });

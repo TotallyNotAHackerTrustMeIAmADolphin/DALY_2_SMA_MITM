@@ -42,7 +42,7 @@
 // line, and JS comments are kept out of it, since a `//` comment would run
 // to the end of that line and swallow the rest of the macro. See the doc
 // comment above for what it does.)
-#define SHARED_LIST_JS R"jssrc( async function fetchOk(url) { const res = await fetch(url); if (!res.ok) throw new Error('HTTP ' + res.status); return res; } async function fetchAndPopulateSelect(url, filterFn, selectEl, statusEl, labelFn) { let files = await (await fetchOk(url)).json(); if (filterFn) files = files.filter(filterFn); if (statusEl) statusEl.innerText = ''; if (selectEl) { selectEl.innerHTML = ''; files.forEach(f => { const opt = document.createElement('option'); opt.value = f.name; opt.text = labelFn ? labelFn(f) : f.name; selectEl.appendChild(opt); }); if (files.length) selectEl.selectedIndex = files.length - 1; } return files; } )jssrc"
+#define SHARED_LIST_JS R"jssrc( async function fetchOk(url, init) { const res = await fetch(url, init); if (!res.ok) throw new Error('HTTP ' + res.status); return res; } async function fetchAndPopulateSelect(url, filterFn, selectEl, statusEl, labelFn) { let files = await (await fetchOk(url)).json(); if (filterFn) files = files.filter(filterFn); if (statusEl) statusEl.innerText = ''; if (selectEl) { selectEl.innerHTML = ''; files.forEach(f => { const opt = document.createElement('option'); opt.value = f.name; opt.text = labelFn ? labelFn(f) : f.name; selectEl.appendChild(opt); }); if (files.length) selectEl.selectedIndex = files.length - 1; } return files; } )jssrc"
 
 // logs_html/graphs_html only: armDownload() is their repeated "bail if
 // nothing's selected, else point #downloadLink at it" guard; initFilePage()
@@ -93,8 +93,8 @@ const char index_html[] PROGMEM = HTML_HEAD("BMS Bridge Pro") R"rawliteral(
 </div>
 
 <div class="card" style="margin: 0 15px;">
-  <a href="/toggleMaint" class="btn btn-blue" id="mbtn">TRIGGER FORCE CHARGE</a>
-  <button class="btn btn-red" onclick="if(confirm('Simulate battery disconnect?')) fetch('/resetSMA')">CLEAR SMA ERROR (Reset)</button>
+  <button class="btn btn-blue" id="mbtn" onclick="postAction('/toggleMaint')">TRIGGER FORCE CHARGE</button>
+  <button class="btn btn-red" onclick="if(confirm('Simulate battery disconnect?')) postAction('/resetSMA')">CLEAR SMA ERROR (Reset)</button>
 </div>
 <div id="console">Loading history...<br></div>
 <script>
@@ -111,6 +111,13 @@ const char index_html[] PROGMEM = HTML_HEAD("BMS Bridge Pro") R"rawliteral(
     while (con.childNodes.length > CON_MAX_LINES) con.removeChild(con.firstChild);
   }
   function conReset(text) { con.textContent = ''; conAppend(text); }
+
+  // POSTs a UI action (toggleMaint/resetSMA); a 503 means the device held
+  // dataMutex too long to apply it, so the caller can just try again.
+  async function postAction(url) {
+    try { await fetchOk(url, { method: 'POST' }); }
+    catch (e) { alert('Action failed (' + e.message + ') - device busy, try again'); }
+  }
 
   // Seed the console with the tail of today's SD .log file on load, so it
   // shows recent history instead of only events that happen to fire after

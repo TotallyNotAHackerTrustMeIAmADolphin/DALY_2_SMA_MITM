@@ -149,7 +149,7 @@ namespace StatusFrame
             return d;
 
         // The reset hold is measured from the first frame actually sent
-        // with the reset bit (handleUIAction() arms it with
+        // with the reset (DVL 0, #63) - handleUIAction() arms it with
         // resetHoldStartTime = 0 under the same mutex as this whole
         // block), not from the click, so a request made while no frames go
         // out still gets its full 5.5s on the bus once frames start.

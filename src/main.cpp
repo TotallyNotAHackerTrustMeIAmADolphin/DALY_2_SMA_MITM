@@ -153,7 +153,7 @@ void handleUIAction(const char *action)
     if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE)
     {
       // 0 = "not armed yet": canTask starts the 5.5 s hold from the first
-      // status frame it actually sends with the reset bit, so a request
+      // status frame it actually sends with the reset (DVL 0, #63), so a request
       // made while the BMS is still silent isn't consumed by the wait.
       resetHoldStartTime = 0;
       isResetting = true;

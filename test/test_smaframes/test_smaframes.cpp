@@ -40,7 +40,7 @@ static void test_encode_status_normal_operation(void)
     data.ccl = 300;
     data.dcl = 250;
     data.cvl = 5750;
-    data.dvl = 4900; // unused by encodeStatus, same as pre-#45 sendStatus()
+    data.dvl = 490; // 49.0 V (0.1 V units) -> bytes 6-7 (#63)
     data.maintenanceActive = false;
     data.isResetting = false;
 
@@ -53,7 +53,7 @@ static void test_encode_status_normal_operation(void)
     const CanFrame *f351 = findFrame(frameSet, 0x351);
     TEST_ASSERT_NOT_NULL(f351);
     TEST_ASSERT_EQUAL_UINT8(8, f351->dlc);
-    uint8_t expected351[8] = {0x76, 0x16, 0x2C, 0x01, 0xFA, 0x00, 0xC0, 0x00};
+    uint8_t expected351[8] = {0x76, 0x16, 0x2C, 0x01, 0xFA, 0x00, 0xEA, 0x01};
     TEST_ASSERT_EQUAL_UINT8_ARRAY(expected351, f351->data, 8);
 
     const CanFrame *f355 = findFrame(frameSet, 0x355);
@@ -75,7 +75,7 @@ static void test_encode_status_normal_operation(void)
     TEST_ASSERT_EQUAL_UINT8_ARRAY(expected359, f359->data, 8);
 }
 
-static void test_encode_status_maintenance_sets_soc_sentinel_and_status_bytes(void)
+static void test_encode_status_maintenance_sets_soc_sentinel_and_real_dvl(void)
 {
     SMATxData data{};
     data.packVoltage = 50.0f;
@@ -85,6 +85,7 @@ static void test_encode_status_maintenance_sets_soc_sentinel_and_status_bytes(vo
     data.ccl = 10;
     data.dcl = 10;
     data.cvl = 5500;
+    data.dvl = 480;
     data.maintenanceActive = true;
     data.isResetting = false;
 
@@ -98,18 +99,23 @@ static void test_encode_status_maintenance_sets_soc_sentinel_and_status_bytes(vo
 
     const CanFrame *f351 = findFrame(frameSet, 0x351);
     TEST_ASSERT_NOT_NULL(f351);
-    TEST_ASSERT_EQUAL_UINT8(0x70, f351->data[6]); // maintenance status byte
+    // Maintenance sends the real DVL like normal operation (#63), not the
+    // old 0x70 status byte.
+    TEST_ASSERT_EQUAL_UINT8(0xE0, f351->data[6]); // 480 = 0x01E0 (48.0 V)
+    TEST_ASSERT_EQUAL_UINT8(0x01, f351->data[7]);
 
     const CanFrame *f359 = findFrame(frameSet, 0x359);
     TEST_ASSERT_NOT_NULL(f359);
     TEST_ASSERT_EQUAL_UINT8(0x10, f359->data[0]); // maintenance bit set
 }
 
-static void test_encode_status_resetting_overrides_maintenance_status_byte(void)
+static void test_encode_status_resetting_sends_zero_dvl(void)
 {
-    // isResetting takes priority over maintenanceActive for the 0x351
-    // status byte, same as the pre-#45 ternary chain.
+    // The cluster reset sends DVL 0x0000 for its hold, whatever the real
+    // DVL and maintenance state (#63) - exactly the bytes it sent before
+    // DVL was encoded, since the reset relies on them.
     SMATxData data{};
+    data.dvl = 480;
     data.maintenanceActive = true;
     data.isResetting = true;
     data.packSOC = 50.0f;
@@ -120,6 +126,7 @@ static void test_encode_status_resetting_overrides_maintenance_status_byte(void)
     const CanFrame *f351 = findFrame(frameSet, 0x351);
     TEST_ASSERT_NOT_NULL(f351);
     TEST_ASSERT_EQUAL_UINT8(0x00, f351->data[6]);
+    TEST_ASSERT_EQUAL_UINT8(0x00, f351->data[7]);
 }
 
 static void test_encode_status_negative_current(void)
@@ -294,8 +301,8 @@ int main(int, char **)
 {
     UNITY_BEGIN();
     RUN_TEST(test_encode_status_normal_operation);
-    RUN_TEST(test_encode_status_maintenance_sets_soc_sentinel_and_status_bytes);
-    RUN_TEST(test_encode_status_resetting_overrides_maintenance_status_byte);
+    RUN_TEST(test_encode_status_maintenance_sets_soc_sentinel_and_real_dvl);
+    RUN_TEST(test_encode_status_resetting_sends_zero_dvl);
     RUN_TEST(test_encode_status_negative_current);
     RUN_TEST(test_encode_status_ticker_rollover_emits_heartbeat_frames);
     RUN_TEST(test_encode_status_ticker_not_yet_due_no_heartbeat);

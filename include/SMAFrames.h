@@ -70,8 +70,8 @@ namespace SMAFrames
 
     // Encodes one sendStatus() call's worth of frames from an SMATxData
     // snapshot, byte-for-byte identical to the pre-#45 sendStatus():
-    //   0x351 (8B): CVL/CCL/DCL (x10, little-endian) + status byte
-    //               (0x00 resetting, 0x70 maintenance, 0xC0 normal) + pad.
+    //   0x351 (8B): CVL/CCL/DCL/DVL (x10, little-endian). DVL is 0 while
+    //               isResetting - see the comment at the DVL bytes.
     //   0x355 (4B): SOC (x1; maintenance sends the outSOC=2 sentinel
     //               instead of the real SOC) + "SOC high" = 100.
     //   0x356 (6B): pack voltage (x100), pack current (x10), pack temp -
@@ -92,8 +92,15 @@ namespace SMAFrames
         frame[3] = (data.ccl >> 8) & 0xFF;
         frame[4] = data.dcl & 0xFF;
         frame[5] = (data.dcl >> 8) & 0xFF;
-        frame[6] = data.isResetting ? 0x00 : (data.maintenanceActive ? 0x70 : 0xC0);
-        frame[7] = 0x00;
+        // Bytes 6-7 are the discharge voltage limit (#63). They used to
+        // carry a status byte (0xC0 normal, 0x70 maintenance) with byte 7
+        // zero, which an inverter reading DVL sees as 19.2 V / 11.2 V on a
+        // 48 V pack. The cluster reset (isResetting) still sends 0x0000 for
+        // its 5.5 s hold: that is the only thing the reset button changes
+        // on the wire, so it stays byte-for-byte what it was.
+        uint16_t dvl = data.isResetting ? 0 : data.dvl;
+        frame[6] = dvl & 0xFF;
+        frame[7] = (dvl >> 8) & 0xFF;
         out.add(0x351, 8, frame);
 
         uint16_t outSOC = data.maintenanceActive ? 2 : (uint16_t)std::round(data.packSOC);

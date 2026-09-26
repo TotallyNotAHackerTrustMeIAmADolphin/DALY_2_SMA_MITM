@@ -35,7 +35,7 @@ change against `test/test_glideslope/`, `test/test_statusframe/` and
   `pre:` build script) — `--upload-port <IP>` only to target a different
   device. Port 3232. Wait for `[SYS] Firmware confirmed ...` before the
   next OTA (see OTA rollback below).
-- **Serial monitor:** `pio run -t monitor` (115200 baud)
+- **Monitor:** `pio run -t monitor` (115200 baud)
 - **Clean:** `pio run -t clean`
 - **Unit tests:** `pio test -e native` (Unity, host-side). Device env has
   `test_ignore = *`: its upload protocol is `espota`, so a device-side
@@ -45,8 +45,8 @@ change against `test/test_glideslope/`, `test/test_statusframe/` and
 ## Hard rules
 
 - Cross-task fields: guard with `dataMutex` via RAII `MutexLock`
-  (`include/MutexLock.h`) + a named `k...LockTimeout`, never raw
-  take/give; decide/copy under the lock, log after release.
+  (`include/MutexLock.h`) + a named `k...LockTimeout`, never raw take/give;
+  decide/copy under the lock, log after release.
 - `netOutMutex` (SSE log + telemetry) is innermost — never take another
   mutex while holding it. `WifiEventLatch` (`include/WifiEvents.h`) is
   lock-free (atomics), the one documented exception to `dataMutex`.
@@ -80,9 +80,9 @@ change against `test/test_glideslope/`, `test/test_statusframe/` and
   inserted earlier in the row.
 - Keep `graphs_html` charts single-axis.
 - `verifyRollbackLater()` must keep returning `true` (see OTA rollback).
-- Secrets/network config live only in `include/secrets.h`.
-- `ESPAsyncWebServer`/`AsyncTCP` are pinned exactly in `platformio.ini`;
-  bump deliberately (#11, lwIP thread).
+- Secrets/network config: `include/secrets.h` only.
+- `ESPAsyncWebServer`/`AsyncTCP` pinned exactly in `platformio.ini`; bump
+  deliberately (#11, lwIP thread).
 
 ## Architecture
 
@@ -118,7 +118,7 @@ exception.
 - `LocalClock.h` — the one wall-clock-valid check, used by `netLog()`, NTP wait, `SDLogger` — `test_localclock/`
 - `WifiEvents.h` — `WifiEventLatch`: WiFi event → `[WIFI]` log-line state machine — `test_wifievents/`
 - `ConfigForm.h` — pure `/save` parse/validate + change-log formatting — `test_configform/`
-- `ConfigStore.h`+`.cpp` — NVS load/store; rejects a wrong-typed/out-of-range value, logs the default used instead
+- `ConfigStore.h`+`.cpp` — NVS load/store; rejects a bad-typed/out-of-range value, logs the default used
 - `SettingFormat.h` — `formatSettingFixed()` (decimals, a LIMIT) / `formatSettingValue()` (round-trip, a VALUE) — `test_settingformat/`
 - `SystemConfig.h` — each member a `Setting<T>`; `set()` range-gates every write; `validate()` checks two-setting rules — `test_systemconfig/`
 - `DashboardData.h` — live telemetry for the web UI/CAN TX plus Daly MOSFET/alarm fields, Arduino-free
@@ -126,7 +126,7 @@ exception.
 - `TelemetryJson.h` — SSE JSON via `BoundedWriter`, capped at `kPackCells` — `test_telemetryjson/`
 - `SDLogger.cpp` — SD writer task; access via `sdMutex_`; routes use `webLockTimeout()` (0 if already held); decimation/trim in `CsvDecimation.h`/`TailTrim.h`
 - `WebDashboard.cpp` — `ESPAsyncWebServer` routes, SSE, `/toggleMaint`/`/resetSMA`, `/api/logs/*` (guarded by `findLogFile()`); `saveConfig()` uses `ConfigForm`/`ConfigStore`
-- `Diagnostics.cpp` — boot diagnostics, health log, OTA rollback confirmation, coredump routes (below)
+- `Diagnostics.cpp` — boot diagnostics, health log, OTA rollback, coredump routes (below)
 - `pin_config.h` — LilyGO T-CAN485 pin map (`5V_EN` driven high for RS485/CAN)
 - `main.cpp` — wiring: WiFi/NTP/OTA setup, two-core task split, `netLog`, mutex timeouts
 
@@ -140,9 +140,11 @@ exception.
   plain-string match also matches `"<uri>/..."` and would swallow it
   otherwise. Decode with the matching `firmware.elf`: `espcoredump.py
   info_corefile -t raw -c coredump.bin firmware.elf`. 404 = no dump, 409 =
-  fails CRC. Keep every deployed build's `firmware.elf`.
-- **OTA rollback:** see `docs/adr/0002-...md`. Logs `[SYS] Firmware
-  confirmed ...` / `NOT confirmed ...`.
+  fails CRC. Keep every deployed build's ELF.
+- **OTA rollback:** see `docs/adr/0002-...md`. While pending, a second OTA
+  is refused - wait for `[SYS] Firmware confirmed ...`, or reboot to roll
+  back. Only works if the bootloader was USB-flashed from a
+  rollback-enabled core.
 - **Health:** every 10 min, `logHealth()` samples heap, per-task stack
   (`loop`/`BMS_Task`/`CAN_Task`/`SD_LogTask`/`async_tcp`/`arduino_events`),
   SD drop/failure counters, WiFi RSSI — logs only when `HealthLog::decide()`

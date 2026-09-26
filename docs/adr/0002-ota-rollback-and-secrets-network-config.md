@@ -19,10 +19,13 @@ neatly under a single module:
 **OTA rollback.** `verifyRollbackLater()` (`src/Diagnostics.cpp`) overrides a
 weak Arduino-core symbol to return `true`, so the bootloader does not mark a
 freshly OTA-flashed image valid at boot. `loop()` calls
-`Diagnostics::confirmImageIfReady(wifiUp, bmsUp)`, which only confirms the
-image (`esp_ota_mark_app_valid_cancel_rollback()`) once both WiFi and the BMS
-link have been up continuously for 2 minutes of uptime
-(`include/RollbackConfirm.h`). Any reset before confirmation - panic, WDT,
+`Diagnostics::confirmImageIfReady(wifiUp, bmsUp)`, which confirms the image
+(`esp_ota_mark_app_valid_cancel_rollback()`) the first time, at or after 2
+minutes of uptime, that a check finds both WiFi and the BMS link up
+(`include/RollbackConfirm.h`'s `decide()`) - a point-in-time check, not a
+continuity requirement: WiFi/BMS don't need to have been up for the whole
+2 minutes, only at the moment `loop()` happens to check past the deadline.
+Any reset before confirmation - panic, WDT,
 brownout, power cycle - makes the bootloader boot the previous image instead.
 This only works on a device whose bootloader was USB-flashed from a core
 with `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` (core 2.0.17 has it); a

@@ -9,29 +9,38 @@
 // run *this* code natively (`pio test -e native`), same pattern as
 // Glideslope.h/CellSmoother.h/StatusFrame.h/CsvDecimation.h.
 //
-// Usage: construct once with maxBytes, feed() every chunk read from the
-// source file in order, then call finish() once after the last feed().
-// data()/length() then give the retained tail.
+// Usage: construct once with maxBytes and the caller's own read-chunk size,
+// feed() every chunk read from the source file in order, then call finish()
+// once after the last feed(). data()/length() then give the retained tail.
 namespace TailTrim
 {
     class Trimmer
     {
     public:
+        // Default chunkBytes when the caller doesn't pass its own - matches
+        // SDLogger.cpp's actual read-buffer size (SdTuning::kSdReadChunkBytes)
+        // at the time this was written. A caller with a different read
+        // buffer size should pass it explicitly rather than rely on this.
+        static constexpr size_t kDefaultChunkBytes = 512;
+
         // maxBytes: how many trailing bytes of the fed stream to retain.
-        // Reserves capacity once up front (maxBytes plus one chunk's worth
-        // of slack, matching the pre-refactor readTail()'s
-        // `outContent.reserve(maxBytes + 600)`) so appending never
-        // reallocates mid-scan: repeated grow/shrink across a file scanned
-        // in hundreds of small chunks was observed live to fragment the
-        // heap badly enough to make a later, unrelated allocation (the
-        // caller's own copy of the finished tail into an HTTP response)
-        // fail silently, even though this function's own output was
-        // correct - see readTail()'s comment in SDLogger.cpp before this
-        // extraction.
-        explicit Trimmer(size_t maxBytes)
+        // chunkBytes: the size of each feed() call the caller will make
+        // (its source read buffer) - reserve() below adds one chunk's
+        // worth of slack on top of maxBytes so appending never reallocates
+        // mid-scan: repeated grow/shrink across a file scanned in hundreds
+        // of small chunks was observed live to fragment the heap badly
+        // enough to make a later, unrelated allocation (the caller's own
+        // copy of the finished tail into an HTTP response) fail silently,
+        // even though this function's own output was correct - see
+        // readTail()'s comment in SDLogger.cpp before this extraction.
+        // Passing a chunkBytes bigger than what feed() is actually called
+        // with just reserves extra headroom (harmless); a smaller one
+        // reintroduces the reallocation this constructor exists to avoid,
+        // so the caller must pass its real read-buffer size, not a guess.
+        explicit Trimmer(size_t maxBytes, size_t chunkBytes = kDefaultChunkBytes)
             : maxBytes_(maxBytes), truncated_(false)
         {
-            buf_.reserve(maxBytes + kSlackBytes);
+            buf_.reserve(maxBytes + chunkBytes);
         }
 
         // Feed one chunk of raw file bytes, in the order read from the
@@ -77,9 +86,6 @@ namespace TailTrim
         bool truncated() const { return truncated_; }
 
     private:
-        // Matches the pre-refactor readTail()'s `reserve(maxBytes + 600)`.
-        static constexpr size_t kSlackBytes = 600;
-
         std::vector<char> buf_;
         size_t maxBytes_;
         bool truncated_;

@@ -113,6 +113,47 @@ static void test_finish_keeps_content_when_only_newline_is_last_byte(void)
     TEST_ASSERT_EQUAL_MEMORY(expected.data(), trimmer.data(), expected.size());
 }
 
+// A chunkBytes matching the caller's real read-buffer size must reserve
+// enough headroom that feed() never reallocates mid-scan (#100) - checked
+// here by watching data()'s pointer stay put across every feed() call,
+// for both the default chunk size and an explicitly different one.
+static void test_matching_chunk_size_never_reallocates(void)
+{
+    std::string content;
+    for (int i = 0; i < 200; i++)
+        content += "0123456789\n"; // 2200 bytes, well past either maxBytes below
+
+    // Default chunkBytes (no second constructor argument).
+    {
+        Trimmer trimmer(50);
+        const char *firstPtr = nullptr;
+        for (size_t off = 0; off < content.size(); off += Trimmer::kDefaultChunkBytes)
+        {
+            size_t n = std::min(Trimmer::kDefaultChunkBytes, content.size() - off);
+            trimmer.feed((const uint8_t *)content.data() + off, n);
+            if (!firstPtr)
+                firstPtr = trimmer.data();
+            TEST_ASSERT_EQUAL_PTR(firstPtr, trimmer.data());
+        }
+    }
+
+    // A chunk size other than the default (#100: chunkBytes is now an
+    // explicit constructor argument, not a hardcoded assumption).
+    {
+        const size_t chunkBytes = 128;
+        Trimmer trimmer(50, chunkBytes);
+        const char *firstPtr = nullptr;
+        for (size_t off = 0; off < content.size(); off += chunkBytes)
+        {
+            size_t n = std::min(chunkBytes, content.size() - off);
+            trimmer.feed((const uint8_t *)content.data() + off, n);
+            if (!firstPtr)
+                firstPtr = trimmer.data();
+            TEST_ASSERT_EQUAL_PTR(firstPtr, trimmer.data());
+        }
+    }
+}
+
 int main(int, char **)
 {
     UNITY_BEGIN();
@@ -120,5 +161,6 @@ int main(int, char **)
     RUN_TEST(test_content_exceeding_maxbytes_trims_to_last_n_bytes);
     RUN_TEST(test_finish_drops_leading_partial_line_only_when_truncated);
     RUN_TEST(test_finish_keeps_content_when_only_newline_is_last_byte);
+    RUN_TEST(test_matching_chunk_size_never_reallocates);
     return UNITY_END();
 }

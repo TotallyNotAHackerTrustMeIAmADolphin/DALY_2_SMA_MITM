@@ -8,6 +8,35 @@
 // only the USB serial port.
 typedef void (*SDDebugCallback)(const char *msg);
 
+// Named tuning constants for SDLogger.cpp, plus the ones WebDashboard's
+// /api/logs/* routes need (the download route's own sdMutex() timeout).
+// Grouped here (#100) instead of left as bare literals scattered through
+// both files.
+namespace SdTuning
+{
+    // logQueue depth and each LogMessage's payload size (32 * (1 + 480 +
+    // padding) bytes of static queue RAM).
+    constexpr uint32_t kQueueDepth = 32;
+    constexpr size_t kMsgDataBytes = 480;
+
+    // SD_LogTask.
+    constexpr uint32_t kWriterTaskStackBytes = 8192;
+    constexpr UBaseType_t kWriterTaskPriority = 1;
+    constexpr BaseType_t kWriterTaskCore = 0;
+
+    // sdMutex_ acquire timeouts, one per caller. The writer task's is
+    // shortest since it runs every queued line and must not stall the
+    // queue for long; readers hold it for a bounded scan (see
+    // kMaxGraphSourceBytes/kMaxTailSourceBytes in SDLogger.cpp) so can
+    // afford to wait longer for a competing reader/writer to finish.
+    constexpr TickType_t kWriterLockTimeoutMs = 1000;
+    constexpr TickType_t kListLockTimeoutMs = 500;
+    constexpr TickType_t kTailLockTimeoutMs = 500;
+    constexpr TickType_t kGraphLockTimeoutMs = 2000;
+    // WebDashboard's /api/logs/download route, held for the whole transfer.
+    constexpr TickType_t kDownloadLockTimeoutMs = 2000;
+}
+
 // Background SD-card logger for BMS/SMA telemetry and system events.
 // Writes happen on a single dedicated FreeRTOS task, fed by a queue, so
 // callers on either core never block on (or contend for) the SPI/SD bus.

@@ -512,7 +512,7 @@ void WebDashboard::setupRoutes()
         if (!findLogFile(request, name, size)) return;
 
         SemaphoreHandle_t mtx = SDLogger::sdMutex();
-        if (!mtx || xSemaphoreTake(mtx, pdMS_TO_TICKS(2000)) != pdTRUE) {
+        if (!mtx || xSemaphoreTake(mtx, pdMS_TO_TICKS(SdTuning::kDownloadLockTimeoutMs)) != pdTRUE) {
             request->send(503, "text/plain", "SD card busy, try again");
             return;
         }

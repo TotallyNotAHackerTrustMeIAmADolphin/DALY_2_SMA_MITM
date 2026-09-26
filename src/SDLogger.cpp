@@ -16,11 +16,34 @@ SDDebugCallback SDLogger::debugCb = nullptr;
 
 namespace
 {
+    enum class MsgType : char
+    {
+        Telemetry = 'T',
+        Event = 'E',
+    };
+
     struct LogMessage
     {
-        char type; // 'T' telemetry, 'E' event
-        char data[480];
+        MsgType type;
+        char data[SdTuning::kMsgDataBytes];
     };
+
+    // CsvDecimation::kLineBufSize (320) only needs to cover the fields
+    // readGraphSeries() actually extracts (Timestamp..ReqI, the first
+    // seven TelemetrySchema columns) - a full LogMessage::data row can run
+    // longer (up to kMsgDataBytes) once the later columns (Cell1..16 etc.)
+    // are appended, and CsvDecimation::Accumulator safely truncates a line
+    // past its line buffer for field EXTRACTION only (see its own comment)
+    // while still scanning the rest of the bytes for the terminating '\n'.
+    // So this assumes kLineBufSize is enough to reach past ReqI (field
+    // index 6) into the row, which is true today by a wide margin (that
+    // prefix is well under 100 bytes); it is NOT required to reach the end
+    // of a full kMsgDataBytes row.
+    static_assert(CsvDecimation::kLineBufSize < SdTuning::kMsgDataBytes,
+                  "CsvDecimation's line buffer is expected to be smaller than a "
+                  "full telemetry row - readGraphSeries only reads the first few "
+                  "columns, so this is fine, but re-check the comment above if "
+                  "this assumption ever needs to flip");
 
     // Caps how much of a source file readGraphSeries() will scan, so a very
     // large (e.g. multi-week boot_ fallback) file can't hold sdMutex_ for an
@@ -41,6 +64,22 @@ namespace
     // beyond that, readTail() fails cleanly (like readGraphSeries does for
     // oversized files) rather than silently returning a stale tail.
     constexpr uint32_t kMaxTailSourceBytes = 512 * 1024;
+
+    // readGraphSeries()'s own output-size cap, independent of whatever the
+    // caller asks for.
+    constexpr size_t kMaxGraphTargetPoints = 2000;
+
+    // readGraphSeries()'s decimated-output chunk buffer: generous margin
+    // over the largest single kSdReadChunkBytes-byte chunk's worth of
+    // decimated output.
+    constexpr size_t kGraphOutBufBytes = 2048;
+
+    // Both readTail() and readGraphSeries() read the source file in chunks
+    // this size. readTail() passes it to TailTrim::Trimmer's constructor
+    // explicitly so its reserved slack always matches the real chunk size
+    // (see the Trimmer constructor's own comment) - changing this constant
+    // is now enough on its own, no matching edit needed in TailTrim.h.
+    constexpr size_t kSdReadChunkBytes = 512;
 }
 
 bool SDLogger::isReady()
@@ -76,7 +115,7 @@ bool SDLogger::begin()
         return false;
     }
 
-    logQueue = xQueueCreate(32, sizeof(LogMessage));
+    logQueue = xQueueCreate(SdTuning::kQueueDepth, sizeof(LogMessage));
     if (logQueue == NULL)
     {
         logFailure("[SD] Failed to create log queue");
@@ -90,7 +129,8 @@ bool SDLogger::begin()
         return false;
     }
 
-    xTaskCreatePinnedToCore(loggingTask, "SD_LogTask", 8192, NULL, 1, NULL, 0);
+    xTaskCreatePinnedToCore(loggingTask, "SD_LogTask", SdTuning::kWriterTaskStackBytes, NULL,
+                            SdTuning::kWriterTaskPriority, NULL, SdTuning::kWriterTaskCore);
 
     initialized = true;
     return true;
@@ -107,7 +147,7 @@ void SDLogger::logTelemetry(const DashboardData &data)
         return;
 
     LogMessage msg;
-    msg.type = 'T';
+    msg.type = MsgType::Telemetry;
 
     // Column order, formatting and the "omit a not-yet-read cell slot"
     // behavior all live in TelemetrySchema::formatRow() now (#32) - this
@@ -126,7 +166,7 @@ void SDLogger::logEvent(const char *msg_text)
         return;
 
     LogMessage msg;
-    msg.type = 'E';
+    msg.type = MsgType::Event;
     strncpy(msg.data, msg_text, sizeof(msg.data) - 1);
     msg.data[sizeof(msg.data) - 1] = '\0';
 
@@ -198,10 +238,10 @@ void SDLogger::loggingTask(void *parameter)
             snprintf(timeStr, sizeof(timeStr), "UP:%lu", millis() / 1000);
         }
 
-        if (xSemaphoreTake(sdMutex_, pdMS_TO_TICKS(1000)) != pdTRUE)
+        if (xSemaphoreTake(sdMutex_, pdMS_TO_TICKS(SdTuning::kWriterLockTimeoutMs)) != pdTRUE)
             continue; // a reader is hogging the bus; drop this line rather than stall forever
 
-        if (msg.type == 'T')
+        if (msg.type == MsgType::Telemetry)
         {
             String path = currentLogPath(".csv");
             writeCSVHeaderIfMissing(path);
@@ -212,7 +252,7 @@ void SDLogger::loggingTask(void *parameter)
                 file.close();
             }
         }
-        else if (msg.type == 'E')
+        else if (msg.type == MsgType::Event)
         {
             File file = SD.open(currentLogPath(".log"), FILE_APPEND);
             if (file)
@@ -234,7 +274,7 @@ bool SDLogger::listLogFiles(std::vector<String> &outNames, std::vector<uint32_t>
     if (!initialized)
         return false;
 
-    if (xSemaphoreTake(sdMutex_, pdMS_TO_TICKS(500)) != pdTRUE)
+    if (xSemaphoreTake(sdMutex_, pdMS_TO_TICKS(SdTuning::kListLockTimeoutMs)) != pdTRUE)
         return false;
 
     File root = SD.open("/");
@@ -297,7 +337,7 @@ bool SDLogger::readTail(const String &fileName, String &outContent, size_t maxBy
     if (!initialized)
         return false;
 
-    if (xSemaphoreTake(sdMutex_, pdMS_TO_TICKS(500)) != pdTRUE)
+    if (xSemaphoreTake(sdMutex_, pdMS_TO_TICKS(SdTuning::kTailLockTimeoutMs)) != pdTRUE)
         return false;
 
     bool ok = false;
@@ -333,8 +373,8 @@ bool SDLogger::readTail(const String &fileName, String &outContent, size_t maxBy
         // rolling trim-to-last-maxBytes and leading-partial-line-drop logic
         // itself now lives in TailTrim::Trimmer (#43), pure and natively
         // tested - this loop is just SD I/O and the watchdog yield cadence.
-        TailTrim::Trimmer trimmer(maxBytes);
-        uint8_t buf[512];
+        TailTrim::Trimmer trimmer(maxBytes, kSdReadChunkBytes);
+        uint8_t buf[kSdReadChunkBytes];
         int n;
         uint32_t bytesScanned = 0;
         uint32_t chunkCount = 0;
@@ -380,10 +420,10 @@ bool SDLogger::readGraphSeries(const String &fileName, size_t targetPoints, Stri
 
     if (targetPoints == 0)
         targetPoints = 1;
-    if (targetPoints > 2000)
-        targetPoints = 2000; // keep worst-case output bounded regardless of caller
+    if (targetPoints > kMaxGraphTargetPoints)
+        targetPoints = kMaxGraphTargetPoints; // keep worst-case output bounded regardless of caller
 
-    if (xSemaphoreTake(sdMutex_, pdMS_TO_TICKS(2000)) != pdTRUE)
+    if (xSemaphoreTake(sdMutex_, pdMS_TO_TICKS(SdTuning::kGraphLockTimeoutMs)) != pdTRUE)
         return false;
 
     String path = "/" + fileName;
@@ -478,8 +518,8 @@ bool SDLogger::readGraphSeries(const String &fileName, size_t targetPoints, Stri
             f.readStringUntil('\n'); // header, discarded (fresh open, same as the sample pass above)
 
             CsvDecimation::Accumulator accum(fieldIndices, 7, skip);
-            uint8_t buf[512];
-            char outBuf[2048]; // generous margin over the largest single 512-byte chunk's worth of decimated output
+            uint8_t buf[kSdReadChunkBytes];
+            char outBuf[kGraphOutBufBytes]; // generous margin over the largest single chunk's worth of decimated output
             uint32_t bytesRead = 0;
             uint32_t chunkCount = 0;
             int n;

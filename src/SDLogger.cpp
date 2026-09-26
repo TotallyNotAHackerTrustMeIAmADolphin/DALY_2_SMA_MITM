@@ -374,21 +374,29 @@ SDLogger::ReadResult SDLogger::readTail(const String &fileName, String &outConte
 
 SDLogger::ReadResult SDLogger::readGraphSeries(const String &fileName, size_t targetPoints, String &outCSV)
 {
-    outCSV = "Timestamp,PackV,PackI,SOC,MinCellV,MaxCellV,ReqI\n";
+    outCSV = "";
+    for (size_t i = 0; i < TelemetrySchema::kGraphColumnCount; i++)
+    {
+        if (i > 0)
+            outCSV += ",";
+        outCSV += TelemetrySchema::kGraphColumns[i];
+    }
+    outCSV += "\n";
 
     if (!initialized)
         return ReadResult::Busy;
 
-    // Timestamp..ReqI happen to be the first seven TelemetrySchema columns.
-    const size_t fieldIndices[7] = {
-        (size_t)TelemetrySchema::index("Timestamp"),
-        (size_t)TelemetrySchema::index("PackV"),
-        (size_t)TelemetrySchema::index("PackI"),
-        (size_t)TelemetrySchema::index("SOC"),
-        (size_t)TelemetrySchema::index("MinCellV"),
-        (size_t)TelemetrySchema::index("MaxCellV"),
-        (size_t)TelemetrySchema::index("ReqI"),
-    };
+    size_t fieldIndices[TelemetrySchema::kGraphColumnCount];
+    for (size_t i = 0; i < TelemetrySchema::kGraphColumnCount; i++)
+    {
+        int idx = TelemetrySchema::index(TelemetrySchema::kGraphColumns[i]);
+        if (idx < 0)
+        {
+            outCSV = "";
+            return ReadResult::NotFound;
+        }
+        fieldIndices[i] = (size_t)idx;
+    }
 
     targetPoints = std::max<size_t>(targetPoints, 1);
     targetPoints = std::min(targetPoints, kMaxGraphTargetPoints);
@@ -455,7 +463,7 @@ SDLogger::ReadResult SDLogger::readGraphSeries(const String &fileName, size_t ta
     outCSV.reserve(outCSV.length() + (targetPoints + 1) * 60);
     f.readStringUntil('\n'); // header, discarded
 
-    CsvDecimation::Accumulator accum(fieldIndices, 7, skip);
+    CsvDecimation::Accumulator accum(fieldIndices, TelemetrySchema::kGraphColumnCount, skip);
     char outBuf[kGraphOutBufBytes];
     streamChunks(f, dataBytes, [&accum, &outCSV, &outBuf](const uint8_t *data, size_t len)
                  {

@@ -104,6 +104,15 @@ static void test_index_unknown_name(void)
     TEST_ASSERT_EQUAL(-1, index("nope"));
 }
 
+// --- kGraphColumns (#93): every name the Graphs page asks for must
+// actually resolve, or readGraphSeries() would size its Accumulator off a
+// SIZE_MAX index and silently emit an empty column.
+static void test_graph_columns_all_resolve(void)
+{
+    for (size_t i = 0; i < kGraphColumnCount; i++)
+        TEST_ASSERT_TRUE(index(kGraphColumns[i]) >= 0);
+}
+
 // --- count() / formatter output count ---
 
 static void test_formatter_output_count_matches_columns_minus_timestamp(void)
@@ -218,6 +227,7 @@ int main(int, char **)
     RUN_TEST(test_index_first_seven_columns);
     RUN_TEST(test_index_max_cell_raw);
     RUN_TEST(test_index_unknown_name);
+    RUN_TEST(test_graph_columns_all_resolve);
     RUN_TEST(test_formatter_output_count_matches_columns_minus_timestamp);
     RUN_TEST(test_row_field_count_matches_header_field_count);
     RUN_TEST(test_sample_formats_to_known_row);

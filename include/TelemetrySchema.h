@@ -132,6 +132,16 @@ namespace TelemetrySchema
 
     inline int count() { return (int)(sizeof(kColumns) / sizeof(kColumns[0])); }
 
+    // The columns the Graphs page (#93) plots - one ordered name list
+    // shared by readGraphSeries() (resolves each into a kColumns index,
+    // builds the CSV header from it, and sizes its Accumulator off it) and
+    // graphs_html's JS (reads the served header row to map name -> column),
+    // instead of each of those writing out the same seven names separately.
+    static const char *const kGraphColumns[] = {
+        "Timestamp", "PackV", "PackI", "SOC", "MinCellV", "MaxCellV", "ReqI",
+    };
+    constexpr size_t kGraphColumnCount = sizeof(kGraphColumns) / sizeof(kGraphColumns[0]);
+
     // Linear search is fine - called a handful of times per request
     // (readGraphSeries() resolves its column indices once, outside its
     // per-line loop), never in the hot per-sample logging path.

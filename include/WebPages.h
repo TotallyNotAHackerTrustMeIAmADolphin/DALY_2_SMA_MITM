@@ -319,12 +319,12 @@ const char graphs_html[] PROGMEM = HTML_HEAD("Graphs") R"rawliteral(
 )rawliteral" SHARED_LIST_JS FILE_PAGE_JS R"rawliteral(
   let charts = {};
 
-  function darkChart(canvasId, datasets, extraScales) {
+  function darkChart(canvasId, labels, datasets, extraScales) {
     const ctx = document.getElementById(canvasId).getContext('2d');
     if (charts[canvasId]) charts[canvasId].destroy();
     charts[canvasId] = new Chart(ctx, {
       type: 'line',
-      data: { labels: [], datasets: datasets },
+      data: { labels: labels, datasets: datasets },
       options: {
         animation: false,
         interaction: { mode: 'index', intersect: false },
@@ -341,19 +341,21 @@ const char graphs_html[] PROGMEM = HTML_HEAD("Graphs") R"rawliteral(
 
   function parseCSV(text) {
     const lines = text.trim().split('\n');
-    lines.shift(); // header
+    const header = lines.shift().split(',');
+    const col = {};
+    header.forEach((name, i) => { col[name] = i; });
     const labels = [], packV = [], soc = [], packI = [], reqI = [], minC = [], maxC = [];
     lines.forEach(line => {
       const c = line.split(',');
-      if (c.length < 7) return;
-      const t = c[0];
+      if (c.length < header.length) return;
+      const t = c[col.Timestamp];
       labels.push(t.includes(' ') ? t.split(' ')[1] : t);
-      packV.push(parseFloat(c[1]));
-      packI.push(parseFloat(c[2]));
-      soc.push(parseFloat(c[3]));
-      minC.push(parseFloat(c[4]));
-      maxC.push(parseFloat(c[5]));
-      reqI.push(parseFloat(c[6]));
+      packV.push(parseFloat(c[col.PackV]));
+      packI.push(parseFloat(c[col.PackI]));
+      soc.push(parseFloat(c[col.SOC]));
+      minC.push(parseFloat(c[col.MinCellV]));
+      maxC.push(parseFloat(c[col.MaxCellV]));
+      reqI.push(parseFloat(c[col.ReqI]));
     });
     return { labels, packV, soc, packI, reqI, minC, maxC };
   }
@@ -368,35 +370,31 @@ const char graphs_html[] PROGMEM = HTML_HEAD("Graphs") R"rawliteral(
       const data = parseCSV(await res.text());
       status.innerText = data.labels.length + ' points shown (downsampled for display).';
 
-      const vChart = darkChart('chartV', [
+      darkChart('chartV', data.labels, [
         { label: 'Pack V', data: data.packV, borderColor: '#4caf50', yAxisID: 'yV', pointRadius: 0 }
       ], {
         yV: { position: 'left', ticks: { color: '#4caf50' }, grid: { color: '#222' } }
       });
-      vChart.data.labels = data.labels; vChart.update();
 
-      const socChart = darkChart('chartSoc', [
+      darkChart('chartSoc', data.labels, [
         { label: 'SOC %', data: data.soc, borderColor: '#ff9800', yAxisID: 'ySoc', pointRadius: 0 }
       ], {
         ySoc: { position: 'left', min: 0, max: 100, ticks: { color: '#ff9800' }, grid: { color: '#222' } }
       });
-      socChart.data.labels = data.labels; socChart.update();
 
-      const iChart = darkChart('chartI', [
+      darkChart('chartI', data.labels, [
         { label: 'Pack Current (A)', data: data.packI, borderColor: '#2196F3', yAxisID: 'yI', pointRadius: 0 },
         { label: 'Requested Current (A)', data: data.reqI, borderColor: '#9c27b0', yAxisID: 'yI', pointRadius: 0 }
       ], {
         yI: { position: 'left', ticks: { color: '#ccc' }, grid: { color: '#222' } }
       });
-      iChart.data.labels = data.labels; iChart.update();
 
-      const cChart = darkChart('chartCell', [
+      darkChart('chartCell', data.labels, [
         { label: 'Min Cell V', data: data.minC, borderColor: '#2196F3', yAxisID: 'yC', pointRadius: 0 },
         { label: 'Max Cell V', data: data.maxC, borderColor: '#f44336', yAxisID: 'yC', pointRadius: 0 }
       ], {
         yC: { position: 'left', ticks: { color: '#ccc' }, grid: { color: '#222' } }
       });
-      cChart.data.labels = data.labels; cChart.update();
     } catch (e) {
       status.innerText = 'Failed to load graph: ' + e.message;
     }

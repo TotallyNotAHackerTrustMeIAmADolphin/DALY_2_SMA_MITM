@@ -62,6 +62,19 @@ static void test_out_of_range_reports_range_message(void)
     TEST_ASSERT_EQUAL_STRING("Max Charge Amps must be between 0 and 1000 A.", errors[0].c_str());
 }
 
+// Pins the /save 400 body's line for Max Charge Vpc: a limit prints the
+// owner's typed 3.550, not the setting's literal float max (3.5500002).
+static void test_out_of_range_range_message_for_max_charge_vpc(void)
+{
+    SystemConfig cfg;
+    std::vector<std::string> errors;
+    ConfigForm::Result r = apply(cfg, {{"cmv", "9"}}, errors);
+
+    TEST_ASSERT_FALSE(r.ok);
+    TEST_ASSERT_EQUAL(1u, errors.size());
+    TEST_ASSERT_EQUAL_STRING("Max Charge Vpc must be between 2.500 and 3.550 V.", errors[0].c_str());
+}
+
 // --- two-setting violation ---
 
 static void test_two_setting_violation_only_checked_once_everything_parses(void)
@@ -199,6 +212,7 @@ int main(int, char **)
     UNITY_BEGIN();
     RUN_TEST(test_not_a_number_reports_error_and_marks_present);
     RUN_TEST(test_out_of_range_reports_range_message);
+    RUN_TEST(test_out_of_range_range_message_for_max_charge_vpc);
     RUN_TEST(test_two_setting_violation_only_checked_once_everything_parses);
     RUN_TEST(test_two_setting_rule_skipped_when_a_field_fails_to_parse);
     RUN_TEST(test_only_present_keys_marked_and_others_left_alone);

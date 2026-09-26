@@ -4,7 +4,7 @@
 #include "esp_ota_ops.h"
 #include "CoreDumpInfo.h"
 
-class AsyncWebServer; // registerRoutes() below only ever takes a reference
+class AsyncWebServer; // registerRoutes() only takes a reference
 
 // Debug/diagnostics callback, matching netLog()'s own variadic signature
 // (src/main.cpp) - same pattern as WebDashboard's WebDebugCallback, so it
@@ -44,10 +44,8 @@ public:
     // The running image's ELF sha256, first 16 hex chars.
     static void runningElfSha(char (&out)[17]);
 
-    // Registers GET /api/coredump/summary and GET /api/coredump on server
-    // (#90) - moved out of WebDashboard::setupRoutes() since neither is web
-    // code. Order matters: see the comment beside the two registrations in
-    // Diagnostics.cpp.
+    // Registers the two coredump routes (#90); order matters, see the
+    // comment beside the registrations in Diagnostics.cpp.
     static void registerRoutes(AsyncWebServer &server);
 
     // Heap free/min/max-block, per-task stack high-water marks and WiFi

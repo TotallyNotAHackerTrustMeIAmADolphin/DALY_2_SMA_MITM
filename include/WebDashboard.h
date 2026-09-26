@@ -47,10 +47,7 @@ private:
     ActionCallback _actionCb = nullptr;
     WebDebugCallback _debugCb = nullptr;
 
-    // One handler per route (#90) - setupRoutes() just wires each URI to
-    // one of these. The stateless ones (page/API handlers below that touch
-    // neither _cfg nor _actionCb) are static, so they're registered
-    // directly with no capturing-lambda wrapper.
+    // One handler per route (#90); the stateless ones are static.
     static void handleIndex(AsyncWebServerRequest *request);
     void handleToggleMaint(AsyncWebServerRequest *request);
     void handleResetSMA(AsyncWebServerRequest *request);

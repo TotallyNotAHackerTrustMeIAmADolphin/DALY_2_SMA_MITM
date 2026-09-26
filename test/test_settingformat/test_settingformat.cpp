@@ -36,6 +36,24 @@ static void test_format_setting_fixed_integer_kind(void)
     TEST_ASSERT_EQUAL_STRING("60", buf);
 }
 
+// Pins ConfigStore.cpp's "[CFG] Stored ... is outside ... - using the
+// default ..." line for Max Charge Vpc: a limit (min/max) must print the
+// owner's typed 2.500/3.550, not the setting's literal float value
+// (3.5500002) - a value (the stored number, the default) stays round-trip.
+static void test_out_of_range_message_uses_value_for_value_fixed_for_limits(void)
+{
+    SystemConfig cfg;
+    char valBuf[24], minBuf[24], maxBuf[24], defBuf[24], line[160];
+    formatSettingValue(cfg.cvMaxCharge, 3.5, valBuf, sizeof(valBuf));
+    formatSettingFixed(cfg.cvMaxCharge, cfg.cvMaxCharge.min(), minBuf, sizeof(minBuf));
+    formatSettingFixed(cfg.cvMaxCharge, cfg.cvMaxCharge.max(), maxBuf, sizeof(maxBuf));
+    formatSettingValue(cfg.cvMaxCharge, cfg.cvMaxCharge.def(), defBuf, sizeof(defBuf));
+    snprintf(line, sizeof(line), "[CFG] Stored %s (%s) is outside %s-%s %s - using the default %s\n",
+             cfg.cvMaxCharge.label(), valBuf, minBuf, maxBuf, cfg.cvMaxCharge.unit(), defBuf);
+    TEST_ASSERT_EQUAL_STRING(
+        "[CFG] Stored Max Charge Vpc (3.5) is outside 2.500-3.550 V - using the default 3.45\n", line);
+}
+
 // --- formatSettingValue(): the shortest round-trip form, for [CFG] lines ---
 
 static void test_format_setting_value_float_precision(void)
@@ -130,6 +148,7 @@ int main(int, char **)
     UNITY_BEGIN();
     RUN_TEST(test_format_setting_fixed_float_uses_its_own_decimals);
     RUN_TEST(test_format_setting_fixed_integer_kind);
+    RUN_TEST(test_out_of_range_message_uses_value_for_value_fixed_for_limits);
     RUN_TEST(test_format_setting_value_float_precision);
     RUN_TEST(test_format_setting_value_integer_kind);
     RUN_TEST(test_format_setting_value_sweep_adjacent_floats_always_differ);

@@ -581,7 +581,7 @@ void setup()
   // "[CFG] Loaded config fails validation" lines (#56), and SDLogger drops
   // events until it is initialised - on the headless device the SD .log is
   // the only place those would be seen.
-  ConfigStore::load(cfg, libraryLogger);
+  ConfigStore::load(cfg, netLog);
 
   // Reset reason / rollback state / core dump summary, right after the SD
   // log exists to receive it - not deferred to loop(), so a reset within

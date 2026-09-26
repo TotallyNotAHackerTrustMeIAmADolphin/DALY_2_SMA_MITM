@@ -4,15 +4,11 @@
 #include <WiFi.h>
 #include "esp_core_dump.h"
 #include "rom/rtc.h"
+#include "RollbackConfirm.h"
 
 DiagDebugCallback Diagnostics::debugCb = nullptr;
 
 extern "C" bool verifyRollbackLater() { return true; }
-
-namespace
-{
-    constexpr unsigned long kConfirmAfterMs = 2UL * 60UL * 1000UL;
-}
 
 void Diagnostics::setDebugCallback(DiagDebugCallback cb)
 {
@@ -152,27 +148,33 @@ void Diagnostics::logBootDiagnostics()
 
 void Diagnostics::confirmImageIfReady(bool wifiUp, bool bmsUp)
 {
-    static bool imageConfirmed = false;
-    static bool unconfirmedWarned = false;
-    if (imageConfirmed || millis() <= kConfirmAfterMs)
-        return;
+    static RollbackConfirm::State st;
 
-    if (wifiUp && bmsUp)
+    // Only query the OTA partition state when the answer could actually
+    // change the outcome: decide() is a no-op once imageConfirmed or before
+    // kConfirmAfterMs, and it only consults imagePendingVerify on the
+    // not-yet-warned, not-ready branch - so skip the ESP-IDF call everywhere
+    // else instead of doing it unconditionally on every loop() iteration.
+    bool imagePendingVerify = false;
+    if (!st.imageConfirmed && !st.unconfirmedWarned && !(wifiUp && bmsUp) &&
+        millis() > RollbackConfirm::kConfirmAfterMs)
     {
-        imageConfirmed = true;
+        esp_ota_img_states_t otaState = ESP_OTA_IMG_UNDEFINED;
+        esp_ota_get_state_partition(esp_ota_get_running_partition(), &otaState);
+        imagePendingVerify = (otaState == ESP_OTA_IMG_PENDING_VERIFY);
+    }
+
+    RollbackConfirm::Action action = RollbackConfirm::decide(st, wifiUp, bmsUp, millis(), imagePendingVerify);
+
+    if (action.confirmNow)
+    {
         esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
         debugLog("[SYS] Firmware confirmed after %lus uptime with WiFi up and BMS data flowing (rollback cancelled): %s\n",
                  millis() / 1000, esp_err_to_name(err));
     }
-    else if (!unconfirmedWarned)
+    else if (action.logNotConfirmed)
     {
-        esp_ota_img_states_t st = ESP_OTA_IMG_UNDEFINED;
-        esp_ota_get_state_partition(esp_ota_get_running_partition(), &st);
-        if (st == ESP_OTA_IMG_PENDING_VERIFY)
-        {
-            unconfirmedWarned = true;
-            debugLog("[SYS] Firmware NOT confirmed at %lus: %s%s- a reset now boots the previous firmware\n",
-                     millis() / 1000, wifiUp ? "" : "WiFi down ", bmsUp ? "" : "no BMS data ");
-        }
+        debugLog("[SYS] Firmware NOT confirmed at %lus: %s%s- a reset now boots the previous firmware\n",
+                 millis() / 1000, wifiUp ? "" : "WiFi down ", bmsUp ? "" : "no BMS data ");
     }
 }

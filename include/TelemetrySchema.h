@@ -1,12 +1,12 @@
 #pragma once
 
-// One ordered table of telemetry column descriptors driving the CSV header,
-// the CSV row and (for the fields whose formatting genuinely matches - see
-// WebDashboard::broadcastTelemetry) the SSE JSON, all built from
-// DashboardData (#32). Pure - no Arduino/FreeRTOS dependencies, like
-// SystemConfig.h/Glideslope.h - so test/test_telemetryschema compiles and
-// runs *this* code natively (`pio test -e native`) instead of a mirrored
-// copy of it.
+// One ordered table of telemetry column descriptors driving the CSV header
+// and the CSV row, built from DashboardData (#32). The SSE JSON is a
+// separate, hand-written format (TelemetryJson.h, #95) with different
+// precision and key order, not derived from this table. Pure - no Arduino/
+// FreeRTOS dependencies, like SystemConfig.h/Glideslope.h - so
+// test/test_telemetryschema compiles and runs *this* code natively
+// (`pio test -e native`) instead of a mirrored copy of it.
 //
 // Column::format() reproduces the exact snprintf spec each field used
 // before this refactor (see the CSV row-layout sentence in CLAUDE.md's
@@ -29,7 +29,6 @@ namespace TelemetrySchema
     struct Column
     {
         const char *csvName;
-        const char *jsonKey; // nullptr = not present in the SSE JSON
         // snprintf-style: returns the number of characters written
         // (excluding the NUL), or <= 0 to mean "nothing to write, omit this
         // field from the row entirely" (used only by the CellN family, for
@@ -80,54 +79,46 @@ namespace TelemetrySchema
     inline int formatDerate(const DashboardData &d, char *buf, size_t len) { return snprintf(buf, len, "%.2f", d.derateFactor); }
 
     // Ordered exactly like the pre-refactor CSV row (see CLAUDE.md's
-    // SDLogger bullet). jsonKey mirrors WebDashboard::broadcastTelemetry's
-    // SSE JSON key for the fields shared between the two outputs with
-    // *identical* formatting; nullptr where a CSV column either has no JSON
-    // counterpart (Timestamp; GridPresent; the per-cell columns - JSON
-    // bundles cells as one "cells" array instead; the MOS/alarm columns) or
-    // where the JSON's formatting of that same field genuinely differs from
-    // its CSV formatting - PackI is %.2f in CSV but %.1f in JSON's "i" - see
-    // broadcastTelemetry's comment for why that one field stays hand-written
-    // there instead of sharing this column's formatter.
+    // SDLogger bullet).
     static const Column kColumns[] = {
-        {"Timestamp", nullptr, formatTimestampPlaceholder},
-        {"PackV", "v", formatPackV},
-        {"PackI", nullptr, formatPackI},
-        {"SOC", "soc", formatSOC},
-        {"MinCellV", "minC", formatMinCellV},
-        {"MaxCellV", "maxC", formatMaxCellV},
-        {"ReqI", "reqI", formatReqI},
-        {"Mode", "smam", formatMode},
-        {"ForceCharge", "force", formatForceCharge},
-        {"MaintenanceActive", "maint", formatMaintenanceActive},
-        {"GridPresent", nullptr, formatGridPresent},
-        {"Cell1", nullptr, formatCell<1>},
-        {"Cell2", nullptr, formatCell<2>},
-        {"Cell3", nullptr, formatCell<3>},
-        {"Cell4", nullptr, formatCell<4>},
-        {"Cell5", nullptr, formatCell<5>},
-        {"Cell6", nullptr, formatCell<6>},
-        {"Cell7", nullptr, formatCell<7>},
-        {"Cell8", nullptr, formatCell<8>},
-        {"Cell9", nullptr, formatCell<9>},
-        {"Cell10", nullptr, formatCell<10>},
-        {"Cell11", nullptr, formatCell<11>},
-        {"Cell12", nullptr, formatCell<12>},
-        {"Cell13", nullptr, formatCell<13>},
-        {"Cell14", nullptr, formatCell<14>},
-        {"Cell15", nullptr, formatCell<15>},
-        {"Cell16", nullptr, formatCell<16>},
-        {"ChargeMOS", nullptr, formatChargeMOS},
-        {"DischargeMOS", nullptr, formatDischargeMOS},
-        {"BmsProtection", nullptr, formatBmsProtection},
-        {"CellOV1", nullptr, formatCellOV1},
-        {"CellOV2", nullptr, formatCellOV2},
-        {"PackOV1", nullptr, formatPackOV1},
-        {"PackOV2", nullptr, formatPackOV2},
-        {"MinCellRaw", "minCellRaw", formatMinCellRaw},
-        {"MaxCellRaw", "maxCellRaw", formatMaxCellRaw},
-        {"RawSpreadMv", "spreadMv", formatRawSpreadMv},
-        {"Derate", "derate", formatDerate},
+        {"Timestamp", formatTimestampPlaceholder},
+        {"PackV", formatPackV},
+        {"PackI", formatPackI},
+        {"SOC", formatSOC},
+        {"MinCellV", formatMinCellV},
+        {"MaxCellV", formatMaxCellV},
+        {"ReqI", formatReqI},
+        {"Mode", formatMode},
+        {"ForceCharge", formatForceCharge},
+        {"MaintenanceActive", formatMaintenanceActive},
+        {"GridPresent", formatGridPresent},
+        {"Cell1", formatCell<1>},
+        {"Cell2", formatCell<2>},
+        {"Cell3", formatCell<3>},
+        {"Cell4", formatCell<4>},
+        {"Cell5", formatCell<5>},
+        {"Cell6", formatCell<6>},
+        {"Cell7", formatCell<7>},
+        {"Cell8", formatCell<8>},
+        {"Cell9", formatCell<9>},
+        {"Cell10", formatCell<10>},
+        {"Cell11", formatCell<11>},
+        {"Cell12", formatCell<12>},
+        {"Cell13", formatCell<13>},
+        {"Cell14", formatCell<14>},
+        {"Cell15", formatCell<15>},
+        {"Cell16", formatCell<16>},
+        {"ChargeMOS", formatChargeMOS},
+        {"DischargeMOS", formatDischargeMOS},
+        {"BmsProtection", formatBmsProtection},
+        {"CellOV1", formatCellOV1},
+        {"CellOV2", formatCellOV2},
+        {"PackOV1", formatPackOV1},
+        {"PackOV2", formatPackOV2},
+        {"MinCellRaw", formatMinCellRaw},
+        {"MaxCellRaw", formatMaxCellRaw},
+        {"RawSpreadMv", formatRawSpreadMv},
+        {"Derate", formatDerate},
     };
 
     inline int count() { return (int)(sizeof(kColumns) / sizeof(kColumns[0])); }

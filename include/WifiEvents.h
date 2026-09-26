@@ -1,47 +1,22 @@
 #pragma once
 
-// The WiFi event -> [WIFI] log-line latch (#69), kept free of Arduino/
-// ESP-IDF dependencies, same as StatusFrame.h/BmsEvents.h/HealthLog.h, so
-// test/test_wifievents runs this code natively (`pio test -e native`).
+// The WiFi event -> [WIFI] log-line latch between the WiFi event task
+// (onEvent) and loop() (drain), kept Arduino/ESP-IDF-free so
+// test/test_wifievents runs it natively (#69).
 //
-// wifiEventHandler() (the WiFi event task, arduino_events) and
-// drainWifiEvents() (loop()) used to trade eight `volatile bool`/`uint32_t`
-// globals directly in main.cpp. That had two real races:
-//  1. setupNetwork() (running on the main task) wrote
-//     wifiPendingFirstConnect = false whenever it won the race and logged
-//     the connect line itself - but the event task could set that same
-//     flag true around the same time, so "Connected" could be logged
-//     twice, or the intended suppression could be lost, depending on
-//     interleaving. WifiEventLatch instead keeps a single small state
-//     machine (firstConnectState_: never-connected / pending-log /
-//     reported) and moves between its states with a single atomic
-//     compare_exchange in both onEvent() and suppressFirstConnect(), so
-//     whichever side gets there first wins outright and the other's move
-//     becomes a no-op - the line is logged exactly once whatever the
-//     event order.
-//  2. drainWifiEvents() did check-then-clear (`if (flag) { flag = false; ... }`)
-//     on plain volatiles - not atomic, so an event landing between the
-//     check and the clear was lost. Each pending flag here is a
-//     std::atomic<bool>, consumed with exchange(false) in drain(), which
-//     is a single atomic read-modify-write: there is no window between
-//     "is it set" and "clear it" for a concurrent onEvent() to land in.
+// - Every pending flag is a std::atomic<bool> consumed with exchange(false),
+//   so an event landing mid-drain shows up in the next drain instead of
+//   being cleared unread.
+// - The first-connect line has two possible reporters, setupNetwork() and
+//   drain(). firstConnectState_ moves never-connected -> pending-log ->
+//   reported only by atomic compare_exchange/store, so it is logged exactly
+//   once whatever the event order.
+// - Payloads (reason, down-since) are written before the release store of
+//   their flag and read after its acquire exchange.
 //
-// Any payload that goes with a flag (the disconnect reason, the
-// down-since timestamp) is written by onEvent() *before* the flag that
-// announces it, and read by drain() *after* the exchange that consumes
-// that flag. Every operation here uses acquire/release (or the default
-// seq_cst) ordering, so the flag's exchange/compare_exchange synchronizes
-// with its own store and the payload write in program order before it is
-// guaranteed visible to drain().
-//
-// Remaining benign race (pre-existing, not introduced by this refactor):
-// if a fresh disconnect/reconnect cycle interleaves between drain() taking
-// the reconnect flag and reading downSince_, the logged "was down for Ns"
-// reflects the newer cycle's start time rather than the one that produced
-// this particular reconnect event. The original volatile globals had the
-// same single-slot overwrite behaviour; it is cosmetic (a wrong duration
-// on an already-rare double-flap, never a lost or duplicated log line) and
-// left as-is.
+// Benign race: a second disconnect/reconnect cycle between drain() taking
+// the reconnect flag and reading downSince_ makes "was down for Ns" report
+// the newer cycle. Cosmetic - never a lost or duplicated line.
 
 #include <atomic>
 #include <cstdint>
@@ -58,11 +33,9 @@ enum class Kind
   LostIp
 };
 
-// Decoded ESP-IDF WIFI_REASON_* codes for the [WIFI] Disconnected line.
-// Moved here unchanged from main.cpp's wifiDisconnectReasonName() (same
-// cases, same strings, same default) - the numeric values are the
-// corresponding esp_wifi_types.h WIFI_REASON_* constants, spelled out as
-// literals so this header stays free of the ESP-IDF include.
+// Decoded ESP-IDF WIFI_REASON_* codes for the [WIFI] Disconnected line,
+// as literals so this header needs no ESP-IDF include; main.cpp
+// static_asserts them against esp_wifi_types.h.
 inline const char *reasonName(uint8_t reason)
 {
   switch (reason)

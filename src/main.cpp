@@ -319,6 +319,15 @@ void bmsTask(void *pvParameters)
 // same [WIFI] lines as before.
 WifiEvents::WifiEventLatch wifiEvents;
 
+// WifiEvents::reasonName() spells these out as literals.
+static_assert(WIFI_REASON_UNSPECIFIED == 1 && WIFI_REASON_AUTH_EXPIRE == 2 &&
+                  WIFI_REASON_ASSOC_EXPIRE == 4 && WIFI_REASON_ASSOC_LEAVE == 8 &&
+                  WIFI_REASON_MIC_FAILURE == 14 && WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT == 15 &&
+                  WIFI_REASON_STA_LEAVING == 36 && WIFI_REASON_AP_INITIATED == 47 &&
+                  WIFI_REASON_BEACON_TIMEOUT == 200 && WIFI_REASON_NO_AP_FOUND == 201 &&
+                  WIFI_REASON_AUTH_FAIL == 202,
+              "WIFI_REASON_* values changed - update WifiEvents::reasonName()");
+
 void wifiEventHandler(WiFiEvent_t event, WiFiEventInfo_t info)
 {
   // Runs on the WiFi event task (arduino_events, 4KB stack) - must stay

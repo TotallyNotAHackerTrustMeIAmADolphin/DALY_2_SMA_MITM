@@ -286,6 +286,22 @@ struct SystemConfig
         return r;
     }
 
+    // Bit i set iff before.all()[i]->value() != after.all()[i]->value() -
+    // which settings actually changed across a /save, for WebDashboard's
+    // post-save "[CFG] <label>: <old> -> <new> <unit>" log lines. Pure and
+    // tested in test/test_systemconfig/.
+    static uint32_t changedMask(const SystemConfig &before, const SystemConfig &after)
+    {
+        static_assert(kNumSettings <= 32, "changedMask() needs a wider return type");
+        std::array<const SettingBase *, kNumSettings> b = before.all();
+        std::array<const SettingBase *, kNumSettings> a = after.all();
+        uint32_t mask = 0;
+        for (size_t i = 0; i < kNumSettings; i++)
+            if (b[i]->value() != a[i]->value())
+                mask |= (uint32_t)1 << i;
+        return mask;
+    }
+
 private:
     template <typename B, typename Self>
     static std::array<B *, kNumSettings> list(Self &c)

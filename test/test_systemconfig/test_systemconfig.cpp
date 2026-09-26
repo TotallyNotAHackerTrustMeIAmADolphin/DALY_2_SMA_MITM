@@ -313,6 +313,52 @@ static void test_combined_violations_all_surface(void)
     TEST_ASSERT_TRUE(r.maintHysteresisBad);
 }
 
+// --- changedMask(): which settings a /save actually changed ---
+
+static void test_changed_mask_identical_configs_is_zero(void)
+{
+    SystemConfig a = baseline();
+    SystemConfig b = baseline();
+    TEST_ASSERT_EQUAL(0u, SystemConfig::changedMask(a, b));
+}
+
+static void test_changed_mask_one_setting_sets_only_its_bit(void)
+{
+    // Every baseline() value sits strictly above its setting's min(), so
+    // moving each one to its min() in turn always produces a real change -
+    // and its bit must be the one at that setting's own position in all().
+    SystemConfig a = baseline();
+    for (size_t i = 0; i < a.all().size(); i++)
+    {
+        SystemConfig probe = a;
+        SettingBase *s = probe.all()[i];
+        TEST_ASSERT_TRUE_MESSAGE(s->set(s->min()), s->key());
+        TEST_ASSERT_TRUE_MESSAGE(s->value() != a.all()[i]->value(), s->key());
+
+        uint32_t mask = SystemConfig::changedMask(a, probe);
+        TEST_ASSERT_EQUAL_MESSAGE((uint32_t)1 << i, mask, s->key());
+    }
+}
+
+static void test_changed_mask_two_settings_both_bits(void)
+{
+    SystemConfig a = baseline();
+    SystemConfig b = baseline();
+    TEST_ASSERT_TRUE(b.maxChargeA.set(300));   // index 0
+    TEST_ASSERT_TRUE(b.vSamples.set(5));       // index 13
+    uint32_t mask = SystemConfig::changedMask(a, b);
+    TEST_ASSERT_EQUAL(((uint32_t)1 << 0) | ((uint32_t)1 << 13), mask);
+}
+
+static void test_changed_mask_refused_set_leaves_mask_zero(void)
+{
+    SystemConfig a = baseline();
+    SystemConfig b = baseline();
+    TEST_ASSERT_FALSE(b.maxChargeA.set(-5)); // refused: out of range
+    TEST_ASSERT_FALSE(b.cvMaxCharge.set(9));  // refused: out of range
+    TEST_ASSERT_EQUAL(0u, SystemConfig::changedMask(a, b));
+}
+
 int main(int, char **)
 {
     UNITY_BEGIN();
@@ -337,5 +383,9 @@ int main(int, char **)
     RUN_TEST(test_maint_hysteresis_boundary);
     RUN_TEST(test_equal_spread_thresholds_allowed);
     RUN_TEST(test_combined_violations_all_surface);
+    RUN_TEST(test_changed_mask_identical_configs_is_zero);
+    RUN_TEST(test_changed_mask_one_setting_sets_only_its_bit);
+    RUN_TEST(test_changed_mask_two_settings_both_bits);
+    RUN_TEST(test_changed_mask_refused_set_leaves_mask_zero);
     return UNITY_END();
 }

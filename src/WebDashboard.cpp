@@ -47,6 +47,25 @@ namespace
         return String((long)v);
     }
 
+    // Formats a value for the "[CFG] <label>: <old> -> <new> <unit>" change
+    // log - deliberately NOT formatNumber() above, which rounds to the
+    // setting's *display* decimals (0 for an amps field), so 250 -> 252.5
+    // would print as "253". An integer kind prints as a plain integer; a
+    // float kind prints up to 3 decimals with trailing zeros (and a
+    // trailing '.') trimmed, so 250 -> "250", 3.55 -> "3.55", 3.425 ->
+    // "3.425".
+    String formatChangeNumber(const SettingBase &s, double v)
+    {
+        if (s.kind() != SettingBase::KIND_FLOAT)
+            return String((long)v);
+        String out(v, 3);
+        while (out.endsWith("0"))
+            out.remove(out.length() - 1);
+        if (out.endsWith("."))
+            out.remove(out.length() - 1);
+        return out;
+    }
+
     // "Max Charge Vpc must be between 2.500 and 3.550 V."
     String rangeMessage(const SettingBase &s)
     {
@@ -269,6 +288,11 @@ void WebDashboard::saveConfig(AsyncWebServerRequest *request)
     // settings were in the request, so only those are written to NVS.
     bool present[SystemConfig::kNumSettings] = {false};
 
+    // Captured before copy is mutated below, so it holds the pre-save value
+    // of every setting for the post-save "[CFG] <label>: <old> -> <new>"
+    // log lines - reading *_cfg here without the lock is fine, per the
+    // comment above (this handler is the only writer).
+    const SystemConfig before = *_cfg;
     SystemConfig copy = *_cfg;
     std::array<SettingBase *, SystemConfig::kNumSettings> settings = copy.all();
     std::vector<String> errors;
@@ -349,6 +373,31 @@ void WebDashboard::saveConfig(AsyncWebServerRequest *request)
         }
     }
     _prefs.end();
+
+    // Log every setting that actually changed, by name, old -> new - only
+    // now that the save has fully succeeded (published under the lock and
+    // written to NVS), never for a refused save. One debugLog call per
+    // changed setting: its buffer is 256 bytes, so one call with embedded
+    // newlines would both truncate and leave continuation lines
+    // untimestamped, same reasoning as the /save-refused loop above.
+    uint32_t changed = SystemConfig::changedMask(before, copy);
+    if (changed == 0)
+    {
+        debugLog("[CFG] Saved, no changes\n");
+    }
+    else
+    {
+        std::array<const SettingBase *, SystemConfig::kNumSettings> beforeSettings = before.all();
+        for (size_t i = 0; i < settings.size(); i++)
+        {
+            if (!(changed & ((uint32_t)1 << i)))
+                continue;
+            const SettingBase &s = *settings[i];
+            debugLog("[CFG] %s: %s -> %s %s\n", s.label(),
+                     formatChangeNumber(*beforeSettings[i], beforeSettings[i]->value()).c_str(),
+                     formatChangeNumber(s, s.value()).c_str(), s.unit());
+        }
+    }
 
     if (_actionCb)
         _actionCb("configSaved");

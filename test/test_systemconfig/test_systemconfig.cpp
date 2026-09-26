@@ -443,6 +443,95 @@ static void test_changed_mask_tiny_real_change_is_a_change(void)
     TEST_ASSERT_EQUAL_STRING("2.0004", newBuf);
 }
 
+static void test_changed_mask_reviewer_example_500_vs_500_00003(void)
+{
+    // The reviewer's counterexample to the first (7-sig-fig) formatter:
+    // (float)500.0 != (float)500.00003, so this must be a real change with
+    // distinct printed values, not "500 -> 500".
+    SystemConfig a;
+    SystemConfig b;
+    TEST_ASSERT_TRUE(a.maxDischargeA.set(500.0));
+    TEST_ASSERT_TRUE(b.maxDischargeA.set(500.00003));
+    TEST_ASSERT_TRUE((float)a.maxDischargeA != (float)b.maxDischargeA);
+
+    size_t idx = 8; // maxDischargeA's position in all()
+    TEST_ASSERT_TRUE(a.all()[idx] == &a.maxDischargeA);
+    TEST_ASSERT_EQUAL((uint32_t)1 << idx, SystemConfig::changedMask(a, b));
+
+    char oldBuf[24];
+    char newBuf[24];
+    formatSettingValue(a.maxDischargeA, a.maxDischargeA.value(), oldBuf, sizeof(oldBuf));
+    formatSettingValue(b.maxDischargeA, b.maxDischargeA.value(), newBuf, sizeof(newBuf));
+    TEST_ASSERT_TRUE(strcmp(oldBuf, newBuf) != 0);
+    TEST_ASSERT_EQUAL_STRING("500", oldBuf);
+    TEST_ASSERT_EQUAL_STRING("500.00003", newBuf);
+}
+
+static void test_changed_mask_reviewer_example_3_55_vs_3_5500002(void)
+{
+    // cvMaxCharge's max is the #8 headroom, 3.65f - 0.10f = 3.5500002 (as a
+    // float promoted to double, 3.5500001907348633) - the largest value
+    // set() accepts, and itself the reviewer's "3.5500002" counterexample
+    // to 3.55: two distinct binary32 values that both print "3.55" at
+    // 7 significant digits.
+    SystemConfig a;
+    SystemConfig b;
+    TEST_ASSERT_TRUE(a.cvMaxCharge.set(3.55));
+    TEST_ASSERT_TRUE(b.cvMaxCharge.set(b.cvMaxCharge.max()));
+    TEST_ASSERT_TRUE((float)a.cvMaxCharge != (float)b.cvMaxCharge);
+    TEST_ASSERT_TRUE(SystemConfig::changedMask(a, b) != 0u);
+
+    char oldBuf[24];
+    char newBuf[24];
+    formatSettingValue(a.cvMaxCharge, a.cvMaxCharge.value(), oldBuf, sizeof(oldBuf));
+    formatSettingValue(b.cvMaxCharge, b.cvMaxCharge.value(), newBuf, sizeof(newBuf));
+    TEST_ASSERT_TRUE(strcmp(oldBuf, newBuf) != 0);
+    TEST_ASSERT_EQUAL_STRING("3.55", oldBuf);
+    TEST_ASSERT_EQUAL_STRING("3.5500002", newBuf);
+}
+
+// A dummy SettingBase-shaped stand-in isn't needed: reuse a real float
+// setting (maxChargeA, range wide enough to hold every sweep start/value
+// used below) purely for its KIND_FLOAT tag - formatSettingValue() never
+// looks at its range or current value, only s.kind() and the v passed in.
+static void sweepRange(const SettingBase &floatSetting, float start, int steps)
+{
+    float v = start;
+    char prevBuf[24];
+    formatSettingValue(floatSetting, (double)v, prevBuf, sizeof(prevBuf));
+    TEST_ASSERT_EQUAL_FLOAT(v, (float)strtod(prevBuf, nullptr));
+
+    for (int i = 0; i < steps; i++)
+    {
+        float next = nextafterf(v, INFINITY);
+        TEST_ASSERT_TRUE(next != v);
+
+        char nextBuf[24];
+        formatSettingValue(floatSetting, (double)next, nextBuf, sizeof(nextBuf));
+
+        // Each string parses back to exactly its own float ...
+        TEST_ASSERT_EQUAL_FLOAT(next, (float)strtod(nextBuf, nullptr));
+        // ... and adjacent floats never print identically (the whole point
+        // of this fix: a real, distinguishable change must always log as
+        // two different numbers).
+        TEST_ASSERT_TRUE_MESSAGE(strcmp(prevBuf, nextBuf) != 0, nextBuf);
+
+        v = next;
+        strcpy(prevBuf, nextBuf);
+    }
+}
+
+static void test_format_setting_value_sweep_adjacent_floats_always_differ(void)
+{
+    SystemConfig cfg;
+    // Ranges chosen to stay within maxChargeA's [0, 1000] the whole sweep
+    // (2000 consecutive floats moves the value by only a handful of ULPs).
+    sweepRange(cfg.maxChargeA, 2.5f, 2000);
+    sweepRange(cfg.maxChargeA, 3.4f, 2000);
+    sweepRange(cfg.maxChargeA, 250.0f, 2000);
+    sweepRange(cfg.maxChargeA, 999.0f, 2000);
+}
+
 int main(int, char **)
 {
     UNITY_BEGIN();
@@ -475,5 +564,8 @@ int main(int, char **)
     RUN_TEST(test_format_setting_value_integer_kind);
     RUN_TEST(test_changed_mask_same_stored_float_is_not_a_change);
     RUN_TEST(test_changed_mask_tiny_real_change_is_a_change);
+    RUN_TEST(test_changed_mask_reviewer_example_500_vs_500_00003);
+    RUN_TEST(test_changed_mask_reviewer_example_3_55_vs_3_5500002);
+    RUN_TEST(test_format_setting_value_sweep_adjacent_floats_always_differ);
     return UNITY_END();
 }

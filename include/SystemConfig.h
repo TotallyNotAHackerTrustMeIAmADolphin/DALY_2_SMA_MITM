@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 // The Daly BMS's own cell overvoltage protection on this pack (#8, confirmed
 // by the operator) - cvMaxCharge must stay below this with real margin, since
@@ -117,18 +118,59 @@ private:
 // NOT the setting's display decimals (formatNumber() in WebDashboard.cpp
 // rounds to those, e.g. 0 for an amps field, so 250 -> 252.5 would print as
 // "253" and a tiny real change could print as unchanged). An integer kind
-// prints as a plain integer. A float kind prints with %.7g: 7 significant
-// digits round-trips a binary32 float exactly, and every reachable value
-// here is < 10000 so %g never switches to exponential form; %g itself
-// strips trailing zeros (and a trailing '.'), so 250 -> "250",
-// 252.0625 -> "252.0625", 3.5499999 (stored 3.55f) -> "3.55". Pure,
-// snprintf-based, always NUL-terminated; out must be at least ~24 bytes.
+// prints as a plain integer.
+//
+// A float kind prints the *shortest* %g precision that round-trips v's
+// binary32 value exactly: 7 significant digits is NOT enough (that was
+// this function's first, wrong version - (float)500.0 != (float)500.00003,
+// yet both print "500" with %.7g, so a real change could still log as
+// "X -> X"). FLT_DECIMAL_DIG is 9: every binary32 value round-trips through
+// decimal at 9 significant digits, so the search below always finds a
+// precision <= 9 that works.
+//
+// A plain "first precision that round-trips" search isn't quite enough,
+// though: %g itself switches to exponential form whenever its decimal
+// exponent X is >= the precision P (not just for genuinely tiny/huge
+// values) - so at low precision, a whole number like 250 or 1000
+// round-trips exactly as "2.5e+02"/"1e+03" before precision ever reaches
+// the point where %g would print it in fixed form. Settings only run up
+// to a few thousand, so once precision is high enough to cover the
+// integer part, %g stops using exponential and stays that way (adding
+// more digits only appends past the decimal point) - the search below
+// keeps going past the first round-trip while the candidate is still
+// exponential, and prefers the first later precision whose round-trip
+// no longer is, falling back to the very first round-trip only if no
+// fixed-form one exists at precision <= 9 (a value small enough that %g's
+// X < -4 rule makes exponential form unavoidable, e.g. an amps setting's
+// 0.00005 -> "5e-05" - a correct, if unusual-looking, round-trip, left
+// as-is). Ordinary values still print short: 250 -> "250",
+// 252.0625 -> "252.0625", 3.5499999 (stored 3.55f) -> "3.55". %g itself
+// strips trailing zeros (and a trailing '.'). Pure, snprintf-based, always
+// NUL-terminated; out must be at least ~24 bytes.
 inline void formatSettingValue(const SettingBase &s, double v, char *out, size_t outSize)
 {
     if (s.kind() != SettingBase::KIND_FLOAT)
+    {
         snprintf(out, outSize, "%ld", (long)v);
-    else
-        snprintf(out, outSize, "%.7g", v);
+        return;
+    }
+    float target = (float)v;
+    char firstRoundTrip[24] = "";
+    for (int precision = 1; precision <= 9; precision++)
+    {
+        char candidate[24];
+        snprintf(candidate, sizeof(candidate), "%.*g", precision, v);
+        if ((float)strtod(candidate, nullptr) != target)
+            continue;
+        if (firstRoundTrip[0] == '\0')
+            snprintf(firstRoundTrip, sizeof(firstRoundTrip), "%s", candidate);
+        if (strchr(candidate, 'e') == nullptr && strchr(candidate, 'E') == nullptr)
+        {
+            snprintf(out, outSize, "%s", candidate);
+            return;
+        }
+    }
+    snprintf(out, outSize, "%s", firstRoundTrip);
 }
 
 template <typename T>

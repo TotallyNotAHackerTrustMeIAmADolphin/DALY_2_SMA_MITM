@@ -412,7 +412,6 @@ static void test_changed_mask_same_stored_float_is_not_a_change(void)
     SystemConfig b;
     TEST_ASSERT_TRUE(a.cvMaxCharge.set(3.55));
     TEST_ASSERT_TRUE(b.cvMaxCharge.set(3.55000005));
-    TEST_ASSERT_EQUAL_FLOAT((float)a.cvMaxCharge, (float)b.cvMaxCharge);
     TEST_ASSERT_TRUE((float)a.cvMaxCharge == (float)b.cvMaxCharge);
     TEST_ASSERT_EQUAL(0u, SystemConfig::changedMask(a, b));
 }
@@ -499,7 +498,7 @@ static void sweepRange(const SettingBase &floatSetting, float start, int steps)
     float v = start;
     char prevBuf[24];
     formatSettingValue(floatSetting, (double)v, prevBuf, sizeof(prevBuf));
-    TEST_ASSERT_EQUAL_FLOAT(v, (float)strtod(prevBuf, nullptr));
+    TEST_ASSERT_TRUE_MESSAGE(v == (float)strtod(prevBuf, nullptr), prevBuf);
 
     for (int i = 0; i < steps; i++)
     {
@@ -509,8 +508,11 @@ static void sweepRange(const SettingBase &floatSetting, float start, int steps)
         char nextBuf[24];
         formatSettingValue(floatSetting, (double)next, nextBuf, sizeof(nextBuf));
 
-        // Each string parses back to exactly its own float ...
-        TEST_ASSERT_EQUAL_FLOAT(next, (float)strtod(nextBuf, nullptr));
+        // Each string parses back to exactly its own float (an exact
+        // compare, not TEST_ASSERT_EQUAL_FLOAT - Unity's float assert
+        // allows a relative tolerance, which would let a formatter that's
+        // off by a ULP pass) ...
+        TEST_ASSERT_TRUE_MESSAGE(next == (float)strtod(nextBuf, nullptr), nextBuf);
         // ... and adjacent floats never print identically (the whole point
         // of this fix: a real, distinguishable change must always log as
         // two different numbers).

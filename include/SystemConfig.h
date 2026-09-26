@@ -1,21 +1,10 @@
 #pragma once
 #include <array>
 #include <errno.h>
-#include <float.h>
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
-
-// Some toolchains' <float.h> doesn't define this C99/C++11 addition (kept
-// as a fallback, not because either build here is known to lack it -
-// verified present on both the native host and the ESP32 (xtensa) toolchain
-// this project builds with).
-#ifndef FLT_DECIMAL_DIG
-#define FLT_DECIMAL_DIG 9
-#endif
 
 // The Daly BMS's own cell overvoltage protection on this pack (#8, confirmed
 // by the operator) - cvMaxCharge must stay below this with real margin, since
@@ -40,13 +29,6 @@ constexpr int kMaxVSamples = 20;
 // the factor from per-cell limits to the pack CVL/DVL sent to the SMA.
 constexpr int kPackCells = 16;
 
-enum ParseResult
-{
-    PARSE_OK,
-    PARSE_NOT_A_NUMBER,
-    PARSE_OUT_OF_RANGE
-};
-
 // What NVS, /save and the /config page need from a setting, whatever its
 // value type: its name, and its value and limits as numbers. Setting<T>
 // below is the real thing; this base only lets SystemConfig::all() hand
@@ -61,6 +43,15 @@ public:
         KIND_FLOAT,
         KIND_INT,
         KIND_UINT16
+    };
+
+    // parse()'s outcome. Scoped so it can't collide with an unrelated OK/
+    // NotANumber elsewhere - callers write SettingBase::ParseResult::Ok etc.
+    enum class ParseResult
+    {
+        Ok,
+        NotANumber,
+        OutOfRange
     };
 
     const char *key() const { return key_; } // NVS key and /save field name - never rename (NVS)
@@ -87,27 +78,27 @@ public:
 
     // Parses a /save form value and set()s it. The whole string (spaces
     // around it aside) must be a number - an integer for an integer
-    // setting - else PARSE_NOT_A_NUMBER; a number set() refuses is
-    // PARSE_OUT_OF_RANGE. The value is only changed on PARSE_OK.
+    // setting - else NotANumber; a number set() refuses is OutOfRange. The
+    // value is only changed on Ok.
     ParseResult parse(const char *text)
     {
         while (*text == ' ')
             text++;
         if (*text == '\0')
-            return PARSE_NOT_A_NUMBER;
+            return ParseResult::NotANumber;
         char *end = nullptr;
         errno = 0;
         double v = kind_ == KIND_FLOAT ? strtod(text, &end) : (double)strtol(text, &end, 10);
         bool overflow = errno == ERANGE;
         if (end == text)
-            return PARSE_NOT_A_NUMBER;
+            return ParseResult::NotANumber;
         while (*end == ' ')
             end++;
         if (*end != '\0')
-            return PARSE_NOT_A_NUMBER;
+            return ParseResult::NotANumber;
         if (overflow || !set(v))
-            return PARSE_OUT_OF_RANGE;
-        return PARSE_OK;
+            return ParseResult::OutOfRange;
+        return ParseResult::Ok;
     }
 
 protected:
@@ -123,66 +114,6 @@ private:
     uint8_t decimals_;
     Kind kind_;
 };
-
-// Formats v (one of s's own value/min/max/def) at full precision for the
-// post-save "[CFG] <label>: <old> -> <new> <unit>" change log - deliberately
-// NOT the setting's display decimals (formatNumber() in WebDashboard.cpp
-// rounds to those, e.g. 0 for an amps field, so 250 -> 252.5 would print as
-// "253" and a tiny real change could print as unchanged). An integer kind
-// prints as a plain integer.
-//
-// A float kind prints the shortest FIXED-FORM (non-exponent) %g precision
-// that round-trips v's binary32 value exactly, up to FLT_DECIMAL_DIG (9)
-// significant digits, falling back to exponent form only for a value below
-// 1e-4 where %g can't avoid it. Don't simplify this to a plain "first
-// precision that round-trips" search - that's not the same thing, and was
-// this function's first, wrong version (using 7 significant digits, which
-// isn't enough: (float)500.0 != (float)500.00003, yet both print "500"
-// with %.7g, so a real change could still log as "X -> X"). Even fixed at
-// 9, a bare first-round-trip search still isn't right: %g itself switches
-// to exponential form whenever its decimal exponent X is >= the precision P
-// (not just for genuinely tiny/huge values) - so at low precision, a whole
-// number like 250 or 1000 round-trips exactly as "2.5e+02"/"1e+03" before
-// precision ever reaches the point where %g would print it in fixed form.
-// Settings only run up to a few thousand, so once precision is high enough
-// to cover the integer part, %g stops using exponential and stays that way
-// (adding more digits only appends past the decimal point) - the search
-// below keeps going past the first round-trip while the candidate is still
-// exponential, and prefers the first later precision whose round-trip no
-// longer is, falling back to the very first round-trip only if no
-// fixed-form one exists at precision <= 9 (a value small enough that %g's
-// X < -4 rule makes exponential form unavoidable, e.g. an amps setting's
-// 0.00005 -> "5e-05" - a correct, if unusual-looking, round-trip, left
-// as-is). Ordinary values still print short: 250 -> "250",
-// 252.0625 -> "252.0625", 3.5499999 (stored 3.55f) -> "3.55". %g itself
-// strips trailing zeros (and a trailing '.'). Pure, snprintf-based, always
-// NUL-terminated; any outSize is safe (snprintf truncates), 24 bytes holds
-// every output this function produces.
-inline void formatSettingValue(const SettingBase &s, double v, char *out, size_t outSize)
-{
-    if (s.kind() != SettingBase::KIND_FLOAT)
-    {
-        snprintf(out, outSize, "%ld", (long)v);
-        return;
-    }
-    float target = (float)v;
-    char firstRoundTrip[24] = "";
-    for (int precision = 1; precision <= FLT_DECIMAL_DIG; precision++)
-    {
-        char candidate[24];
-        snprintf(candidate, sizeof(candidate), "%.*g", precision, v);
-        if ((float)strtod(candidate, nullptr) != target)
-            continue;
-        if (firstRoundTrip[0] == '\0')
-            snprintf(firstRoundTrip, sizeof(firstRoundTrip), "%s", candidate);
-        if (strchr(candidate, 'e') == nullptr && strchr(candidate, 'E') == nullptr)
-        {
-            snprintf(out, outSize, "%s", candidate);
-            return;
-        }
-    }
-    snprintf(out, outSize, "%s", firstRoundTrip);
-}
 
 template <typename T>
 struct SettingKind;

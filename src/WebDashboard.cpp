@@ -3,6 +3,7 @@
 #include "SDLogger.h"
 #include "TelemetrySchema.h"
 #include "Diagnostics.h"
+#include "SettingFormat.h"
 #include <SD.h>
 #include <cstdarg>
 #include <cstddef>
@@ -40,12 +41,13 @@ namespace
          "Maint. Stop Vpc must be above Maint. Start Vpc (#12)."},
     };
 
-    // A value or limit of s, formatted with its precision.
+    // A value or limit of s, formatted with its display precision - for the
+    // /config page and range text, not the [CFG] log (see formatSettingValue).
     String formatNumber(const SettingBase &s, double v)
     {
-        if (s.kind() == SettingBase::KIND_FLOAT)
-            return String(v, (unsigned int)s.decimals());
-        return String((long)v);
+        char buf[24];
+        formatSettingFixed(s, v, buf, sizeof(buf));
+        return String(buf);
     }
 
     // "Max Charge Vpc must be between 2.500 and 3.550 V."
@@ -221,10 +223,12 @@ void WebDashboard::loadConfig(SystemConfig &configOut)
         PreferenceType expected = s->kind() == SettingBase::KIND_INT      ? PT_I32
                                   : s->kind() == SettingBase::KIND_UINT16 ? PT_U32
                                                                           : PT_BLOB; // putFloat = putBytes
+        char defBuf[24];
+        formatSettingValue(*s, s->def(), defBuf, sizeof(defBuf));
         if (stored != expected)
         {
             debugLog("[CFG] Stored %s has NVS type %d, expected %d - using the default %s\n",
-                     s->label(), (int)stored, (int)expected, formatNumber(*s, s->def()).c_str());
+                     s->label(), (int)stored, (int)expected, defBuf);
             continue;
         }
         double v;
@@ -241,9 +245,14 @@ void WebDashboard::loadConfig(SystemConfig &configOut)
             break;
         }
         if (!s->set(v))
+        {
+            char valBuf[24], minBuf[24], maxBuf[24];
+            formatSettingValue(*s, v, valBuf, sizeof(valBuf));
+            formatSettingValue(*s, s->min(), minBuf, sizeof(minBuf));
+            formatSettingValue(*s, s->max(), maxBuf, sizeof(maxBuf));
             debugLog("[CFG] Stored %s (%s) is outside %s-%s %s - using the default %s\n",
-                     s->label(), String(v, 3).c_str(), formatNumber(*s, s->min()).c_str(),
-                     formatNumber(*s, s->max()).c_str(), s->unit(), formatNumber(*s, s->def()).c_str());
+                     s->label(), valBuf, minBuf, maxBuf, s->unit(), defBuf);
+        }
     }
 
     _prefs.end();
@@ -291,12 +300,12 @@ void WebDashboard::saveConfig(AsyncWebServerRequest *request)
 
         switch (s.parse(request->getParam(s.key())->value().c_str()))
         {
-        case PARSE_OK:
+        case SettingBase::ParseResult::Ok:
             break;
-        case PARSE_NOT_A_NUMBER:
+        case SettingBase::ParseResult::NotANumber:
             errors.push_back(String(s.label()) + " is not a valid number.");
             break;
-        case PARSE_OUT_OF_RANGE:
+        case SettingBase::ParseResult::OutOfRange:
             errors.push_back(rangeMessage(s));
             break;
         }

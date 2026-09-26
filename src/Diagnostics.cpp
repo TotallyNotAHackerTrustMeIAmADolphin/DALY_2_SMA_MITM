@@ -67,22 +67,34 @@ void Diagnostics::logHealth()
     // HealthLog::decide() says something moved (see include/HealthLog.h).
     static HealthLog::State st;
 
-    const char *names[HealthLog::kNumTasks] = {nullptr, "BMS_Task", "CAN_Task", "SD_LogTask", "async_tcp", "arduino_events"};
+    // "loopTask" is the Arduino core's name for the task running loop();
+    // looked up by name like the others rather than via a NULL handle, so
+    // the loop column stays right even if this is ever called elsewhere.
+    static const char *const names[HealthLog::kNumTasks] = {"loopTask", "BMS_Task", "CAN_Task", "SD_LogTask", "async_tcp", "arduino_events"};
+    static const char *const shortNames[HealthLog::kNumTasks] = {"loop", "bms", "can", "sd", "async_tcp", "events"};
     HealthLog::Sample s;
     s.freeHeap = ESP.getFreeHeap();
     s.minFreeHeap = ESP.getMinFreeHeap();
     s.maxBlock = ESP.getMaxAllocHeap();
-    // On ESP-IDF the stack high-water mark is in bytes. names[kLoop] is
-    // nullptr: uxTaskGetStackHighWaterMark(NULL) is the calling task (loop).
+    // On ESP-IDF the stack high-water mark is in bytes.
     for (int i = 0; i < HealthLog::kNumTasks; i++)
     {
-        TaskHandle_t h = names[i] ? xTaskGetHandle(names[i]) : NULL;
-        s.stackLeft[i] = (names[i] && !h) ? 0u : (uint32_t)uxTaskGetStackHighWaterMark(h);
+        TaskHandle_t h = xTaskGetHandle(names[i]);
+        s.stackLeft[i] = h ? (uint32_t)uxTaskGetStackHighWaterMark(h) : HealthLog::kNoTask;
     }
 
-    HealthLog::Reason why = HealthLog::decide(st, s, millis());
-    if (why == HealthLog::kNone)
+    HealthLog::Decision d = HealthLog::decide(st, s, millis());
+    if (d.reason == HealthLog::kNone)
         return;
+
+    char stacks[HealthLog::kNumTasks][12];
+    for (int i = 0; i < HealthLog::kNumTasks; i++)
+    {
+        if (s.stackLeft[i] == HealthLog::kNoTask)
+            strlcpy(stacks[i], "-", sizeof(stacks[i]));
+        else
+            snprintf(stacks[i], sizeof(stacks[i]), "%u", (unsigned)s.stackLeft[i]);
+    }
 
     char rssi[16];
     if (WiFi.status() == WL_CONNECTED)
@@ -90,12 +102,16 @@ void Diagnostics::logHealth()
     else
         strlcpy(rssi, "n/a", sizeof(rssi));
 
-    debugLog("[DIAG] Health (%s): heap free %u, min %u, max block %u | stack left: loop %u, bms %u, can %u, sd %u, async_tcp %u, events %u | WiFi RSSI %s\n",
-             HealthLog::reasonName(why),
-             (unsigned)s.freeHeap, (unsigned)s.minFreeHeap, (unsigned)s.maxBlock,
-             (unsigned)s.stackLeft[HealthLog::kLoop], (unsigned)s.stackLeft[HealthLog::kBms],
-             (unsigned)s.stackLeft[HealthLog::kCan], (unsigned)s.stackLeft[HealthLog::kSd],
-             (unsigned)s.stackLeft[HealthLog::kAsyncTcp], (unsigned)s.stackLeft[HealthLog::kEvents],
+    char why[48];
+    if (d.task >= 0)
+        snprintf(why, sizeof(why), "%s: %s", HealthLog::reasonName(d.reason), shortNames[d.task]);
+    else
+        strlcpy(why, HealthLog::reasonName(d.reason), sizeof(why));
+
+    debugLog("[DIAG] Health (%s): heap free %u, min %u, max block %u | stack left: loop %s, bms %s, can %s, sd %s, async_tcp %s, events %s | WiFi RSSI %s\n",
+             why, (unsigned)s.freeHeap, (unsigned)s.minFreeHeap, (unsigned)s.maxBlock,
+             stacks[HealthLog::kLoop], stacks[HealthLog::kBms], stacks[HealthLog::kCan],
+             stacks[HealthLog::kSd], stacks[HealthLog::kAsyncTcp], stacks[HealthLog::kEvents],
              rssi);
 }
 

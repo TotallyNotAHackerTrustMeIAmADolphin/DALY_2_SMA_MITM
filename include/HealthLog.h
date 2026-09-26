@@ -30,24 +30,32 @@ namespace HealthLog
         kNumTasks
     };
 
+    // stackLeft value for "task not found" (not started yet, e.g. async_tcp
+    // before the network is up, or gone). Not 0: a found task whose stack
+    // is completely used up reads 0, and that must count as STACK LOW.
+    constexpr uint32_t kNoTask = 0xFFFFFFFFu;
+
     struct Sample
     {
         uint32_t freeHeap = 0;
         uint32_t minFreeHeap = 0; // low-water mark since boot, never rises
         uint32_t maxBlock = 0;    // largest allocatable block
-        // Stack high-water marks in bytes; 0 = task not found (not started
-        // yet, e.g. async_tcp before the network is up).
-        uint32_t stackLeft[kNumTasks] = {};
+        // Stack high-water marks in bytes, or kNoTask.
+        uint32_t stackLeft[kNumTasks] = {kNoTask, kNoTask, kNoTask, kNoTask, kNoTask, kNoTask};
     };
 
     // Log when the heap low-water mark has dropped this much since the last
     // logged line.
     constexpr uint32_t kHeapDropBytes = 4096;
-    // Log when the largest free block has shrunk this much (fragmentation).
+    // Log when the largest free block is this much below the best value
+    // seen since the last logged line (fragmentation).
     constexpr uint32_t kBlockDropBytes = 8192;
     // Log when any task's stack high-water mark has dropped this much.
     constexpr uint32_t kStackDropBytes = 256;
-    // Log once when any task's remaining stack first falls below this.
+    // Below this much stack left, a task is STACK LOW: logged once when it
+    // first gets there, then on every further drop, however small - the
+    // high-water mark only ever falls, so that is a handful of lines at
+    // most, and exactly when the remaining headroom matters.
     constexpr uint32_t kStackLowBytes = 512;
     // Heartbeat: log at least this often even when nothing moved.
     constexpr uint32_t kHeartbeatMs = 24UL * 60UL * 60UL * 1000UL;
@@ -56,10 +64,11 @@ namespace HealthLog
     {
         kNone,
         kBaseline,
+        kStackLow,
+        kTaskGone,
+        kStackDrop,
         kHeapDrop,
         kBlockDrop,
-        kStackDrop,
-        kStackLow,
         kHeartbeat
     };
 
@@ -69,14 +78,16 @@ namespace HealthLog
         {
         case kBaseline:
             return "baseline";
+        case kStackLow:
+            return "STACK LOW";
+        case kTaskGone:
+            return "TASK GONE";
+        case kStackDrop:
+            return "stack high-water dropped";
         case kHeapDrop:
             return "heap low-water dropped";
         case kBlockDrop:
             return "largest block shrank";
-        case kStackDrop:
-            return "stack high-water dropped";
-        case kStackLow:
-            return "STACK LOW";
         case kHeartbeat:
             return "daily";
         default:
@@ -84,68 +95,84 @@ namespace HealthLog
         }
     }
 
+    // What decide() returns: why to log (kNone = don't), and for the
+    // per-task reasons which task, so the line can name it.
+    struct Decision
+    {
+        Reason reason = kNone;
+        int task = -1;
+    };
+
     // Persistent between calls; owned by Diagnostics::logHealth() as a
-    // function-local static. `last` is the most recently LOGGED sample, so
-    // a slow drift is caught once it adds up to a threshold, not lost
-    // because each 10-minute step was small.
+    // function-local static.
     struct State
     {
         bool haveBaseline = false;
         uint32_t lastLogMs = 0;
-        Sample last;
+        // Reference values: heap and stack are those of the last LOGGED
+        // line, so slow drift adds up to a threshold instead of being lost
+        // in small 10-minute steps. maxBlock also ratchets UP between
+        // lines (it recovers when buffers are freed), so a baseline taken
+        // during a transient allocation doesn't hide later fragmentation.
+        Sample ref;
     };
 
-    // Returns why this sample should be logged, or kNone. Updates state
-    // only when it returns something other than kNone - except that a
-    // task seen for the first time (its last value was 0) adopts its
-    // current value, so a late-starting task is compared from its own
-    // first reading instead of never.
-    inline Reason decide(State &st, const Sample &s, uint32_t nowMs)
+    // Priority when several things moved at once: the most urgent reason
+    // labels the line (the line always carries every value anyway).
+    inline Decision decide(State &st, const Sample &s, uint32_t nowMs)
     {
-        Reason r = kNone;
+        Decision d;
 
         if (!st.haveBaseline)
         {
-            r = kBaseline;
-        }
-        else
-        {
-            // Stack low is the most urgent, so it wins the reason label.
-            for (int i = 0; i < kNumTasks && r == kNone; i++)
-            {
-                uint32_t prev = st.last.stackLeft[i], cur = s.stackLeft[i];
-                if (prev != 0 && cur != 0 && cur < kStackLowBytes && prev >= kStackLowBytes)
-                    r = kStackLow;
-            }
-            for (int i = 0; i < kNumTasks && r == kNone; i++)
-            {
-                uint32_t prev = st.last.stackLeft[i], cur = s.stackLeft[i];
-                if (prev != 0 && cur != 0 && cur < prev && prev - cur >= kStackDropBytes)
-                    r = kStackDrop;
-            }
-            if (r == kNone && s.minFreeHeap < st.last.minFreeHeap &&
-                st.last.minFreeHeap - s.minFreeHeap >= kHeapDropBytes)
-                r = kHeapDrop;
-            if (r == kNone && s.maxBlock < st.last.maxBlock &&
-                st.last.maxBlock - s.maxBlock >= kBlockDropBytes)
-                r = kBlockDrop;
-            // Unsigned subtraction keeps this right across millis() wrap.
-            if (r == kNone && (uint32_t)(nowMs - st.lastLogMs) >= kHeartbeatMs)
-                r = kHeartbeat;
-        }
-
-        if (r != kNone)
-        {
-            st.haveBaseline = true;
-            st.lastLogMs = nowMs;
-            st.last = s;
+            d.reason = kBaseline;
         }
         else
         {
             for (int i = 0; i < kNumTasks; i++)
-                if (st.last.stackLeft[i] == 0)
-                    st.last.stackLeft[i] = s.stackLeft[i];
+            {
+                uint32_t prev = st.ref.stackLeft[i], cur = s.stackLeft[i];
+                Reason r = kNone;
+                if (prev != kNoTask && cur == kNoTask)
+                    r = kTaskGone;
+                else if (cur != kNoTask && cur < kStackLowBytes && (prev == kNoTask || cur < prev))
+                    r = kStackLow; // first reading already low, or low and still falling
+                else if (prev != kNoTask && cur != kNoTask && cur < prev && prev - cur >= kStackDropBytes)
+                    r = kStackDrop;
+                if (r != kNone && (d.reason == kNone || r < d.reason))
+                {
+                    d.reason = r;
+                    d.task = i;
+                }
+            }
+            if (d.reason == kNone && s.minFreeHeap < st.ref.minFreeHeap &&
+                st.ref.minFreeHeap - s.minFreeHeap >= kHeapDropBytes)
+                d.reason = kHeapDrop;
+            if (d.reason == kNone && s.maxBlock < st.ref.maxBlock &&
+                st.ref.maxBlock - s.maxBlock >= kBlockDropBytes)
+                d.reason = kBlockDrop;
+            // Unsigned subtraction keeps this right across millis() wrap.
+            if (d.reason == kNone && (uint32_t)(nowMs - st.lastLogMs) >= kHeartbeatMs)
+                d.reason = kHeartbeat;
         }
-        return r;
+
+        if (d.reason != kNone)
+        {
+            st.haveBaseline = true;
+            st.lastLogMs = nowMs;
+            st.ref = s;
+        }
+        else
+        {
+            // Nothing logged: a task seen for the first time adopts its
+            // reading (a healthy one - a low one returned kStackLow above),
+            // and maxBlock ratchets up to the best value seen.
+            for (int i = 0; i < kNumTasks; i++)
+                if (st.ref.stackLeft[i] == kNoTask)
+                    st.ref.stackLeft[i] = s.stackLeft[i];
+            if (s.maxBlock > st.ref.maxBlock)
+                st.ref.maxBlock = s.maxBlock;
+        }
+        return d;
     }
 }

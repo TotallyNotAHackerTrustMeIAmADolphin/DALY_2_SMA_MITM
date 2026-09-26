@@ -463,7 +463,12 @@ void WebDashboard::setupRoutes()
                {
         std::vector<String> names;
         std::vector<uint32_t> sizes;
-        SDLogger::listLogFiles(names, sizes);
+        // Same 503 as findLogFile(): a busy card must not read as "no log
+        // files yet" (#67).
+        if (!SDLogger::listLogFiles(names, sizes)) {
+            request->send(503, "text/plain", "SD card busy, try again");
+            return;
+        }
 
         String json = "[";
         for (size_t i = 0; i < names.size(); i++) {

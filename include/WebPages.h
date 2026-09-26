@@ -82,6 +82,17 @@ const char index_html[] PROGMEM = R"rawliteral(
 <script>
 )rawliteral" SHARED_LIST_JS R"rawliteral(
   const con = document.getElementById('console');
+  // One <div> per line, text only (a log line is never markup), capped at
+  // CON_MAX_LINES. The old innerHTML += line + "<br>" added two nodes per
+  // line but removed one, so the console grew without bound (#68).
+  const CON_MAX_LINES = 100;
+  function conAppend(text) {
+    const line = document.createElement('div');
+    line.textContent = text;
+    con.appendChild(line);
+    while (con.childNodes.length > CON_MAX_LINES) con.removeChild(con.firstChild);
+  }
+  function conReset(text) { con.textContent = ''; conAppend(text); }
 
   // Seed the console with the tail of today's SD .log file on load, so it
   // shows recent history instead of only events that happen to fire after
@@ -89,14 +100,17 @@ const char index_html[] PROGMEM = R"rawliteral(
   async function loadRecentLog() {
     try {
       const files = await fetchAndPopulateSelect('/api/logs/list', f => f.name.endsWith('.log'), null, null);
-      if (!files.length) { con.innerHTML = 'Log Active... (no SD log file yet)<br>'; return; }
+      if (!files.length) { conReset('Log Active... (no SD log file yet)'); return; }
       const latest = files[files.length - 1].name; // listLogFiles sorts ascending -> last = newest
-      const text = await (await fetch('/api/logs/content?file=' + encodeURIComponent(latest))).text();
-      const lines = text.split('\n').filter(l => l.length > 0).slice(-100);
-      con.innerHTML = (lines.length ? lines.join('<br>') + '<br>' : '') + '--- live ---<br>';
+      const res = await fetch('/api/logs/content?file=' + encodeURIComponent(latest));
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const lines = (await res.text()).split('\n').filter(l => l.length > 0);
+      con.textContent = '';
+      lines.forEach(conAppend);
+      conAppend('--- live ---');
       con.scrollTop = con.scrollHeight;
     } catch (e) {
-      con.innerHTML = 'Log Active... (failed to load SD history: ' + e.message + ')<br>';
+      conReset('Log Active... (failed to load SD history: ' + e.message + ')');
     }
   }
   loadRecentLog();
@@ -152,8 +166,7 @@ const char index_html[] PROGMEM = R"rawliteral(
     }
   }, false);
   source.addEventListener('log', function(e) {
-    con.innerHTML += e.data + "<br>";
-    if(con.childNodes.length > 100) con.removeChild(con.firstChild);
+    conAppend(e.data);
     con.scrollTop = con.scrollHeight;
   }, false);
 </script></body></html>)rawliteral";

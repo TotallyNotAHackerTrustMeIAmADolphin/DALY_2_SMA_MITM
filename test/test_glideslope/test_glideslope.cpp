@@ -14,20 +14,20 @@ static SystemConfig cfg;
 void setUp(void)
 {
     cfg = SystemConfig{};
-    cfg.maxChargeA = 100.0f;
-    cfg.trickleA = 5.0f;
-    cfg.cvStartTaper = 3.3f;
-    cfg.cvHighAlarmGate = 3.4f;
-    cfg.cvMaxCharge = 3.5f;
-    cfg.maintAmps = 20.0f;
+    cfg.maxChargeA.setUnchecked(100.0f);
+    cfg.trickleA.setUnchecked(5.0f);
+    cfg.cvStartTaper.setUnchecked(3.3f);
+    cfg.cvHighAlarmGate.setUnchecked(3.4f);
+    cfg.cvMaxCharge.setUnchecked(3.5f);
+    cfg.maintAmps.setUnchecked(20.0f);
 
-    cfg.maxDischargeA = 200.0f;
-    cfg.limpDischargeA = 15.0f;
-    cfg.cvStartDTaper = 3.2f;
-    cfg.cvLowAlarmGate = 3.1f;
-    cfg.cvMinDischarge = 3.0f;
+    cfg.maxDischargeA.setUnchecked(200.0f);
+    cfg.limpDischargeA.setUnchecked(15.0f);
+    cfg.cvStartDTaper.setUnchecked(3.2f);
+    cfg.cvLowAlarmGate.setUnchecked(3.1f);
+    cfg.cvMinDischarge.setUnchecked(3.0f);
 
-    cfg.bmsTimeout = 60;
+    cfg.bmsTimeout.setUnchecked(60);
 }
 
 void tearDown(void) {}
@@ -295,8 +295,8 @@ void test_ccl_equal_gate_and_taper_still_trickle(void)
     // `maxCellV >= cfg.cvHighAlarmGate` check first, so the taper branch
     // (and its guard) is never entered. Still correct - trickle - just via
     // a different code path than the guard.
-    cfg.cvHighAlarmGate = 3.3f;
-    cfg.cvStartTaper = 3.3f;
+    cfg.cvHighAlarmGate.setUnchecked(3.3f);
+    cfg.cvStartTaper.setUnchecked(3.3f);
     TEST_ASSERT_EQUAL(50, calculateCCL(cfg, 3.35f, 3.35f, 0, true, false));
 }
 
@@ -307,8 +307,8 @@ void test_ccl_degenerate_taper_guard(void)
     // above fires first) with the gate/taper gap itself <= 0.0001f. Build
     // the thresholds from an epsilon offset rather than decimal literals so
     // the ordering is exact regardless of how the literals themselves round.
-    cfg.cvStartTaper = 3.3f;
-    cfg.cvHighAlarmGate = cfg.cvStartTaper + 0.00005f; // gap 0.00005 <= 0.0001f
+    cfg.cvStartTaper.setUnchecked(3.3f);
+    cfg.cvHighAlarmGate.setUnchecked(cfg.cvStartTaper + 0.00005f); // gap 0.00005 <= 0.0001f
     float v = cfg.cvStartTaper + 0.00002f;             // strictly between
     TEST_ASSERT_EQUAL(50, calculateCCL(cfg, v, v, 0, true, false));
 }
@@ -322,8 +322,8 @@ void test_dcl_degenerate_taper_guard(void)
     // check only intercepts when the gap is exactly zero or negative, not
     // when it's merely tiny, so this guard IS reachable with sane-direction,
     // near-equal thresholds.)
-    cfg.cvLowAlarmGate = 3.1f;
-    cfg.cvStartDTaper = cfg.cvLowAlarmGate + 0.00005f;
+    cfg.cvLowAlarmGate.setUnchecked(3.1f);
+    cfg.cvStartDTaper.setUnchecked(cfg.cvLowAlarmGate + 0.00005f);
     float v = cfg.cvLowAlarmGate + 0.00002f;
     TEST_ASSERT_EQUAL(150, calculateDCL(cfg, v, v, 0, true, false));
 }
@@ -334,8 +334,8 @@ void test_ccl_inverted_gate_taper_trickle(void)
     // `maxCellV >= cfg.cvHighAlarmGate` check still fires first for any
     // voltage at/above the (lower) gate, so this never yields more than
     // trickle even though the config itself is nonsensical.
-    cfg.cvHighAlarmGate = 3.3f;
-    cfg.cvStartTaper = 3.4f;
+    cfg.cvHighAlarmGate.setUnchecked(3.3f);
+    cfg.cvStartTaper.setUnchecked(3.4f);
     TEST_ASSERT_EQUAL(50, calculateCCL(cfg, 3.35f, 3.35f, 0, true, false));
 }
 
@@ -343,8 +343,8 @@ void test_ccl_clamp_when_trickle_exceeds_max(void)
 {
     // trickleA(50) > maxChargeA(10): target = 50 + 0.5*(10-50) = 30, but
     // fmaxf(target, trickleA) clamps back up to 50 -> 500.
-    cfg.trickleA = 50.0f;
-    cfg.maxChargeA = 10.0f;
+    cfg.trickleA.setUnchecked(50.0f);
+    cfg.maxChargeA.setUnchecked(10.0f);
     TEST_ASSERT_EQUAL(500, calculateCCL(cfg, 3.35f, 3.35f, 0, true, false));
 }
 
@@ -352,8 +352,8 @@ void test_dcl_clamp_when_limp_exceeds_max(void)
 {
     // limpDischargeA(100) > maxDischargeA(20): target = 100 + 0.5*(20-100)
     // = 60, but fmaxf(target, limpDischargeA) clamps back up to 100 -> 1000.
-    cfg.limpDischargeA = 100.0f;
-    cfg.maxDischargeA = 20.0f;
+    cfg.limpDischargeA.setUnchecked(100.0f);
+    cfg.maxDischargeA.setUnchecked(20.0f);
     TEST_ASSERT_EQUAL(1000, calculateDCL(cfg, 3.15f, 3.15f, 0, true, false));
 }
 
@@ -366,7 +366,7 @@ void test_ccl_rounding_artifact(void)
     // it is identical on native (this test) and on the xtensa device build,
     // since both use IEEE binary32 float. Confirmed against a standalone
     // float build before pinning.
-    cfg.maxChargeA = 12.35f;
+    cfg.maxChargeA.setUnchecked(12.35f);
     TEST_ASSERT_EQUAL(124, calculateCCL(cfg, 3.0f, 3.0f, 0, true, false));
 }
 
@@ -390,10 +390,10 @@ void test_nan_voltage_is_zero(void)
 
 void test_nan_threshold_is_zero(void)
 {
-    cfg.cvHighAlarmGate = NAN;
+    cfg.cvHighAlarmGate.setUnchecked(NAN);
     TEST_ASSERT_EQUAL(0, calculateCCL(cfg, 3.3f, 3.3f, 0, true, false));
 
-    cfg.cvLowAlarmGate = NAN;
+    cfg.cvLowAlarmGate.setUnchecked(NAN);
     TEST_ASSERT_EQUAL(0, calculateDCL(cfg, 3.15f, 3.15f, 0, true, false));
 }
 
@@ -401,13 +401,13 @@ void test_nan_current_setpoint_is_zero(void)
 {
     // round(NaN * 10) cast to uint16_t is undefined; the guard must catch
     // a NaN current setpoint too, including in maintenance mode.
-    cfg.maxChargeA = NAN;
+    cfg.maxChargeA.setUnchecked(NAN);
     TEST_ASSERT_EQUAL(0, calculateCCL(cfg, 3.0f, 3.0f, 0, true, false));
     cfg = SystemConfig{}; setUp();
-    cfg.maintAmps = NAN;
+    cfg.maintAmps.setUnchecked(NAN);
     TEST_ASSERT_EQUAL(0, calculateCCL(cfg, 3.0f, 3.0f, 0, true, true));
     cfg = SystemConfig{}; setUp();
-    cfg.limpDischargeA = NAN;
+    cfg.limpDischargeA.setUnchecked(NAN);
     TEST_ASSERT_EQUAL(0, calculateDCL(cfg, 3.05f, 3.05f, 0, true, false));
 }
 
@@ -417,21 +417,21 @@ void test_nan_current_setpoint_is_zero(void)
 
 void test_ccl_negative_trickle_at_gate_is_zero(void)
 {
-    cfg.trickleA = -5.0f;
+    cfg.trickleA.setUnchecked(-5.0f);
     TEST_ASSERT_EQUAL(0, calculateCCL(cfg, 3.4f, 3.4f, 0, true, false));
 }
 
 void test_ccl_negative_trickle_degenerate_taper_is_zero(void)
 {
-    cfg.trickleA = -5.0f;
-    cfg.cvHighAlarmGate = cfg.cvStartTaper;
-    cfg.cvMaxCharge = 3.6f;
+    cfg.trickleA.setUnchecked(-5.0f);
+    cfg.cvHighAlarmGate.setUnchecked(cfg.cvStartTaper);
+    cfg.cvMaxCharge.setUnchecked(3.6f);
     TEST_ASSERT_EQUAL(0, calculateCCL(cfg, 3.35f, 3.35f, 0, true, false));
 }
 
 void test_ccl_negative_maint_amps_is_zero(void)
 {
-    cfg.maintAmps = -20.0f;
+    cfg.maintAmps.setUnchecked(-20.0f);
     TEST_ASSERT_EQUAL(0, calculateCCL(cfg, 3.0f, 3.0f, 0, true, true));
 }
 
@@ -439,30 +439,30 @@ void test_ccl_negative_max_and_trickle_is_zero(void)
 {
     // Taper and full-current branches: fmaxf(x, trickleA) no longer
     // guarantees a non-negative result once trickleA itself is negative.
-    cfg.maxChargeA = -100.0f;
-    cfg.trickleA = -5.0f;
+    cfg.maxChargeA.setUnchecked(-100.0f);
+    cfg.trickleA.setUnchecked(-5.0f);
     TEST_ASSERT_EQUAL(0, calculateCCL(cfg, 3.0f, 3.0f, 0, true, false));
     TEST_ASSERT_EQUAL(0, calculateCCL(cfg, 3.35f, 3.35f, 0, true, false));
 }
 
 void test_dcl_negative_limp_at_gate_is_zero(void)
 {
-    cfg.limpDischargeA = -15.0f;
+    cfg.limpDischargeA.setUnchecked(-15.0f);
     TEST_ASSERT_EQUAL(0, calculateDCL(cfg, 3.1f, 3.1f, 0, true, false));
 }
 
 void test_dcl_negative_limp_degenerate_taper_is_zero(void)
 {
-    cfg.limpDischargeA = -15.0f;
-    cfg.cvLowAlarmGate = cfg.cvStartDTaper;
-    cfg.cvMinDischarge = 2.9f;
+    cfg.limpDischargeA.setUnchecked(-15.0f);
+    cfg.cvLowAlarmGate.setUnchecked(cfg.cvStartDTaper);
+    cfg.cvMinDischarge.setUnchecked(2.9f);
     TEST_ASSERT_EQUAL(0, calculateDCL(cfg, 3.15f, 3.25f, 0, true, false));
 }
 
 void test_dcl_negative_max_and_limp_is_zero(void)
 {
-    cfg.maxDischargeA = -200.0f;
-    cfg.limpDischargeA = -15.0f;
+    cfg.maxDischargeA.setUnchecked(-200.0f);
+    cfg.limpDischargeA.setUnchecked(-15.0f);
     TEST_ASSERT_EQUAL(0, calculateDCL(cfg, 3.3f, 3.3f, 0, true, false));
     TEST_ASSERT_EQUAL(0, calculateDCL(cfg, 3.15f, 3.15f, 0, true, false));
 }
@@ -470,7 +470,7 @@ void test_dcl_negative_max_and_limp_is_zero(void)
 void test_huge_setpoint_saturates_instead_of_wrapping(void)
 {
     // 7000A * 10 = 70000 > UINT16_MAX: saturate, don't wrap to 4464.
-    cfg.maxChargeA = 7000.0f;
+    cfg.maxChargeA.setUnchecked(7000.0f);
     TEST_ASSERT_EQUAL(65535, calculateCCL(cfg, 3.0f, 3.0f, 0, true, false));
 }
 

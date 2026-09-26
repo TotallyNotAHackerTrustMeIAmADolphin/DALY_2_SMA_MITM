@@ -20,27 +20,27 @@ void setUp(void)
     cfg = SystemConfig{};
     // Same charge/discharge shape as test_glideslope's setUp(), so the CCL/
     // DCL numbers below can be cross-checked against that file.
-    cfg.maxChargeA = 100.0f;
-    cfg.trickleA = 5.0f;
-    cfg.cvStartTaper = 3.3f;
-    cfg.cvHighAlarmGate = 3.4f;
-    cfg.cvMaxCharge = 3.5f;
-    cfg.maintAmps = 20.0f;
+    cfg.maxChargeA.setUnchecked(100.0f);
+    cfg.trickleA.setUnchecked(5.0f);
+    cfg.cvStartTaper.setUnchecked(3.3f);
+    cfg.cvHighAlarmGate.setUnchecked(3.4f);
+    cfg.cvMaxCharge.setUnchecked(3.5f);
+    cfg.maintAmps.setUnchecked(20.0f);
 
-    cfg.maxDischargeA = 200.0f;
-    cfg.limpDischargeA = 15.0f;
-    cfg.cvStartDTaper = 3.2f;
-    cfg.cvLowAlarmGate = 3.1f;
-    cfg.cvMinDischarge = 3.0f;
+    cfg.maxDischargeA.setUnchecked(200.0f);
+    cfg.limpDischargeA.setUnchecked(15.0f);
+    cfg.cvStartDTaper.setUnchecked(3.2f);
+    cfg.cvLowAlarmGate.setUnchecked(3.1f);
+    cfg.cvMinDischarge.setUnchecked(3.0f);
 
-    cfg.bmsTimeout = 60;
+    cfg.bmsTimeout.setUnchecked(60);
 
     // Deliberately far from cvStartTaper/cvHighAlarmGate/cvMaxCharge so the
     // maintenance-hysteresis tests don't interact with the taper thresholds.
     // Per-cell thresholds (#12: compared directly against minCellSmoothedV,
     // no cell count involved): start 3.0V, stop 3.2V.
-    cfg.cvMaintStart = 3.0f;
-    cfg.cvMaintStop = 3.2f;
+    cfg.cvMaintStart.setUnchecked(3.0f);
+    cfg.cvMaintStop.setUnchecked(3.2f);
 
     // spreadStartMv=60, spreadMaxMv=150 - left at the SystemConfig defaults,
     // same as test_glideslope.
@@ -370,7 +370,7 @@ void test_maintenance_cvl_is_fixed_560_not_cvmaxcharge(void)
     // CVL must still read 560 - proves it's the fixed override, not the
     // normal formula.
     ControlState ctrl;
-    cfg.cvMaxCharge = 3.6f; // normal CVL would be 576, not 560
+    cfg.cvMaxCharge.setUnchecked(3.6f); // normal CVL would be 576, not 560
     Snapshot s = freshSnapshot(1000);
     s.manualMaintForce = true;
     Decision d = decide(cfg, s, ctrl);

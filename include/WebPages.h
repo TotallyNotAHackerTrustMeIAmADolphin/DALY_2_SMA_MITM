@@ -3,7 +3,7 @@
 #include <Arduino.h>
 #else
 // Native unit tests (test_systemconfig) include this to check config_html's
-// !!IN_<key>!! placeholders against kConfigFields - nothing here needs more
+// !!LABEL_/!!IN_<key>!! placeholders against SystemConfig - nothing here needs more
 // of Arduino than PROGMEM.
 #define PROGMEM
 #endif

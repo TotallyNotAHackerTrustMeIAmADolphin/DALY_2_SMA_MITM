@@ -15,16 +15,13 @@
 
 namespace
 {
-    // The settings themselves (key, default, min/max, step, label) live in
-    // one table, kConfigFields in include/SystemConfig.h - loadConfig(),
-    // saveConfig(), the /config page and SystemConfig::validate() all read
-    // it. KIND_UINT16 fields (sps/spm) are stored via Preferences::getUInt/
-    // putUInt, not getInt/putInt: NVS enforces the stored type, so reading
-    // a UInt-written key with getInt would fail against existing NVS.
+    // Every setting is a Setting<T> member of SystemConfig (include/
+    // SystemConfig.h) that carries its own key, label, unit, range and
+    // default, and whose set() refuses anything outside that range.
+    // loadConfig(), saveConfig() and the /config page just loop over
+    // cfg.all().
 
-    // Messages for the ValidationResult rules that relate two fields. Range
-    // violations of a single field get theirs from its table row (see
-    // forEachViolation()).
+    // Messages for the ValidationResult rules that relate two settings.
     struct ValidationMessage
     {
         bool SystemConfig::ValidationResult::*flag;
@@ -42,48 +39,43 @@ namespace
          "Maint. Stop Vpc must be above Maint. Start Vpc (#12)."},
     };
 
-    // A number formatted with the field's precision (limits and values).
-    String formatNumber(const ConfigField &f, float v)
+    // A value or limit of s, formatted with its precision.
+    String formatNumber(const SettingBase &s, double v)
     {
-        if (f.kind == ConfigField::KIND_FLOAT)
-            return String(v, (unsigned int)f.decimals);
+        if (s.kind() == SettingBase::KIND_FLOAT)
+            return String(v, (unsigned int)s.decimals());
         return String((long)v);
     }
 
     // "Max Charge Vpc must be between 2.500 and 3.550 V."
-    String rangeMessage(const ConfigField &f)
+    String rangeMessage(const SettingBase &s)
     {
-        return String(f.label) + " must be between " + formatNumber(f, f.min) + " and " +
-               formatNumber(f, f.max) + " " + f.unit + ".";
+        return String(s.label()) + " must be between " + formatNumber(s, s.min()) + " and " +
+               formatNumber(s, s.max()) + " " + s.unit() + ".";
     }
 
-    // Calls emit(message) once per violation in r - range violations first
-    // (one per field, in table order), then the two-field rules. Shared by
+    // Calls emit(message) once per violated two-setting rule. Shared by
     // saveConfig()'s 400 response and loadConfig()'s boot log.
     template <typename Emit>
     void forEachViolation(const SystemConfig::ValidationResult &r, Emit emit)
     {
-        for (size_t i = 0; i < kNumConfigFields; i++)
-            if (r.outOfRange & (1u << i))
-                emit(rangeMessage(kConfigFields[i]));
         for (const ValidationMessage &vm : kValidationMessages)
             if (r.*(vm.flag))
                 emit(String(vm.message));
     }
 
-    // The field's <input> plus a "min-max unit, default" line under it, all
-    // generated from its table row so the browser enforces the same
-    // min/max/step as parseConfigField() and the page can't state a range
-    // or default the firmware doesn't use. A coarse step without
-    // a min used to make the browser count steps from the stored value
-    // (stored 51, step 5: typing 60 was refused).
-    String inputTag(const ConfigField &f, const SystemConfig &cfg)
+    // The setting's <input> plus a "min-max unit - default" line under it,
+    // so the browser enforces the same range as set() and the page can't
+    // state a range or default the firmware doesn't use. Always with a min:
+    // without one the browser counts steps from the stored value (stored
+    // 51, step 5: typing 60 was refused).
+    String inputTag(const SettingBase &s)
     {
-        return String("<div class=\"field\"><input type=\"number\" name=\"") + f.key + "\" step=\"" + f.step +
-               "\" min=\"" + formatNumber(f, f.min) + "\" max=\"" + formatNumber(f, f.max) +
-               "\" value=\"" + formatNumber(f, configFieldValue(cfg, f)) + "\"><span class=\"range\">" +
-               formatNumber(f, f.min) + "&ndash;" + formatNumber(f, f.max) + " " + f.unit +
-               " &middot; default " + formatNumber(f, f.def) + "</span></div>";
+        return String("<div class=\"field\"><input type=\"number\" name=\"") + s.key() + "\" step=\"" + s.step() +
+               "\" min=\"" + formatNumber(s, s.min()) + "\" max=\"" + formatNumber(s, s.max()) +
+               "\" value=\"" + formatNumber(s, s.value()) + "\"><span class=\"range\">" +
+               formatNumber(s, s.min()) + "&ndash;" + formatNumber(s, s.max()) + " " + s.unit() +
+               " &middot; default " + formatNumber(s, s.def()) + "</span></div>";
     }
 }
 
@@ -208,40 +200,41 @@ void WebDashboard::loadConfig(SystemConfig &configOut)
     // or canTask exist, so there is no concurrent reader yet.
     _prefs.begin("bms-bridge", false);
 
-    // Read from NVS or set defaults (kConfigFields in SystemConfig.h). A
-    // stored value outside its row's range (NaN from corrupted flash, or one
-    // saved before #61 such as a spread threshold that wrapped to 65476) is
-    // replaced by the default and logged, instead of running with it:
-    // several of these (bmsTimeout, spread) switch a safety mechanism off.
-    // Integers are read at full width and range-checked before narrowing.
-    for (const ConfigField &f : kConfigFields)
+    // Each setting starts at its default. A stored value is only taken
+    // if the setting's set() accepts it; one outside its range (NaN from
+    // corrupted flash, or one saved before #61 such as a spread threshold
+    // that wrapped to 65476) keeps the default and is logged, instead of
+    // running with it - several of these (bmsTimeout, spread) would switch
+    // a safety mechanism off. NVS integers are read at full width, so the
+    // range check happens before anything is narrowed.
+    for (SettingBase *s : _cfg->all())
     {
+        s->reset();
+        if (!_prefs.isKey(s->key()))
+            continue;
         double v;
-        switch (f.kind)
+        switch (s->kind())
         {
-        case ConfigField::KIND_INT:
-            v = _prefs.getInt(f.key, (int)f.def);
+        case SettingBase::KIND_INT:
+            v = _prefs.getInt(s->key(), (int)s->def());
             break;
-        case ConfigField::KIND_UINT16:
-            v = _prefs.getUInt(f.key, (uint32_t)f.def);
+        case SettingBase::KIND_UINT16:
+            v = _prefs.getUInt(s->key(), (uint32_t)s->def());
             break;
         default:
-            v = _prefs.getFloat(f.key, f.def);
+            v = _prefs.getFloat(s->key(), (float)s->def());
             break;
         }
-        if (!storeConfigField(*_cfg, f, v))
-        {
-            storeConfigField(*_cfg, f, f.def);
+        if (!s->set(v))
             debugLog("[CFG] Stored %s (%s) is outside %s-%s %s - using the default %s\n",
-                     f.label, String(v, 3).c_str(), formatNumber(f, f.min).c_str(),
-                     formatNumber(f, f.max).c_str(), f.unit, formatNumber(f, f.def).c_str());
-        }
+                     s->label(), String(v, 3).c_str(), formatNumber(*s, s->min()).c_str(),
+                     formatNumber(*s, s->max()).c_str(), s->unit(), formatNumber(*s, s->def()).c_str());
     }
 
     _prefs.end();
 
-    // #56: every field is in range now (see above); what can still fail
-    // are the rules relating two fields. Logged only - never blocks boot,
+    // #56: every setting is in range now (set() saw to that); what can
+    // still fail are the rules relating two settings. Logged only - never blocks boot,
     // and there's no single safe default to fall back to for an ordering.
     SystemConfig::ValidationResult validation = SystemConfig::validate(*_cfg);
     forEachViolation(validation, [this](const String &msg)
@@ -258,40 +251,40 @@ void WebDashboard::saveConfig(AsyncWebServerRequest *request)
     // async_tcp task, so *_cfg can't change between the copy and the
     // publish, and reading it here without the lock races no writer. The
     // NVS write (flash erase/write, tens of ms) also runs after the lock is
-    // released (#21). `present[]` (parallel to kConfigFields) remembers
-    // which fields were in the request, so only those are written to NVS.
-    bool present[kNumConfigFields] = {false};
+    // released (#21). `present[]` (parallel to all()) remembers which
+    // settings were in the request, so only those are written to NVS.
+    bool present[SystemConfig::kNumSettings] = {false};
 
     SystemConfig copy = *_cfg;
+    std::array<SettingBase *, SystemConfig::kNumSettings> settings = copy.all();
     std::vector<String> errors;
 
-    // Only fields present in the request are parsed and later written to
-    // NVS; everything else keeps its value from *_cfg.
-    for (size_t i = 0; i < kNumConfigFields; i++)
+    // Only settings present in the request are parsed (Setting::parse()
+    // range-checks through set()) and later written to NVS; everything
+    // else keeps its value from *_cfg.
+    for (size_t i = 0; i < settings.size(); i++)
     {
-        const ConfigField &f = kConfigFields[i];
-        if (!request->hasParam(f.key))
+        SettingBase &s = *settings[i];
+        if (!request->hasParam(s.key()))
             continue;
         present[i] = true;
 
-        const String &val = request->getParam(f.key)->value();
-        switch (parseConfigField(copy, f, val.c_str()))
+        switch (s.parse(request->getParam(s.key())->value().c_str()))
         {
         case PARSE_OK:
             break;
         case PARSE_NOT_A_NUMBER:
-            errors.push_back(String(f.label) + " is not a valid number.");
+            errors.push_back(String(s.label()) + " is not a valid number.");
             break;
         case PARSE_OUT_OF_RANGE:
-            errors.push_back(rangeMessage(f));
+            errors.push_back(rangeMessage(s));
             break;
         }
     }
 
-    // #53/#55: the rules relating two fields (each field's own range was
-    // checked while parsing). Only once every field parsed: otherwise the
-    // copy still holds the old value of a rejected field, and a rule about
-    // it would describe a config nobody submitted.
+    // #53/#55: the rules relating two settings. Only once every setting
+    // parsed: otherwise the copy still holds the old value of a rejected
+    // one, and a rule about it would describe a config nobody submitted.
     if (errors.empty())
     {
         SystemConfig::ValidationResult validation = SystemConfig::validate(copy);
@@ -323,23 +316,21 @@ void WebDashboard::saveConfig(AsyncWebServerRequest *request)
     xSemaphoreGive(dataMutex);
 
     _prefs.begin("bms-bridge", false);
-    for (size_t i = 0; i < kNumConfigFields; i++)
+    for (size_t i = 0; i < settings.size(); i++)
     {
         if (!present[i])
             continue;
-
-        const ConfigField &f = kConfigFields[i];
-        const uint8_t *member = reinterpret_cast<const uint8_t *>(&copy) + f.offset;
-        switch (f.kind)
+        const SettingBase &s = *settings[i];
+        switch (s.kind())
         {
-        case ConfigField::KIND_FLOAT:
-            _prefs.putFloat(f.key, *reinterpret_cast<const float *>(member));
+        case SettingBase::KIND_FLOAT:
+            _prefs.putFloat(s.key(), (float)s.value());
             break;
-        case ConfigField::KIND_INT:
-            _prefs.putInt(f.key, *reinterpret_cast<const int *>(member));
+        case SettingBase::KIND_INT:
+            _prefs.putInt(s.key(), (int)s.value());
             break;
-        case ConfigField::KIND_UINT16:
-            _prefs.putUInt(f.key, *reinterpret_cast<const uint16_t *>(member));
+        case SettingBase::KIND_UINT16:
+            _prefs.putUInt(s.key(), (uint32_t)s.value());
             break;
         }
     }
@@ -410,11 +401,11 @@ void WebDashboard::setupRoutes()
                {
         String h = String(config_html);
         // Each setting's label and <input> (value, min, max, step, range
-        // line) come from its kConfigFields row, via !!LABEL_<key>!! and
+        // line) come from the Setting itself, via !!LABEL_<key>!! and
         // !!IN_<key>!!.
-        for (const ConfigField &f : kConfigFields) {
-            h.replace(String("!!LABEL_") + f.key + "!!", f.label);
-            h.replace(String("!!IN_") + f.key + "!!", inputTag(f, *_cfg));
+        for (const SettingBase *s : static_cast<const SystemConfig *>(_cfg)->all()) {
+            h.replace(String("!!LABEL_") + s->key() + "!!", s->label());
+            h.replace(String("!!IN_") + s->key() + "!!", inputTag(*s));
         }
         request->send(200, "text/html", h); });
 

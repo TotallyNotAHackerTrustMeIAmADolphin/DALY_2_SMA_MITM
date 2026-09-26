@@ -1,13 +1,11 @@
 #pragma once
 
-// Pure SMA/Victron CAN frame encode/decode + bus-off retry timing (#45):
-// no Arduino/FreeRTOS dependency, so this header compiles and runs under
-// `pio test -e native` (see test/test_smaframes). SMA_CAN owns the actual
-// twai_transmit()/twai_receive()/twai_driver_uninstall()/begin() driver
-// calls and the debug-logging callback; it calls the functions below to
-// decide what bytes to send, what a received frame means, and whether a
-// bus-off recovery retry is due. Extracted from src/SMA_CAN.cpp - the
-// byte-level behaviour here is unchanged, only where it lives moved.
+// Pure SMA/Victron CAN frame encode/decode + bus-off retry timing: no
+// Arduino/FreeRTOS dependency, so this header compiles and runs under
+// `pio test -e native` (test/test_smaframes). SMA_CAN owns the actual
+// twai_transmit()/twai_receive()/begin() driver calls and the debug-logging
+// callback; it calls the functions below to decide what bytes to send,
+// what a received frame means, and whether a bus-off retry is due.
 
 #include <stdint.h>
 #include <cmath>
@@ -76,11 +74,8 @@ namespace SMAFrames
 
         void add(uint32_t id, uint8_t dlc, const uint8_t *src)
         {
-            // Defensive bounds check (#45 review): today's only caller,
-            // encodeStatus(), never emits more than kMaxFrames, but this
-            // array had no other guard against a future frame type pushing
-            // it past 6 - silently drop rather than write out of bounds on
-            // this safety-critical CAN path.
+            // Defensive bounds check: silently drop rather than write out
+            // of bounds on this safety-critical CAN path.
             if (count >= kMaxFrames)
                 return;
             CanFrame &f = frames[count++];
@@ -92,15 +87,11 @@ namespace SMAFrames
     };
 
     // Encodes one sendStatus() call's worth of frames from an SMATxData
-    // snapshot, byte-for-byte identical to the pre-#45 sendStatus():
-    //   0x351 (8B): CVL/CCL/DCL/DVL (x10, little-endian). DVL is 0 while
-    //               isResetting - see the comment at the DVL bytes.
-    //   0x355 (4B): SOC (x1; maintenance sends kMaintSocSentinel instead
-    //               of the real SOC) + SOH = 100.
-    //   0x356 (6B): pack voltage (x100), pack current (x10), pack temp -
-    //               all little-endian.
-    //   0x359 (8B): all zero except kMaintFlag in byte 0 when
-    //               maintenanceActive.
+    // snapshot: 0x351 (8B) CVL/CCL/DCL/DVL x10 little-endian (DVL is 0
+    // while isResetting - see the comment at the DVL bytes); 0x355 (4B) SOC
+    // x1 (kMaintSocSentinel while maintenanceActive) + SOH=100; 0x356 (6B)
+    // pack voltage x100, pack current x10, pack temp, all little-endian;
+    // 0x359 (8B) all zero except kMaintFlag in byte 0 when maintenanceActive.
     // tickerIn/tickerOut thread the caller's _ticker35E counter through:
     // when it reaches kHeartbeatEvery it resets to 0 and the 0x35E/0x35F
     // frames are added; every other call just increments it.
@@ -115,12 +106,9 @@ namespace SMAFrames
         frame[3] = (data.ccl >> 8) & 0xFF;
         frame[4] = data.dcl & 0xFF;
         frame[5] = (data.dcl >> 8) & 0xFF;
-        // Bytes 6-7 are the discharge voltage limit (#63). They used to
-        // carry a status byte (0xC0 normal, 0x70 maintenance) with byte 7
-        // zero, which an inverter reading DVL sees as 19.2 V / 11.2 V on a
-        // 48 V pack. The cluster reset (isResetting) still sends 0x0000 for
-        // its 5.5 s hold: that is the only thing the reset button changes
-        // on the wire, so it stays byte-for-byte what it was.
+        // Bytes 6-7 are the discharge voltage limit (DVL). The cluster
+        // reset (isResetting) sends 0x0000 here for its 5.5 s hold - the
+        // only thing the reset button changes on the wire.
         uint16_t dvl = data.isResetting ? 0 : data.dvl;
         frame[6] = dvl & 0xFF;
         frame[7] = (dvl >> 8) & 0xFF;
@@ -165,9 +153,7 @@ namespace SMAFrames
 
     // Decoded update produced by a single received frame. hasChargeMode/
     // hasGridPresent tell the caller which fields (if any) this frame
-    // updated - a frame is either a 0x305 mode frame or a 0x300 grid-status
-    // frame, never both, but both flags are exposed independently so a
-    // caller never has to guess which one fired.
+    // updated - never both, since a frame is either 0x305 or 0x300.
     struct RxUpdate
     {
         bool hasChargeMode = false;
@@ -176,14 +162,10 @@ namespace SMAFrames
         bool gridPresent = false;
     };
 
-    // Decodes one received CAN frame. Returns true iff out was populated
-    // (id/dlc matched a known frame); false leaves out untouched by the
-    // caller's contract (out is reset to defaults on every call regardless).
-    //   0x305 byte0: SMA charge-mode byte -> 1=Bulk, 2=Absorption, 3=Float,
-    //                4=Equalize, anything else "Unknown" (#104: it used to
-    //                fall through to "Equalize", so 0 or garbage showed as
-    //                an equalize charge on the dashboard).
-    //   0x300 byte0 bit0: grid-present flag.
+    // Decodes one received CAN frame; returns true iff id/dlc matched a
+    // known frame (out is reset to defaults either way). 0x305 byte0: SMA
+    // charge-mode byte -> 1=Bulk, 2=Absorption, 3=Float, 4=Equalize, else
+    // "Unknown". 0x300 byte0 bit0: grid-present flag.
     inline const char *chargeModeName(uint8_t mode)
     {
         switch (mode)
@@ -225,10 +207,9 @@ namespace SMAFrames
 
     // Bus-off recovery retry decision (checkBusHealth()'s _wasBusOff /
     // _recoveryTimer logic): retries only once wasBusOff is true and more
-    // than kBusRecoveryBackoffMs (strictly greater than) have elapsed since recoveryTimer
-    // was last set. nowMillis/recoveryTimer are raw millis() values - an
-    // unsigned subtraction, so a millis() wraparound (~49 days uptime)
-    // behaves the same as it did before this extraction.
+    // than kBusRecoveryBackoffMs (strictly greater than) have elapsed since
+    // recoveryTimer was last set. Unsigned subtraction keeps this correct
+    // across a millis() wraparound (~49 days uptime).
     inline bool shouldRetryBusRecovery(unsigned long nowMillis, bool wasBusOff, unsigned long recoveryTimer)
     {
         if (!wasBusOff)

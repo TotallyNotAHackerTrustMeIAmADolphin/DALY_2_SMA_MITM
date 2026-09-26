@@ -9,10 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Some toolchains' <float.h> doesn't define this C99/C++11 addition (kept
-// as a fallback, not because either build here is known to lack it -
-// verified present on both the native host and the ESP32 (xtensa) toolchain
-// this project builds with).
+// Fallback for toolchains whose <float.h> lacks this C99/C++11 addition.
 #ifndef FLT_DECIMAL_DIG
 #define FLT_DECIMAL_DIG 9
 #endif
@@ -124,40 +121,23 @@ private:
     Kind kind_;
 };
 
-// Formats v (one of s's own value/min/max/def) at full precision for the
-// post-save "[CFG] <label>: <old> -> <new> <unit>" change log - deliberately
-// NOT the setting's display decimals (formatNumber() in WebDashboard.cpp
-// rounds to those, e.g. 0 for an amps field, so 250 -> 252.5 would print as
-// "253" and a tiny real change could print as unchanged). An integer kind
-// prints as a plain integer.
+// Formats v (one of s's own value/min/max/def) at full round-trip precision
+// for the post-save "[CFG] <label>: <old> -> <new> <unit>" change log -
+// deliberately NOT the setting's display decimals, which would round a
+// tiny real change to print as unchanged. An integer kind prints as a
+// plain integer.
 //
 // A float kind prints the shortest FIXED-FORM (non-exponent) %g precision
 // that round-trips v's binary32 value exactly, up to FLT_DECIMAL_DIG (9)
-// significant digits, falling back to exponent form only for a value below
-// 1e-4 where %g can't avoid it. Don't simplify this to a plain "first
-// precision that round-trips" search - that's not the same thing, and was
-// this function's first, wrong version (using 7 significant digits, which
-// isn't enough: (float)500.0 != (float)500.00003, yet both print "500"
-// with %.7g, so a real change could still log as "X -> X"). Even fixed at
-// 9, a bare first-round-trip search still isn't right: %g itself switches
-// to exponential form whenever its decimal exponent X is >= the precision P
-// (not just for genuinely tiny/huge values) - so at low precision, a whole
-// number like 250 or 1000 round-trips exactly as "2.5e+02"/"1e+03" before
-// precision ever reaches the point where %g would print it in fixed form.
-// Settings only run up to a few thousand, so once precision is high enough
-// to cover the integer part, %g stops using exponential and stays that way
-// (adding more digits only appends past the decimal point) - the search
-// below keeps going past the first round-trip while the candidate is still
-// exponential, and prefers the first later precision whose round-trip no
-// longer is, falling back to the very first round-trip only if no
-// fixed-form one exists at precision <= 9 (a value small enough that %g's
-// X < -4 rule makes exponential form unavoidable, e.g. an amps setting's
-// 0.00005 -> "5e-05" - a correct, if unusual-looking, round-trip, left
-// as-is). Ordinary values still print short: 250 -> "250",
-// 252.0625 -> "252.0625", 3.5499999 (stored 3.55f) -> "3.55". %g itself
-// strips trailing zeros (and a trailing '.'). Pure, snprintf-based, always
-// NUL-terminated; any outSize is safe (snprintf truncates), 24 bytes holds
-// every output this function produces.
+// significant digits. %g switches to exponential form once its decimal
+// exponent reaches the precision, so a whole number like 250 round-trips
+// exactly in exponential form ("2.5e+02") before precision is high enough
+// for %g to print it fixed - the search below keeps going past the first
+// round-trip while the candidate is exponential, and only falls back to
+// that first round-trip if no fixed-form one exists by precision 9 (a
+// value small enough that %g's exponent-form rule is unavoidable, e.g.
+// 0.00005 -> "5e-05"). Pure, snprintf-based, always NUL-terminated; 24
+// bytes holds every output this function produces.
 inline void formatSettingValue(const SettingBase &s, double v, char *out, size_t outSize)
 {
     if (s.kind() != SettingBase::KIND_FLOAT)
@@ -239,11 +219,10 @@ public:
         value_ = static_cast<const Setting<T> &>(o).value_;
     }
 
-    // Copy-constructing is fine (a SystemConfig copy copies each member
-    // from the same member). Assigning is not: the implicit operator=
-    // would also copy key/label/range, so `cfg.cvStartTaper =
-    // cfg.cvMaxCharge` would turn one setting into another (NVS key "cmv")
-    // and skip set(). Use set(), or assign whole SystemConfigs.
+    // Assigning is refused: the implicit operator= would also copy
+    // key/label/range, so `cfg.cvStartTaper = cfg.cvMaxCharge` would turn
+    // one setting into another and skip set(). Use set() instead, or
+    // assign whole SystemConfigs (copy-constructing a Setting is fine).
     Setting(const Setting &) = default;
     Setting &operator=(const Setting &) = delete;
 
@@ -261,11 +240,11 @@ private:
     T def_;
 };
 
-// NVS-persisted settings (loaded/saved by WebDashboard). Each member is a
-// Setting: its NVS key, label, unit, min, max, default, display decimals
-// and HTML step are declared right here, and set() enforces the range.
-// Kept free of Arduino/FreeRTOS includes so the glideslope math and the
-// native tests can use it. The ranges are sanity limits against typos and
+// NVS-persisted settings (loaded/saved by WebDashboard), kept free of
+// Arduino/FreeRTOS includes so the glideslope math and native tests can use
+// it. Each member is a Setting: its NVS key, label, unit, min, max,
+// default, display decimals and HTML step are declared right here, and
+// set() enforces the range. Ranges are sanity limits against typos and
 // rolled-over values, not tuning advice.
 struct SystemConfig
 {
@@ -301,9 +280,8 @@ struct SystemConfig
     static constexpr size_t kNumSettings = 17;
 
     // Every setting, in /config page order - for NVS load/save, /save
-    // parsing and the page. A new member must be added here too:
-    // test_systemconfig checks that all() covers every byte of
-    // SystemConfig, so a member missing from the list fails the tests.
+    // parsing and the page. A new member must be added here too: a member
+    // missing from the list fails test_systemconfig.
     std::array<SettingBase *, kNumSettings> all() { return list<SettingBase>(*this); }
     std::array<const SettingBase *, kNumSettings> all() const { return list<const SettingBase>(*this); }
 
@@ -360,9 +338,7 @@ struct SystemConfig
     }
 
     // Bit i set iff before.all()[i]->value() != after.all()[i]->value() -
-    // which settings actually changed across a /save, for WebDashboard's
-    // post-save "[CFG] <label>: <old> -> <new> <unit>" log lines. Pure and
-    // tested in test/test_systemconfig/.
+    // for WebDashboard's post-save "[CFG] <label>: <old> -> <new>" lines.
     static uint32_t changedMask(const SystemConfig &before, const SystemConfig &after)
     {
         static_assert(kNumSettings <= 32, "changedMask() needs a wider return type");

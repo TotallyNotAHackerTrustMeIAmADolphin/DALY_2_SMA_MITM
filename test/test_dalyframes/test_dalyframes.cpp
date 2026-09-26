@@ -457,6 +457,38 @@ static void test_frame_assembler_checksum_failed_flag(void)
     TEST_ASSERT_TRUE(sawFailureFlag);
 }
 
+static void test_frame_assembler_corrupted_frame_with_embedded_start_byte_reports_once(void)
+{
+    // A real cell-voltage payload can itself contain 0xA5 (3493 mV =
+    // 0x0DA5). A checksum failure on this window must not be re-reported
+    // for every rescanned sub-window that also fails.
+    uint8_t data[8] = {1, 0x0D, 0xA5, 0x0D, 0x20, 0x0D, 0x2A, 0};
+    uint8_t frame[13];
+    buildFrame(0x95, data, frame);
+    frame[12] += 1; // corrupt checksum
+
+    DalyFrames::FrameAssembler fa;
+    uint8_t out[13];
+    int failures = 0;
+    for (int i = 0; i < 13; i++)
+    {
+        fa.feed(frame[i], out);
+        if (fa.checksumFailedOnLastFeed())
+            failures++;
+    }
+    // 6 more bytes complete the rescanned sub-window the embedded 0xA5
+    // started; whether or not it also fails checksum, it must not add a
+    // second reported failure.
+    uint8_t tail[6] = {0, 0, 0, 0, 0, 0};
+    for (int i = 0; i < 6; i++)
+    {
+        fa.feed(tail[i], out);
+        if (fa.checksumFailedOnLastFeed())
+            failures++;
+    }
+    TEST_ASSERT_EQUAL_INT(1, failures);
+}
+
 static void test_frame_assembler_reset_clears_partial_state(void)
 {
     uint8_t data[8] = {1, 2, 3, 4, 5, 6, 7, 8};
@@ -697,6 +729,7 @@ int main(int, char **)
     RUN_TEST(test_frame_assembler_back_to_back_frames);
     RUN_TEST(test_frame_assembler_false_start_mid_garbage_finds_real_frame);
     RUN_TEST(test_frame_assembler_checksum_failed_flag);
+    RUN_TEST(test_frame_assembler_corrupted_frame_with_embedded_start_byte_reports_once);
     RUN_TEST(test_frame_assembler_reset_clears_partial_state);
     RUN_TEST(test_collector_16_cells_exact_mv_values);
     RUN_TEST(test_collector_partial_last_frame_ignores_padding);

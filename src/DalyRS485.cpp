@@ -5,9 +5,6 @@
 
 namespace
 {
-    // Named timing/retry constants (#103) - bare literals before this,
-    // scattered across sendCommand()/receiveSingleFrame()/readCellVoltages().
-    // Values unchanged; only naming them here.
     constexpr unsigned long kUartBaud = 9600;
     constexpr unsigned long kPowerOnSettleMs = 50;    // begin(): let RS485/CAN transceiver power settle
     constexpr unsigned long kStopBitSettleMs = 2;     // sendCommand(): let the stop bit leave the pin
@@ -21,9 +18,7 @@ DalyRS485::DalyRS485(HardwareSerial &serial)
     : _serial(&serial), _debugCb(nullptr) {}
 
 // Defined out-of-class (required for a non-constexpr reference static data
-// member): binds to the single table owned by DalyFrames::kAlarmBitNames()
-// (#30). See the declaration in DalyRS485.h for why this stays a static
-// member instead of just pointing callers at DalyFrames directly.
+// member): binds to the single table owned by DalyFrames::kAlarmBitNames().
 const char *const (&DalyRS485::kAlarmBitNames)[7][8] = DalyFrames::kAlarmBitNames();
 
 void DalyRS485::debugLog(const char *format, ...)
@@ -102,8 +97,7 @@ bool DalyRS485::receiveFrame(DalyFrames::Cmd expected, uint8_t payload[DalyFrame
                     return true;
                 }
                 // A checksum-valid frame for a different command: not ours,
-                // no bytes lost - keep waiting for `expected` (matches the
-                // pre-#101 receiveSingleFrame()/readCellVoltages() behaviour).
+                // no bytes lost - keep waiting for `expected`.
             }
             else if (logChecksumFailures && _frameAssembler.checksumFailedOnLastFeed())
             {
@@ -156,8 +150,7 @@ bool DalyRS485::readCellVoltages(uint8_t expectedCells, std::vector<float> &cell
         _frameAssembler.reset();
         sendCommand(DalyFrames::CellVoltages); // send the command EXACTLY ONCE
 
-        // Sit quietly and catch all the frames as the BMS streams them out
-        // - one receiveFrame() call per frame (#101), all sharing the same
+        // One receiveFrame() call per frame, all sharing the same
         // kCellVoltageWindowMs budget off `start`.
         unsigned long start = millis();
         while (millis() - start < kCellVoltageWindowMs && !collector.complete())
@@ -174,14 +167,11 @@ bool DalyRS485::readCellVoltages(uint8_t expectedCells, std::vector<float> &cell
             for (int i = 0; i < expectedCells; i++)
                 cellVoltages[i] = mv[i] / 1000.0f;
 
-            // All frames parsed cleanly on the wire (checksums passed), but a
-            // checksum can still pass on a garbled value. bmsTask seeds its
-            // whole moving-average window from the first successful read, so
-            // one implausible cell here would get full weight for an entire
-            // smoothing window. Reject the whole read - same as a missed
-            // frame - if any cell falls outside a physically plausible
-            // LiFePO4 range; the caller's stale-data fail-safe then drops
-            // limits to 0A instead of trusting the value.
+            // A checksum can still pass on a garbled value, and bmsTask
+            // seeds its whole moving-average window from the first
+            // successful read - so reject the whole read, same as a missed
+            // frame, if any cell falls outside a plausible LiFePO4 range;
+            // the stale-data fail-safe then drops limits to 0A.
             int badIndex;
             if (!DalyFrames::cellVoltagesPlausible(cellVoltages.data(), expectedCells, badIndex))
             {
@@ -217,8 +207,6 @@ bool DalyRS485::readMosfetStatus(DalyMosfetStatus &status)
     if (!query(DalyFrames::MosfetStatus, data, kSingleFrameTimeoutMs))
         return false;
 
-    // See DalyFrames::parseMosfetStatus() for the 0x93 byte layout this
-    // rejects on and its provenance/caveats.
     if (!DalyFrames::parseMosfetStatus(data, status))
     {
         debugLog("[DALY-LIB] 0x93 MOSFET bytes out of expected range (%d,%d). Ignoring frame.\n", data[1], data[2]);
@@ -234,7 +222,5 @@ bool DalyRS485::readAlarmStatus(DalyAlarmStatus &status)
     if (!query(DalyFrames::AlarmStatus, data, kSingleFrameTimeoutMs))
         return false;
 
-    // See DalyFrames::parseAlarmStatus() for the 0x98 byte layout this
-    // decodes and its provenance/caveats.
     return DalyFrames::parseAlarmStatus(data, status);
 }

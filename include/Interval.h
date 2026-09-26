@@ -2,11 +2,10 @@
 
 #include <stdint.h>
 
-// A periodic millis() timer (#82): due(now) is true, and restarts the
-// period, once more than periodMs has passed since the last time it fired.
-// Strictly greater than, like the hand-rolled `now - last > period` checks
-// it replaces; the first call fires once now > periodMs after boot.
-// Unsigned subtraction keeps it correct across the ~49-day millis() wrap.
+// A periodic millis() timer: due(now) is true, and restarts the period,
+// once more than periodMs has passed since the last time it fired (the
+// first call fires once now > periodMs after boot). Unsigned subtraction
+// keeps it correct across the ~49-day millis() wrap.
 struct Interval
 {
     uint32_t periodMs;

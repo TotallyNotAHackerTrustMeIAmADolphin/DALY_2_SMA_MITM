@@ -6,9 +6,8 @@
 
 typedef void (*SMADebugCallback)(const char *msg);
 
-// SMATxData is SMAFrames::SMATxData under its old name (#45) - same pattern
-// as DalyRS485.h re-exposing DalyFrames.h's structs, so existing callers
-// (main.cpp) are unchanged.
+// SMATxData is SMAFrames::SMATxData under its old name, same pattern as
+// DalyRS485.h re-exposing DalyFrames.h's structs.
 using SMATxData = SMAFrames::SMATxData;
 
 class SMA_CAN
@@ -16,7 +15,6 @@ class SMA_CAN
 public:
     SMA_CAN();
 
-    // --> ADDED sePin HERE <--
     bool begin(gpio_num_t txPin, gpio_num_t rxPin, gpio_num_t sePin);
 
     void setDebugCallback(SMADebugCallback cb);
@@ -35,7 +33,7 @@ private:
     unsigned long _recoveryTimer;
     gpio_num_t _txPin;
     gpio_num_t _rxPin;
-    gpio_num_t _sePin; // Added
+    gpio_num_t _sePin;
 
     void debugLog(const char *format, ...) __attribute__((format(printf, 2, 3)));
     bool startDriver();

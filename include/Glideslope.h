@@ -112,38 +112,29 @@ namespace Glideslope
         return toDeciAmps(fmaxf(maxA * factor, floorA));
     }
 
-    // Charge current limit. bmsFresh=false (comms timeout, or no BMS data
-    // yet) forces 0A as a fail-safe, checked before anything else.
+    // Charge current limit. bmsFresh=false forces 0A (fail-safe), checked
+    // first. Hard cutoff/gate use rawMaxV (the latest single BMS read) so a
+    // fast per-cell spike trips them immediately, not ~48s later once the
+    // moving average catches up; the taper between cvStartTaper and
+    // cvHighAlarmGate keeps using smoothedMaxV so the CCL doesn't jitter on
+    // per-read noise - see CLAUDE.md's Glideslope section (#9) for the full
+    // rationale and root cause this fixed. Once smoothedMaxV reaches the
+    // gate, the taper can't give back more than trickle even if rawMaxV
+    // has since dropped below it - intentional, not a bug.
     //
-    // Two different cell-voltage inputs, by design (#9): the hard cutoff
-    // (cvMaxCharge -> 0A) and the alarm gate (cvHighAlarmGate -> trickle)
-    // use rawMaxV, the latest single BMS read - a fast per-cell spike (e.g.
-    // a weak cell's internal resistance under a sudden current step) must
-    // trip these immediately, not ~48s later once bmsTask's moving average
-    // catches up. The taper between cvStartTaper and cvHighAlarmGate keeps
-    // using smoothedMaxV so the CCL doesn't jitter with normal per-read
-    // noise. One consequence: if smoothedMaxV is already at/above the gate
-    // while rawMaxV has since dropped back below it, the taper's slope
-    // clamp still yields trickle (never more than trickle once the gate has
-    // been reached on the smoothed value) - that's intentional, not a bug.
-    //
-    // spreadMv (#24) is the raw max-min cell spread in mV: a weak cell's IR
-    // drop scales with current, not voltage/SOC, so it derates the taper
-    // and full-current results via spreadFactor() - multiplicatively,
-    // clamped back up to trickleA, same as the "never below trickle" clamp
-    // already used for the taper's slope target. Never applied to the hard
-    // 0A/gate-trickle branches above (those are the fail-safes; the weak
-    // cell's own voltage already gates them) or in maintenance mode.
+    // spreadMv (#24) derates the taper/full-current result via
+    // spreadFactor(), clamped back up to trickleA; never applied to the
+    // hard 0A/gate-trickle branches (already gated by the weak cell's own
+    // voltage) or in maintenance mode.
     inline uint16_t calculateCCL(const SystemConfig &cfg, float smoothedMaxV, float rawMaxV, uint16_t spreadMv, bool bmsFresh, bool maintenanceActive)
     {
         if (!bmsFresh)
             return 0;
 
-        // A NaN voltage (e.g. a corrupted BMS read) or a NaN threshold (e.g.
-        // a corrupted NVS float) makes every comparison below false, which
-        // would otherwise fall through to the final `return maxChargeA` -
-        // full current instead of the fail-safe 0A. A NaN current setpoint
-        // would make round(NaN) -> uint16_t undefined. Catch both explicitly.
+        // NaN (corrupted BMS read, NVS float, or current setpoint) fails
+        // every comparison below, which would otherwise fall through to
+        // full current instead of 0A; round(NaN)->uint16_t is also
+        // undefined. Catch explicitly.
         if (isnan(smoothedMaxV) || isnan(rawMaxV) || isnan(cfg.cvMaxCharge) || isnan(cfg.cvHighAlarmGate) || isnan(cfg.cvStartTaper) ||
             isnan(cfg.maxChargeA) || isnan(cfg.trickleA) || isnan(cfg.maintAmps))
             return 0;
@@ -173,9 +164,7 @@ namespace Glideslope
         if (!bmsFresh)
             return 0;
 
-        // See the matching check in calculateCCL(): NaN fails every
-        // comparison below, which would otherwise fall through to the
-        // final `return maxDischargeA` instead of the fail-safe 0A.
+        // See the matching check in calculateCCL().
         if (isnan(smoothedMinV) || isnan(rawMinV) || isnan(cfg.cvMinDischarge) || isnan(cfg.cvLowAlarmGate) || isnan(cfg.cvStartDTaper) ||
             isnan(cfg.maxDischargeA) || isnan(cfg.limpDischargeA))
             return 0;

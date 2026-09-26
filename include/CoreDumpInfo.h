@@ -1,6 +1,6 @@
 #pragma once
 
-// The stored core dump's headline (#91), in plain types so the JSON for
+// The stored core dump's headline, in plain types so the JSON for
 // /api/coredump/summary can be built and tested natively. Diagnostics::
 // readCoreDump() fills it from ESP-IDF; the boot log and the web route both
 // use that one reader.

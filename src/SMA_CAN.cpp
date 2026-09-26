@@ -4,10 +4,9 @@
 
 namespace
 {
-    // Both TWAI queues. TX: one encodeStatus() call is at most 6 frames.
-    constexpr uint32_t kTwaiQueueLen = 10;
-    // Frames drained per readMessages() call (every ~50 ms), so a flooded
-    // bus can't starve canTask's status TX; the rest wait in the queue.
+    constexpr uint32_t kTwaiQueueLen = 10; // both TWAI queues
+    // Frames drained per readMessages() call, so a flooded bus can't
+    // starve canTask's status TX; the rest wait in the queue.
     constexpr int kRxBatchMax = 10;
 }
 
@@ -37,7 +36,6 @@ bool SMA_CAN::begin(gpio_num_t txPin, gpio_num_t rxPin, gpio_num_t sePin)
     _rxPin = rxPin;
     _sePin = sePin;
 
-    // CRITICAL FIX: Wake up the CAN Transmitter!
     if (_sePin != GPIO_NUM_NC)
     {
         pinMode(_sePin, OUTPUT);
@@ -45,8 +43,7 @@ bool SMA_CAN::begin(gpio_num_t txPin, gpio_num_t rxPin, gpio_num_t sePin)
     }
 
     // A failed boot start is retried by checkBusHealth() like a bus-off
-    // recovery (#64) - the SMA must not be left without frames until the
-    // next reboot.
+    // recovery - the SMA must not be left without frames until reboot.
     bool ok = startDriver();
     if (!ok)
         markDriverDown();
@@ -55,7 +52,6 @@ bool SMA_CAN::begin(gpio_num_t txPin, gpio_num_t rxPin, gpio_num_t sePin)
 
 bool SMA_CAN::startDriver()
 {
-    // Set back to NORMAL mode!
     twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(_txPin, _rxPin, TWAI_MODE_NORMAL);
     g_config.tx_queue_len = kTwaiQueueLen;
     g_config.rx_queue_len = kTwaiQueueLen;
@@ -69,14 +65,12 @@ bool SMA_CAN::startDriver()
         if (twai_start() == ESP_OK)
             ok = true;
         else
-            // Installed but not started: uninstall, or every later
-            // twai_driver_install() fails with ESP_ERR_INVALID_STATE and
-            // recovery can never succeed (#64).
+            // Installed but not started: uninstall, or every later install
+            // fails with ESP_ERR_INVALID_STATE and recovery never succeeds.
             twai_driver_uninstall();
     }
 
-    // Edge-triggered: a driver that keeps failing is retried every second,
-    // one failure line per streak is enough.
+    // Edge-triggered: one failure line per retry streak is enough.
     if (ok)
         debugLog("[CAN] TWAI Driver installed and running at 500kbps.\n");
     else if (!_startFailed)
@@ -167,8 +161,8 @@ void SMA_CAN::readMessages(DashboardData &dashboardOut)
     twai_message_t in_msg;
     int msgCount = 0;
 
-    // Count first: checked after twai_receive(), the 11th frame was
-    // dequeued and then dropped unread (#65).
+    // Count first, so the 11th frame isn't dequeued and then dropped
+    // unread once the batch limit is hit.
     while (msgCount < kRxBatchMax && twai_receive(&in_msg, 0) == ESP_OK)
     {
         msgCount++;

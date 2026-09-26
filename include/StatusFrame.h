@@ -1,6 +1,6 @@
 #pragma once
 
-// The status-frame decision logic (#29), kept free of Arduino/FreeRTOS so
+// The status-frame decision logic, kept free of Arduino/FreeRTOS so
 // test/test_statusframe runs this code natively. canTask is I/O only: under
 // dataMutex it builds a Snapshot (snapshotFrom), calls decide() and writes
 // the write-back fields; outside the lock it sends Decision::values and
@@ -28,10 +28,9 @@ namespace StatusFrame
         bool ready() const { return haveBasicInfo && haveCellData; }
     };
 
-    // Dashboard buttons, written by handleUIAction() on the web task and
-    // read/written back by canTask, both under dataMutex, so the reset flag
-    // and its hold start are always seen together. resetHoldStartMs == 0
-    // means requested but not yet armed (see detail::advanceResetHold).
+    // Dashboard buttons, written by handleUIAction() and read/written back
+    // by canTask, both under dataMutex. resetHoldStartMs == 0 means
+    // requested but not yet armed (see detail::advanceResetHold).
     struct UiCommands
     {
         bool manualMaintForce = false;
@@ -101,12 +100,11 @@ namespace StatusFrame
         return snap;
     }
 
-    // Persistent between ticks; owned by canTask as a local (replaces the
-    // function-local `framesEnabled` and the `static` flags that used to
-    // live inside canTask's SMA-TX block). The reset hold itself is NOT
-    // here - handleUIAction() (a different task) writes resetHoldStartTime/
-    // isResetting directly, so those stay in the shared globals; decide()
-    // only reads/updates them via Snapshot in and Decision out.
+    // Persistent between ticks; owned by canTask as a local. The reset hold
+    // itself is NOT here - handleUIAction() (a different task) writes
+    // resetHoldStartTime/isResetting directly, so those stay in the shared
+    // globals; decide() only reads/updates them via Snapshot in and
+    // Decision out.
     struct ControlState
     {
         bool autoMaint = false;
@@ -148,17 +146,16 @@ namespace StatusFrame
         } events;
     };
 
-    constexpr uint32_t kResetHoldMs = 5500;     // cluster reset: DVL 0 this long
-    constexpr uint16_t kMaintCvlDeciV = 560;    // 56.0 V absorption target in maintenance
-    constexpr int kDerateEndHysteresisMv = 10;  // "derating ended" needs spread this far below start
+    constexpr uint32_t kResetHoldMs = 5500;    // cluster reset: DVL 0 this long
+    constexpr uint16_t kMaintCvlDeciV = 560;   // 56.0 V absorption target in maintenance
+    constexpr int kDerateEndHysteresisMv = 10; // "derating ended" needs spread this far below start
 
     namespace detail
     {
-        // Advances the reset hold. Measured from the first frame actually
-        // sent with the reset (DVL 0, #63), not from the click:
-        // handleUIAction() arms it with resetHoldStartMs = 0, so a request
-        // made while no frames go out still gets its full hold on the bus
-        // once frames start. Returns true on the tick the hold ends.
+        // Advances the reset hold, measured from the first frame actually
+        // sent with the reset (DVL 0), not from the click, so a request
+        // made while no frames go out still gets its full hold once frames
+        // start. Returns true on the tick the hold ends.
         inline bool advanceResetHold(bool &resetting, uint32_t &holdStartMs, uint32_t nowMs)
         {
             if (!resetting)
@@ -173,12 +170,10 @@ namespace StatusFrame
             return false;
         }
 
-        // Auto-maintenance hysteresis on the smoothed MINIMUM cell voltage
-        // (#12): starts as soon as any one weak cell sags below
-        // cvMaintStart, not the pack average, which under discharge stays
-        // well above it while one cell hits the floor. Smoothed, not raw:
-        // maintenance is a slow decision and must not chatter on per-read
-        // noise.
+        // Auto-maintenance hysteresis on the smoothed MINIMUM cell voltage,
+        // not the pack average, so it starts as soon as any one weak cell
+        // sags below cvMaintStart. Smoothed, not raw: a slow decision that
+        // must not chatter on per-read noise.
         inline void updateAutoMaint(bool &autoMaint, float minCellSmoothedV, const SystemConfig &cfg)
         {
             if (!autoMaint && minCellSmoothedV > 0 && minCellSmoothedV < cfg.cvMaintStart)
@@ -230,10 +225,9 @@ namespace StatusFrame
             st.wasFresh = fresh;
         }
 
-        // Edge-triggered spread derating events (#24), with hysteresis on
-        // the "ended" side so it doesn't chatter at the boundary: ended only
-        // once the factor is back at 1.0 AND the spread is at least
-        // kDerateEndHysteresisMv below spreadStartMv.
+        // Edge-triggered spread derating events; "ended" needs the factor
+        // back at 1.0 AND the spread kDerateEndHysteresisMv below
+        // spreadStartMv, so it doesn't chatter at the boundary.
         inline void trackDerating(ControlState &st, float derateFactor, uint16_t spreadMv,
                                   const SystemConfig &cfg, bool &started, bool &ended)
         {
@@ -260,10 +254,8 @@ namespace StatusFrame
         d.resetHoldStartMs = s.resetHoldStartMs;
 
         // Send nothing until the BMS has delivered basic info AND cell
-        // voltages once - there are no real values before that, and the SMA
-        // already rides through a few seconds of CAN silence on every
-        // reboot, which is better than made-up SOC/voltage/limits going
-        // out. ControlState and the reset hold are left untouched.
+        // voltages once - no made-up SOC/voltage/limits ever go out.
+        // ControlState and the reset hold are left untouched.
         if (!(s.haveBasicInfo && s.haveCellData))
             return d;
 

@@ -3,15 +3,14 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
-// Scoped FreeRTOS mutex take/give (#76): takes the mutex with a timeout in
-// the constructor and gives it back in the destructor, but only if the take
+// Scoped FreeRTOS mutex take/give: takes the mutex with a timeout in the
+// constructor and gives it back in the destructor, but only if the take
 // succeeded - so no exit path can leak the lock or give one it never had.
 //
 //   if (MutexLock lock{dataMutex, kSomeTimeout}) { ...guarded work... }
 //
-// Keep the guarded scope short and never call netLog() inside it: netLog
-// takes netOutMutex, and the logging style here is "decide under the lock,
-// log after it".
+// Keep the scope short: copy under the lock, log after it (other tasks
+// wait on it with 10-20 ms timeouts).
 class MutexLock
 {
 public:

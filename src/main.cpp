@@ -21,16 +21,14 @@
 
 static_assert(kPackCells <= DalyFrames::kMaxCollectorCells, "DalyRS485 can't collect every cell of the pack");
 
-// Bring in your Wi-Fi credentials AND network config (static IP, gateway,
-// subnet, DNS) - all of it lives in this one gitignored file now, so a
-// public checkout never reveals your home network layout. See
-// secrets_example.h for the template.
+// Wi-Fi credentials AND network config (static IP, gateway, subnet, DNS) -
+// all in this one gitignored file, so a public checkout never reveals your
+// home network layout. See secrets_example.h for the template.
 #include "secrets.h"
 
-// Single source of truth for the local time zone - used both by setup()'s
-// early setenv("TZ", ...) (before NTP has run) and setupNetwork()'s
-// configTzTime() (which drives the actual NTP sync), so the two can't drift
-// apart.
+// Single source of truth for the local time zone, used by both setup()'s
+// early setenv("TZ", ...) and setupNetwork()'s configTzTime(), so the two
+// can't drift apart.
 constexpr const char *kTimeZone = "CET-1CEST,M3.5.0,M10.5.0/3";
 
 // --- GLOBAL INSTANCES ---
@@ -43,10 +41,9 @@ DashboardData currentData;
 SemaphoreHandle_t dataMutex;
 
 // Serializes netLog()'s SSE log channel and the SSE telemetry push, since
-// netLog runs from bmsTask, canTask, loop() and the web server's task.
-// AsyncEventSource locks internally since ESPAsyncWebServer 3.x; keeping it
-// behind the same mutex also stops log lines from interleaving. Innermost
-// lock: never take another one while holding it.
+// netLog runs from bmsTask, canTask, loop() and the web server's task, and
+// keeps log lines from interleaving. Innermost lock: never take another
+// one while holding it.
 SemaphoreHandle_t netOutMutex;
 // Set once WiFi and the web server are up. Before that, netLog() only
 // writes to Serial and the SD card.
@@ -148,8 +145,8 @@ void handleUIAction(const char *action)
     if (MutexLock lock{dataMutex, kUiLockTimeout})
     {
       // 0 = "not armed yet": canTask starts the hold from the first status
-      // frame it actually sends with the reset (DVL 0, #63), so a request
-      // made while the BMS is still silent isn't consumed by the wait.
+      // frame it actually sends with the reset (DVL 0), so a request made
+      // while the BMS is still silent isn't consumed by the wait.
       uiCommands.resetHoldStartMs = 0;
       uiCommands.resetRequested = true;
       applied = true;
@@ -173,8 +170,7 @@ constexpr uint32_t kConfirmCheckPeriodMs = 1000;   // OTA confirm, while it can 
 
 // A BMS reading bmsTask couldn't store because dataMutex was busy is lost,
 // and enough of them in a row let the data go stale (0 A). Logged
-// edge-triggered: once when drops start, once with the total when a store
-// succeeds again. Call note() outside the lock.
+// edge-triggered: once when drops start, once with the total on recovery.
 struct LockDropLog
 {
   bool dropping = false;
@@ -208,7 +204,7 @@ constexpr uint32_t kBmsCycleIdleMs = 2000;
 // Everything bmsTask keeps between cycles.
 struct BmsPollState
 {
-  // Edge-triggered SOC/MOSFET/alarm decisions (#44, include/BmsEvents.h).
+  // Edge-triggered SOC/MOSFET/alarm decisions - see include/BmsEvents.h.
   BmsEvents::State events;
   LockDropLog lockDrops;
   // cfg.vSamples as last read under the lock; kept if the lock is briefly
@@ -286,9 +282,8 @@ static void pollCells(BmsPollState &st)
 }
 
 // The BMS's own hardware protection state. Edge-triggered logging only, so
-// a stuck-on alarm doesn't spam the log queue; this is what lets an SMA
-// "battery voltage out of range" fault be lined up against the BMS's own
-// MOSFET/alarm timeline to the second.
+// a stuck-on alarm doesn't spam the log queue, but still lines up an SMA
+// fault against the BMS's own MOSFET/alarm timeline to the second.
 static void pollMosfet(BmsPollState &st)
 {
   DalyMosfetStatus mos;
@@ -365,12 +360,10 @@ void bmsTask(void *pvParameters)
 
 // --- WIFI EVENT LOGGING ---
 // Arduino's auto-reconnect handles the actual recovery silently; this just
-// makes drops/recoveries visible in the SD log, edge-triggered like the
-// Daly MOSFET/alarm logging (one line per transition, not per retry while
-// the AP is unreachable). The actual state machine (#69) lives in
-// include/WifiEvents.h, pure and natively testable; main.cpp is a thin
-// adapter: map ESP events into the latch, and turn drain() results into the
-// same [WIFI] lines as before.
+// makes drops/recoveries visible in the SD log, edge-triggered (one line
+// per transition, not per retry while the AP is unreachable). The state
+// machine lives in include/WifiEvents.h, pure and natively testable;
+// main.cpp maps ESP events into the latch and logs whatever drain() flags.
 WifiEvents::WifiEventLatch wifiEvents;
 
 // WifiEvents::reasonName() spells these out as literals.
@@ -534,9 +527,8 @@ void canTask(void *pvParameters)
         applyDecision(dec);
       }
 
-      // Transmit outside the lock (#74): dec is this task's own copy, and
-      // inverter is only ever touched by canTask. A failed take leaves
-      // dec.sendFrames false, so nothing is sent this tick.
+      // Transmit outside the lock: dec is this task's own copy, and
+      // inverter is only ever touched by canTask.
       if (dec.sendFrames)
         inverter.sendStatus(dec.values);
 
@@ -552,14 +544,10 @@ void setup()
   Serial.begin(115200);
   Serial.println("\nStarting LilyGO T-CAN485 BMS Bridge...");
 
-  // Set the time zone before anything can log a timestamp. The ESP32 RTC
+  // Set the time zone before anything can log a timestamp: the ESP32 RTC
   // keeps its time across a software/panic reset, so time(nullptr) can
-  // already be valid (tm_year > 70) right after such a reboot, well before
-  // setupNetwork()'s configTzTime() runs - without this, those early lines
-  // (e.g. the CAN driver start) were stamped in UTC while everything after
-  // WiFi connects used local time, so the same boot showed two different
-  // clocks depending on how far setup() had gotten. configTzTime() (called
-  // later, once WiFi is up) still does the actual NTP sync.
+  // already be valid well before setupNetwork()'s configTzTime() (which
+  // still does the actual NTP sync) runs.
   setenv("TZ", kTimeZone, 1);
   tzset();
 
@@ -576,22 +564,18 @@ void setup()
   netLog(sdOk ? "[SYS] SD card logging initialized.\n"
               : "[SYS] SD card logging unavailable (no card or mount failed).\n");
 
-  // After SDLogger::begin(), not before: loadConfig() logs any
-  // "[CFG] Loaded config fails validation" lines (#56), and SDLogger drops
-  // events until it is initialised - on the headless device the SD .log is
-  // the only place those would be seen.
+  // After SDLogger::begin(), not before: loadConfig()'s "[CFG] Loaded
+  // config fails validation" lines would otherwise be dropped, since the
+  // headless device's SD .log is the only place they'd be seen.
   webUI.loadConfig(cfg);
 
-  // Reset reason / rollback state / core dump summary, right after the SD
-  // log exists to receive it - not deferred to loop(), so a reset within
-  // the first 60s of a cold boot (or a crash loop) still gets logged.
+  // Right after the SD log exists to receive it, not deferred to loop(),
+  // so a reset within the first 60s of a cold boot still gets logged.
   Diagnostics::setDebugCallback(netLog);
   Diagnostics::logBootDiagnostics();
 
-
-  // BMS and CAN come up before the network: setupNetwork() can block for up
-  // to ~15s (WiFi + NTP), and the SMA should get frames as soon as real BMS
-  // data exists (canTask gates on that), not after WiFi.
+  // BMS and CAN come up before the network: setupNetwork() can block up to
+  // ~15s, and the SMA should get frames as soon as real BMS data exists.
   bms.setDebugCallback(libraryLogger);
   bms.begin(RS485_RX, RS485_TX, RS485_SE, RS485_EN, PIN_5V_EN);
 
@@ -634,10 +618,8 @@ void loop()
     }
   }
 
-  // Diagnostics::logBootDiagnostics() itself now runs from setup(), right
-  // after SD init, so even a reset in the first 60s (or a crash loop) gets
-  // logged. This just gets one logHealth() sample in once the clock/BMS
-  // data settle, ahead of the regular 10-minute cadence below.
+  // One logHealth() sample once the clock/BMS data settle, ahead of the
+  // regular 10-minute cadence below.
   static bool firstHealthDone = false;
   if (!firstHealthDone && (time(nullptr) > 1000000000L || millis() > kFirstHealthDeadlineMs))
   {
@@ -645,20 +627,14 @@ void loop()
     Diagnostics::logHealth();
   }
 
-  // OTA rollback confirm (#75): bmsUp needs dataMutex, which canTask
-  // waits on for only 10-20 ms, so it is gathered only while the check can
-  // still act (after 2 min, until confirmed) and then at most once a
-  // second - not on every ~1 ms loop() pass for the whole uptime. The
-  // one-shot "not confirmed" warning and the rollback cancel live in
-  // Diagnostics::confirmImageIfReady().
+  // bmsUp needs dataMutex, so it's gathered only while the check can still
+  // act (after 2 min, until confirmed) and then at most once a second.
   if (Diagnostics::confirmCheckDue() && confirmCheck.due(millis()))
   {
     bool wifiUp = WiFi.status() == WL_CONNECTED;
     bool bmsUp = false;
     if (MutexLock lock{dataMutex, kLoopLockTimeout})
-      bmsUp = bmsLink.ready();
-    // If the mutex take fails, bmsUp stays false for this pass and the
-    // check is simply retried a second later.
+      bmsUp = bmsLink.ready(); // else bmsUp stays false, retried next second
     Diagnostics::confirmImageIfReady(wifiUp, bmsUp);
   }
 

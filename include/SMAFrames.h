@@ -37,22 +37,22 @@ namespace SMAFrames
     constexpr uint8_t kHeartbeatEvery = 11;
     constexpr unsigned long kBusRecoveryBackoffMs = 1000;
 
-    // Mirrors SMA_CAN.h's SMATxData field-for-field. SMA_CAN.h aliases its
-    // own SMATxData to this one (`using SMATxData = SMAFrames::SMATxData;`)
-    // so existing callers (main.cpp) are unchanged - same pattern as
-    // DalyRS485.h re-exposing DalyFrames.h's structs under their old names.
+    // One status tick's worth of values for encodeStatus(). ccl/dcl in
+    // 0.1 A, cvl/dvl in 0.1 V, packTemp in 0.1 C. Every field defaults, so a
+    // field nobody set goes out as 0, never as stack garbage. SMA_CAN.h
+    // re-exposes it as ::SMATxData.
     struct SMATxData
     {
-        float packVoltage;
-        float packCurrent;
-        int16_t packTemp;
-        float packSOC;
-        uint16_t ccl;
-        uint16_t dcl;
-        uint16_t cvl;
-        uint16_t dvl;
-        bool maintenanceActive;
-        bool isResetting;
+        float packVoltage = 0.0f;
+        float packCurrent = 0.0f;
+        int16_t packTemp = 0;
+        float packSOC = 0.0f;
+        uint16_t ccl = 0;
+        uint16_t dcl = 0;
+        uint16_t cvl = 0;
+        uint16_t dvl = 0;
+        bool maintenanceActive = false;
+        bool isResetting = false;
     };
 
     // One CAN frame to transmit: identifier, valid byte count, and an

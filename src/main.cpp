@@ -51,25 +51,10 @@ volatile bool netReady = false;
 // Per-cell moving-average smoother (bmsTask only) - see CellSmoother.h.
 CellSmoother cellSmoother;
 
-// Written by handleUIAction() on the web server's task, read/written by
-// canTask (via StatusFrame::Snapshot/Decision - see include/StatusFrame.h)
-// - guarded by dataMutex like the rest of the cross-task state, so canTask
-// always sees resetHoldStartTime and isResetting set together (previously
-// unlocked, isResetting could be observed with a stale/zero
-// resetHoldStartTime and cancel a fresh reset instantly). autoMaint used to
-// live here too; it's now inside canTask's local StatusFrame::ControlState,
-// since nothing outside canTask reads or writes it.
-unsigned long resetHoldStartTime = 0;
-bool manualMaintForce = false;
-bool isResetting = false;
-
-// BMS data freshness - guarded by dataMutex. Nothing is sent to the SMA
-// until both have succeeded once (see canTask), and StatusFrame::decide()
-// (include/StatusFrame.h) treats "never read" as stale (Glideslope::isFresh).
-bool haveBasicInfo = false;
-bool haveCellData = false;
-unsigned long lastBasicInfoRead = 0;
-unsigned long lastCellRead = 0;
+// Cross-task control state, guarded by dataMutex like currentData/cfg -
+// see StatusFrame::BmsLink / UiCommands for who writes what.
+StatusFrame::BmsLink bmsLink;
+StatusFrame::UiCommands uiCommands;
 
 // --- CENTRAL LOGGING ---
 // printf format checking: a Setting<T> (or any wrong type) passed for a
@@ -132,8 +117,8 @@ void handleUIAction(const char *action)
     bool newState = false;
     if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(50)) == pdTRUE)
     {
-      manualMaintForce = !manualMaintForce;
-      newState = manualMaintForce;
+      uiCommands.manualMaintForce = !uiCommands.manualMaintForce;
+      newState = uiCommands.manualMaintForce;
       xSemaphoreGive(dataMutex);
       netLog("[USER] Manual Force Charge: %s\n", newState ? "ON" : "OFF");
     }
@@ -149,8 +134,8 @@ void handleUIAction(const char *action)
       // 0 = "not armed yet": canTask starts the 5.5 s hold from the first
       // status frame it actually sends with the reset (DVL 0, #63), so a request
       // made while the BMS is still silent isn't consumed by the wait.
-      resetHoldStartTime = 0;
-      isResetting = true;
+      uiCommands.resetHoldStartMs = 0;
+      uiCommands.resetRequested = true;
       xSemaphoreGive(dataMutex);
       netLog("[USER] Manual Cluster Reset Triggered.\n");
     }
@@ -188,8 +173,8 @@ void bmsTask(void *pvParameters)
         currentData.packVoltage = info.packVoltage;
         currentData.packCurrent = info.packCurrent;
         currentData.packSOC = info.packSOC;
-        lastBasicInfoRead = millis();
-        haveBasicInfo = true;
+        bmsLink.lastBasicInfoMs = millis();
+        bmsLink.haveBasicInfo = true;
         xSemaphoreGive(dataMutex);
       }
     }
@@ -229,8 +214,8 @@ void bmsTask(void *pvParameters)
         // above - drives Glideslope::spreadFactor() in canTask.
         currentData.cellSpreadRawMv = r.rawSpreadMv;
         currentData.cellVoltages.assign(r.smoothedV, r.smoothedV + r.cells);
-        lastCellRead = millis();
-        haveCellData = true;
+        bmsLink.lastCellMs = millis();
+        bmsLink.haveCellData = true;
 
         // Copy for broadcast outside mutex
         broadcastCopy = currentData;
@@ -407,6 +392,43 @@ void setupNetwork()
 }
 
 // --- CORE 1: SMA CAN TASK ---
+// Writes a Decision back into the shared state. Caller holds dataMutex.
+static void applyDecision(const StatusFrame::Decision &dec)
+{
+  // Written back regardless of sendFrames (a no-op copy-back when decide()
+  // didn't touch them).
+  uiCommands.resetRequested = dec.isResetting;
+  uiCommands.resetHoldStartMs = dec.resetHoldStartMs;
+
+  if (dec.sendFrames)
+  {
+    currentData.maintenanceActive = dec.values.maintenanceActive;
+    currentData.forceCharge = dec.values.maintenanceActive;
+    currentData.isResetting = dec.isResetting;
+    currentData.derateFactor = dec.derateFactor;
+    currentData.requestedCurrent = dec.values.ccl / 10.0f;
+  }
+}
+
+// The log lines for whichever one-shot events decide() flagged. Called
+// outside the lock.
+static void logDecisionEvents(const StatusFrame::Decision &dec, unsigned long now)
+{
+  if (dec.events.firstFrames)
+    netLog("[CAN] First BMS data at %lu ms uptime - SMA frames enabled.\n", now);
+  if (dec.events.resetFinished)
+    netLog("[SYS] Recovery cycle finished.\n");
+  if (dec.events.wentStale)
+    netLog("[BMS] Data stale (both reads older than %d s) - CCL/DCL forced to 0 A\n", dec.events.bmsTimeoutS);
+  if (dec.events.freshAgain)
+    netLog("[BMS] Data fresh again - limits restored\n");
+  if (dec.events.deratingStarted)
+    netLog("[BMS] Cell spread %u mV - limits derated to %u %%\n",
+           (unsigned)dec.events.spreadMv, (unsigned)dec.events.deratePercent);
+  if (dec.events.deratingEnded)
+    netLog("[BMS] Cell spread %u mV - derating ended\n", (unsigned)dec.events.spreadMv);
+}
+
 // Runs in its own task rather than loop(), so CAN starts before setup()'s
 // WiFi/NTP wait (up to ~15s) and isn't held up by OTA handling in loop().
 void canTask(void *pvParameters)
@@ -435,78 +457,17 @@ void canTask(void *pvParameters)
       StatusFrame::Decision dec;
 
       if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
-        StatusFrame::Snapshot snap;
-        snap.nowMs = now;
-        snap.haveBasicInfo = haveBasicInfo;
-        snap.haveCellData = haveCellData;
-        snap.lastBasicInfoReadMs = lastBasicInfoRead;
-        snap.lastCellReadMs = lastCellRead;
-        snap.packVoltage = currentData.packVoltage;
-        snap.packCurrent = currentData.packCurrent;
-        snap.packSOC = currentData.packSOC;
-        snap.packTemp = currentData.packTemp;
-        snap.maxCellSmoothedV = currentData.maxCellVoltage;
-        snap.maxCellRawV = currentData.maxCellVoltageRaw;
-        snap.minCellSmoothedV = currentData.minCellVoltage;
-        snap.minCellRawV = currentData.minCellVoltageRaw;
-        snap.cellSpreadMv = currentData.cellSpreadRawMv;
-        snap.manualMaintForce = manualMaintForce;
-        snap.resetRequested = isResetting;
-        snap.resetHoldStartMs = resetHoldStartTime;
-
-        dec = StatusFrame::decide(cfg, snap, ctrl);
-
-        // Written back regardless of sendFrames (a no-op copy-back when
-        // decide() didn't touch them - see its comment).
-        isResetting = dec.isResetting;
-        resetHoldStartTime = dec.resetHoldStartMs;
-
-        if (dec.sendFrames)
-        {
-          currentData.maintenanceActive = dec.maintenanceActive;
-          currentData.forceCharge = dec.values.forceCharge;
-          currentData.isResetting = dec.isResetting;
-          currentData.derateFactor = dec.derateFactor;
-          currentData.requestedCurrent = dec.values.ccl / 10.0f;
-        }
+        dec = StatusFrame::decide(cfg, StatusFrame::snapshotFrom(currentData, bmsLink, uiCommands, now), ctrl);
+        applyDecision(dec);
         xSemaphoreGive(dataMutex);
 
         // Transmit outside the lock (#74): dec is this task's own copy, and
-        // inverter is only ever touched by canTask, so bmsTask/loop()/the
-        // web task don't wait on encodeStatus() and the twai_transmit()s.
+        // inverter is only ever touched by canTask.
         if (dec.sendFrames)
-        {
-          SMATxData tx;
-          tx.packVoltage = dec.values.packVoltage;
-          tx.packCurrent = dec.values.packCurrent;
-          tx.packTemp = dec.values.packTemp;
-          tx.packSOC = dec.values.packSOC;
-          tx.maintenanceActive = dec.values.maintenanceActive;
-          tx.isResetting = dec.values.isResetting;
-          tx.ccl = dec.values.ccl;
-          tx.dcl = dec.values.dcl;
-          tx.cvl = dec.values.cvl;
-          tx.dvl = dec.values.dvl;
-
-          inverter.sendStatus(tx);
-        }
+          inverter.sendStatus(dec.values);
       }
 
-      // Log lines for whichever events decide() flagged, outside the lock -
-      // same wording as before the StatusFrame extraction (#29).
-      if (dec.events.firstFrames)
-        netLog("[CAN] First BMS data at %lu ms uptime - SMA frames enabled.\n", now);
-      if (dec.events.resetFinished)
-        netLog("[SYS] Recovery cycle finished.\n");
-      if (dec.events.wentStale)
-        netLog("[BMS] Data stale (both reads older than %d s) - CCL/DCL forced to 0 A\n", dec.events.bmsTimeoutS);
-      if (dec.events.freshAgain)
-        netLog("[BMS] Data fresh again - limits restored\n");
-      if (dec.events.deratingStarted)
-        netLog("[BMS] Cell spread %u mV - limits derated to %u %%\n",
-               (unsigned)dec.events.spreadMv, (unsigned)dec.events.deratePercent);
-      if (dec.events.deratingEnded)
-        netLog("[BMS] Cell spread %u mV - derating ended\n", (unsigned)dec.events.spreadMv);
+      logDecisionEvents(dec, now);
     }
 
     vTaskDelay(pdMS_TO_TICKS(10));
@@ -592,7 +553,7 @@ void loop()
     lastSdLog = millis();
     if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
       // No placeholder rows before the first real BMS data.
-      if (haveBasicInfo && haveCellData)
+      if (bmsLink.ready())
         SDLogger::logTelemetry(currentData);
       xSemaphoreGive(dataMutex);
     }
@@ -623,7 +584,7 @@ void loop()
     bool bmsUp = false;
     if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(20)) == pdTRUE)
     {
-      bmsUp = haveBasicInfo && haveCellData;
+      bmsUp = bmsLink.ready();
       xSemaphoreGive(dataMutex);
     }
     // If the mutex take fails, bmsUp stays false for this pass and the

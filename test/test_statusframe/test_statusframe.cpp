@@ -86,7 +86,7 @@ static void test_frames_full_limits_once_fresh(void)
 
     TEST_ASSERT_TRUE(d.sendFrames);
     TEST_ASSERT_TRUE(d.fresh);
-    TEST_ASSERT_FALSE(d.maintenanceActive);
+    TEST_ASSERT_FALSE(d.values.maintenanceActive);
     // 3.0V is below cvStartTaper(3.3)/above cvStartDTaper(3.2), spread 0 ->
     // full current both ways, same numbers as test_glideslope's
     // test_ccl_full_below_taper / test_dcl_full_above_taper.
@@ -226,33 +226,33 @@ static void test_auto_maint_starts_below_start_stops_above_stop_no_toggle_betwee
 
     // 3.3V: above both -> off.
     Decision d1 = decide(cfg, freshSnapshot(1000), ctrl); // minCellSmoothedV=3.3
-    TEST_ASSERT_FALSE(d1.maintenanceActive);
+    TEST_ASSERT_FALSE(d1.values.maintenanceActive);
 
     // 3.1V: between start and stop, autoMaint currently off -> stays off
     // (3.1 is not < 3.05).
     Snapshot s2 = freshSnapshot(1250);
     s2.minCellSmoothedV = 3.1f;
     Decision d2 = decide(cfg, s2, ctrl);
-    TEST_ASSERT_FALSE(d2.maintenanceActive);
+    TEST_ASSERT_FALSE(d2.values.maintenanceActive);
 
     // 2.9V: below start(3.05) -> turns on.
     Snapshot s3 = freshSnapshot(1500);
     s3.minCellSmoothedV = 2.9f;
     Decision d3 = decide(cfg, s3, ctrl);
-    TEST_ASSERT_TRUE(d3.maintenanceActive);
+    TEST_ASSERT_TRUE(d3.values.maintenanceActive);
 
     // 3.1V again: between start and stop, autoMaint now on -> hysteresis
     // keeps it on (3.1 is not > 3.2).
     Snapshot s4 = freshSnapshot(1750);
     s4.minCellSmoothedV = 3.1f;
     Decision d4 = decide(cfg, s4, ctrl);
-    TEST_ASSERT_TRUE(d4.maintenanceActive);
+    TEST_ASSERT_TRUE(d4.values.maintenanceActive);
 
     // 3.3V: above stop(3.2) -> turns off.
     Snapshot s5 = freshSnapshot(2000);
     s5.minCellSmoothedV = 3.3f;
     Decision d5 = decide(cfg, s5, ctrl);
-    TEST_ASSERT_FALSE(d5.maintenanceActive);
+    TEST_ASSERT_FALSE(d5.values.maintenanceActive);
 }
 
 // --- #12: trigger on the minimum cell, not the pack average ---
@@ -270,7 +270,7 @@ static void test_auto_maint_starts_on_weak_cell_even_when_pack_average_is_high(v
     s.packVoltage = 49.6f;
     s.minCellSmoothedV = 2.99f;
     Decision d = decide(cfg, s, ctrl);
-    TEST_ASSERT_TRUE(d.maintenanceActive);
+    TEST_ASSERT_TRUE(d.values.maintenanceActive);
     TEST_ASSERT_TRUE(ctrl.autoMaint);
 }
 
@@ -284,20 +284,20 @@ static void test_auto_maint_hysteresis_min_cell_rising_stays_on_until_above_stop
     Snapshot s1 = freshSnapshot(1000);
     s1.minCellSmoothedV = 2.95f;
     Decision d1 = decide(cfg, s1, ctrl);
-    TEST_ASSERT_TRUE(d1.maintenanceActive);
+    TEST_ASSERT_TRUE(d1.values.maintenanceActive);
 
     // 3.1V: between start(3.05) and stop(3.2), autoMaint on -> stays on
     // (3.1 is not > 3.2).
     Snapshot s2 = freshSnapshot(1250);
     s2.minCellSmoothedV = 3.1f;
     Decision d2 = decide(cfg, s2, ctrl);
-    TEST_ASSERT_TRUE(d2.maintenanceActive);
+    TEST_ASSERT_TRUE(d2.values.maintenanceActive);
 
     // 3.25V: above stop(3.2) -> turns off.
     Snapshot s3 = freshSnapshot(1500);
     s3.minCellSmoothedV = 3.25f;
     Decision d3 = decide(cfg, s3, ctrl);
-    TEST_ASSERT_FALSE(d3.maintenanceActive);
+    TEST_ASSERT_FALSE(d3.values.maintenanceActive);
 }
 
 static void test_auto_maint_never_starts_with_zero_min_cell(void)
@@ -309,7 +309,7 @@ static void test_auto_maint_never_starts_with_zero_min_cell(void)
     Snapshot s = freshSnapshot(1000);
     s.minCellSmoothedV = 0.0f;
     Decision d = decide(cfg, s, ctrl);
-    TEST_ASSERT_FALSE(d.maintenanceActive);
+    TEST_ASSERT_FALSE(d.values.maintenanceActive);
     TEST_ASSERT_FALSE(ctrl.autoMaint);
 }
 
@@ -321,8 +321,7 @@ static void test_manual_force_overrides(void)
     Snapshot s = freshSnapshot(1000);
     s.manualMaintForce = true;
     Decision d = decide(cfg, s, ctrl);
-    TEST_ASSERT_TRUE(d.maintenanceActive);
-    TEST_ASSERT_TRUE(d.values.forceCharge);
+    TEST_ASSERT_TRUE(d.values.maintenanceActive);
 }
 
 static void test_maintenance_overrides_cvl_and_current(void)
@@ -332,7 +331,7 @@ static void test_maintenance_overrides_cvl_and_current(void)
     s.manualMaintForce = true;
     Decision d = decide(cfg, s, ctrl);
 
-    TEST_ASSERT_TRUE(d.maintenanceActive);
+    TEST_ASSERT_TRUE(d.values.maintenanceActive);
     // CVL is forced to the fixed 560 (56.0V) maintenance value, not
     // cvMaxCharge(3.5) x 16 x 10 - which happens to also be 560 with this
     // cfg, so this is re-checked with a different cvMaxCharge below.

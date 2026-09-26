@@ -53,14 +53,13 @@ const char index_html[] PROGMEM = R"rawliteral(
 )rawliteral" NAV_BAR R"rawliteral(
 <div class="grid">
   <div class="card"><div>Pack Voltage</div><div id="v" class="value">--</div></div>
-  <div class="card"><div>Req. Current</div><div id="reqI" class="value">--</div></div>
-  <div class="card"><div>Delta (Max-Min)</div><div id="cv" class="value">--</div></div>
+  <div class="card"><div>Charge Limit (CCL)</div><div id="reqI" class="value">--</div></div>
+  <div class="card"><div>Cell Spread</div><div id="spread" class="value">--</div></div>
   <div class="card"><div>Current</div><div id="i" class="value">--</div></div>
   <div class="card"><div>SOC</div><div id="soc" class="value">--</div></div>
   <div class="card"><div>SMA Status</div><div id="smastat" class="value">--</div></div>
   <div class="card"><div>Max Cell V</div><div id="maxCellV" class="value">--</div></div>
   <div class="card"><div>Min Cell V</div><div id="minCellV" class="value">--</div></div>
-  <div class="card"><div>Cell Spread</div><div id="spread" class="value">--</div></div>
 </div>
 
 <div class="cells-container">
@@ -100,7 +99,6 @@ const char index_html[] PROGMEM = R"rawliteral(
     var obj = JSON.parse(e.data);
     document.getElementById('v').innerHTML = obj.v.toFixed(2) + " V";
     document.getElementById('reqI').innerHTML = obj.reqI.toFixed(1) + " A";
-    document.getElementById('cv').innerHTML = ((obj.maxC - obj.minC) * 1000).toFixed(0) + " mV";
     // maxC/minC are the smoothed (~48s moving average) values; maxCellRaw/
     // minCellRaw are the latest single BMS read - see #9 (the hard cutoff
     // and alarm gate act on the raw value, not this smoothed one).

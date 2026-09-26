@@ -171,13 +171,13 @@ const char config_html[] PROGMEM = R"rawliteral(
   <form action="/save" method="GET">
     <h2>Charging Profile (16S)</h2>
     <div class="row"><div class="text-group"><strong>Max Charge Amps</strong><span class="desc">Global bulk charging limit.</span></div>
-      <input type="number" name="ca" step="5" value="!!VAL_CA!!"></div>
+      <input type="number" name="ca" step="any" min="0" value="!!VAL_CA!!"></div>
     <div class="row"><div class="text-group"><strong>Start Taper Vpc</strong><span class="desc">Current begins to slow at this cell voltage.</span></div>
       <input type="number" name="cvt" step="0.001" value="!!VAL_VT!!"></div>
     <div class="row"><div class="text-group"><strong>Target Trickle Vpc</strong><span class="desc">Voltage where balancing floor is reached.</span></div>
       <input type="number" name="cag" step="0.001" value="!!VAL_AG!!"></div>
     <div class="row"><div class="text-group"><strong>Trickle Amps</strong><span class="desc">Constant current floor for balancing.</span></div>
-      <input type="number" name="ta" step="0.5" value="!!VAL_TA!!"></div>
+      <input type="number" name="ta" step="any" min="0" value="!!VAL_TA!!"></div>
     <div class="row"><div class="text-group"><strong>Max Charge Vpc</strong><span class="desc">Absolute cell safety cutoff (Hard Floor).</span><span class="hint">ceiling 3.550 (Daly OV 3.65 minus 100 mV margin, #8)</span></div>
       <input type="number" name="cmv" step="0.001" value="!!VAL_MV!!"></div>
 
@@ -187,17 +187,17 @@ const char config_html[] PROGMEM = R"rawliteral(
     <div class="row"><div class="text-group"><strong>Maint. Stop Vpc</strong><span class="desc">Stop grid charge when cells reach this.</span></div>
       <input type="number" name="cmpp" step="0.001" value="!!VAL_MPP!!"></div>
     <div class="row"><div class="text-group"><strong>Maintenance Amps</strong><span class="desc">Constant current drawn from grid.</span></div>
-      <input type="number" name="mam" step="1" value="!!VAL_MAM!!"></div>
+      <input type="number" name="mam" step="any" min="0" value="!!VAL_MAM!!"></div>
 
     <h2>Discharging Profile</h2>
     <div class="row"><div class="text-group"><strong>Max Discharge Amps</strong><span class="desc">Peak household load limit.</span></div>
-      <input type="number" name="da" step="10" value="!!VAL_DA!!"></div>
+      <input type="number" name="da" step="any" min="0" value="!!VAL_DA!!"></div>
     <div class="row"><div class="text-group"><strong>Start Taper Vpc (D)</strong><span class="desc">Voltage where discharge current is restricted.</span></div>
       <input type="number" name="cdvt" step="0.001" value="!!VAL_DVT!!"></div>
     <div class="row"><div class="text-group"><strong>Target Limp Vpc</strong><span class="desc">Entry point for keeping-alive mode.</span></div>
       <input type="number" name="clag" step="0.001" value="!!VAL_LAG!!"></div>
     <div class="row"><div class="text-group"><strong>Limp Amps</strong><span class="desc">Minimum keeping-alive current floor.</span></div>
-      <input type="number" name="ld_v2" step="1" value="!!VAL_LIMP!!"></div>
+      <input type="number" name="ld_v2" step="any" min="0" value="!!VAL_LIMP!!"></div>
     <div class="row"><div class="text-group"><strong>Min Discharge Vpc</strong><span class="desc">Absolute floor to prevent cell reversal.</span></div>
       <input type="number" name="cmdv" step="0.001" value="!!VAL_MDV!!"></div>
 
@@ -209,9 +209,9 @@ const char config_html[] PROGMEM = R"rawliteral(
 
     <h2>Cell Spread Derating (#24)</h2>
     <div class="row"><div class="text-group"><strong>Cell spread: start derating (mV)</strong><span class="desc">Below this spread the current limits are untouched. Above it they are reduced linearly, reaching trickle/limp current at the 'full derating' value below. Spread = highest raw cell voltage minus lowest.</span><span class="hint">default 60, typical 40&ndash;100</span></div>
-      <input type="number" name="sps" step="5" value="!!VAL_SPS!!"></div>
+      <input type="number" name="sps" step="1" min="0" value="!!VAL_SPS!!"></div>
     <div class="row"><div class="text-group"><strong>Cell spread: full derating (mV)</strong><span class="desc">At or above this spread the current limits are held at trickle/limp current, same floor as the voltage alarm gate. Below it, derating eases back off toward the 'start derating' value above. Spread = highest raw cell voltage minus lowest.</span><span class="hint">default 150, typical 120&ndash;200</span></div>
-      <input type="number" name="spm" step="5" value="!!VAL_SPM!!"></div>
+      <input type="number" name="spm" step="1" min="0" value="!!VAL_SPM!!"></div>
 
     <button type="submit" class="save">SAVE & APPLY ALL CHANGES</button>
   </form>

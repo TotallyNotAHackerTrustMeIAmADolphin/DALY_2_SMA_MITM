@@ -73,7 +73,7 @@ const char index_html[] PROGMEM = HTML_HEAD("BMS Bridge Pro") R"rawliteral(
   .cell-max { border-color: #f44336; background: rgba(244, 67, 54, 0.1); }
   .cell-max span { color: #f44336; }
   
-  #console { width: 95%; max-width: 1000px; height: 300px; margin: 15px auto; background: #000; color: #00ff00; font-family: monospace; text-align: left; padding: 15px; overflow-y: scroll; border-radius: 8px; border: 1px solid #444; }
+  #console { box-sizing: border-box; width: 95%; max-width: 1000px; height: 300px; margin: 15px auto; background: #000; color: #00ff00; font-family: monospace; text-align: left; padding: 15px; overflow-y: scroll; border-radius: 8px; border: 1px solid #444; }
 </style></head><body>
 )rawliteral" NAV_BAR R"rawliteral(
 <div class="grid">

@@ -309,6 +309,174 @@ static void test_cell_voltages_plausible_exact_bounds_accepted(void)
     TEST_ASSERT_EQUAL_INT(-1, badIndex);
 }
 
+// --- FrameAssembler (#101) ---
+
+// Feeds every byte of `bytes` into `fa` one at a time; returns the index
+// (into `bytes`) of the byte that completed a frame (writing it into
+// frameOut), or -1 if no frame completed.
+static int feedAll(DalyFrames::FrameAssembler &fa, const uint8_t *bytes, int n, uint8_t frameOut[13])
+{
+    for (int i = 0; i < n; i++)
+    {
+        if (fa.feed(bytes[i], frameOut))
+            return i;
+    }
+    return -1;
+}
+
+static void test_frame_assembler_clean_frame(void)
+{
+    uint8_t data[8] = {0x02, 0x28, 0, 0, 0x75, 0x62, 0x03, 0x57};
+    uint8_t frame[13];
+    buildFrame(0x90, data, frame);
+
+    DalyFrames::FrameAssembler fa;
+    uint8_t out[13];
+    int completedAt = feedAll(fa, frame, 13, out);
+    TEST_ASSERT_EQUAL_INT(12, completedAt);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(frame, out, 13);
+}
+
+static void test_frame_assembler_stray_start_byte_before_real_frame(void)
+{
+    uint8_t data[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    uint8_t frame[13];
+    buildFrame(0x90, data, frame);
+
+    // A lone 0xA5 (no frame follows it) precedes the real frame. The old
+    // byte-sync loops would treat it as frame start and, once the real
+    // frame's first 12 bytes filled the window, fail checksum and throw
+    // the whole window away - never re-trying at the real frame's actual
+    // start. feed() must still find the real frame.
+    uint8_t stream[14];
+    stream[0] = 0xA5;
+    for (int i = 0; i < 13; i++)
+        stream[1 + i] = frame[i];
+
+    DalyFrames::FrameAssembler fa;
+    uint8_t out[13];
+    int completedAt = feedAll(fa, stream, 14, out);
+    TEST_ASSERT_EQUAL_INT(13, completedAt);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(frame, out, 13);
+}
+
+static void test_frame_assembler_bad_checksum_then_good_frame(void)
+{
+    uint8_t data[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    uint8_t badFrame[13];
+    buildFrame(0x90, data, badFrame);
+    badFrame[12] += 1; // corrupt checksum, no 0xA5 hidden inside
+
+    uint8_t goodFrame[13];
+    buildFrame(0x93, data, goodFrame);
+
+    uint8_t stream[26];
+    for (int i = 0; i < 13; i++)
+        stream[i] = badFrame[i];
+    for (int i = 0; i < 13; i++)
+        stream[13 + i] = goodFrame[i];
+
+    DalyFrames::FrameAssembler fa;
+    uint8_t out[13];
+    int completedAt = feedAll(fa, stream, 26, out);
+    TEST_ASSERT_EQUAL_INT(25, completedAt);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(goodFrame, out, 13);
+}
+
+static void test_frame_assembler_back_to_back_frames(void)
+{
+    uint8_t data1[8] = {1, 0x0D, 0x16, 0x0D, 0x20, 0x0D, 0x2A, 0};
+    uint8_t frame1[13];
+    buildFrame(0x95, data1, frame1);
+
+    uint8_t data2[8] = {2, 0x0D, 0x30, 0x0D, 0x3A, 0x0D, 0x44, 0};
+    uint8_t frame2[13];
+    buildFrame(0x95, data2, frame2);
+
+    uint8_t stream[26];
+    for (int i = 0; i < 13; i++)
+        stream[i] = frame1[i];
+    for (int i = 0; i < 13; i++)
+        stream[13 + i] = frame2[i];
+
+    DalyFrames::FrameAssembler fa;
+    uint8_t out[13];
+
+    int firstAt = feedAll(fa, stream, 13, out);
+    TEST_ASSERT_EQUAL_INT(12, firstAt);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(frame1, out, 13);
+
+    int secondAt = feedAll(fa, &stream[13], 13, out);
+    TEST_ASSERT_EQUAL_INT(12, secondAt);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(frame2, out, 13);
+}
+
+static void test_frame_assembler_false_start_mid_garbage_finds_real_frame(void)
+{
+    uint8_t data[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    uint8_t frame[13];
+    buildFrame(0x90, data, frame);
+
+    // A false-start 0xA5 sits a few bytes before the real frame, so the
+    // bad 13-byte window that starts at the false 0xA5 contains the first
+    // few bytes of the real frame. feed() must discard just the leading
+    // byte, rescan, and land back on the real frame's own 0xA5.
+    uint8_t stream[16];
+    stream[0] = 0xA5; // false start
+    stream[1] = 0x11;
+    stream[2] = 0x22;
+    for (int i = 0; i < 13; i++)
+        stream[3 + i] = frame[i];
+
+    DalyFrames::FrameAssembler fa;
+    uint8_t out[13];
+    int completedAt = feedAll(fa, stream, 16, out);
+    TEST_ASSERT_EQUAL_INT(15, completedAt);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(frame, out, 13);
+}
+
+static void test_frame_assembler_checksum_failed_flag(void)
+{
+    uint8_t data[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    uint8_t frame[13];
+    buildFrame(0x90, data, frame);
+    frame[12] += 1;
+
+    DalyFrames::FrameAssembler fa;
+    uint8_t out[13];
+    bool sawFailureFlag = false;
+    for (int i = 0; i < 13; i++)
+    {
+        bool completed = fa.feed(frame[i], out);
+        TEST_ASSERT_FALSE(completed);
+        if (i == 12)
+            sawFailureFlag = fa.checksumFailedOnLastFeed();
+        else
+            TEST_ASSERT_FALSE(fa.checksumFailedOnLastFeed());
+    }
+    TEST_ASSERT_TRUE(sawFailureFlag);
+}
+
+static void test_frame_assembler_reset_clears_partial_state(void)
+{
+    uint8_t data[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+    uint8_t frame[13];
+    buildFrame(0x90, data, frame);
+
+    DalyFrames::FrameAssembler fa;
+    uint8_t out[13];
+    // Feed only the first 5 bytes, then reset - the partial frame must not
+    // bleed into the next read.
+    for (int i = 0; i < 5; i++)
+        TEST_ASSERT_FALSE(fa.feed(frame[i], out));
+
+    fa.reset();
+
+    int completedAt = feedAll(fa, frame, 13, out);
+    TEST_ASSERT_EQUAL_INT(12, completedAt);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(frame, out, 13);
+}
+
 int main(int, char **)
 {
     UNITY_BEGIN();
@@ -335,5 +503,12 @@ int main(int, char **)
     RUN_TEST(test_cell_voltages_plausible_negative_rejected);
     RUN_TEST(test_cell_voltages_plausible_huge_rejected);
     RUN_TEST(test_cell_voltages_plausible_exact_bounds_accepted);
+    RUN_TEST(test_frame_assembler_clean_frame);
+    RUN_TEST(test_frame_assembler_stray_start_byte_before_real_frame);
+    RUN_TEST(test_frame_assembler_bad_checksum_then_good_frame);
+    RUN_TEST(test_frame_assembler_back_to_back_frames);
+    RUN_TEST(test_frame_assembler_false_start_mid_garbage_finds_real_frame);
+    RUN_TEST(test_frame_assembler_checksum_failed_flag);
+    RUN_TEST(test_frame_assembler_reset_clears_partial_state);
     return UNITY_END();
 }

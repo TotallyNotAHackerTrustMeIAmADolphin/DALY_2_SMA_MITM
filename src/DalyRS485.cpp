@@ -84,29 +84,30 @@ void DalyRS485::sendCommand(DalyFrames::Cmd cmd)
     vTaskDelay(pdMS_TO_TICKS(kStopBitSettleMs));
 }
 
-bool DalyRS485::receiveSingleFrame(DalyFrames::Cmd expectedCmd, uint8_t *dataOut, unsigned long timeout)
+bool DalyRS485::receiveFrame(DalyFrames::Cmd expected, uint8_t payload[DalyFrames::kPayloadLen],
+                              unsigned long windowStartMs, unsigned long windowMs, bool logChecksumFailures)
 {
-    unsigned long start = millis();
-    uint8_t buf[DalyFrames::kFrameLen];
-    int idx = 0;
+    uint8_t frame[DalyFrames::kFrameLen];
 
-    while (millis() - start < timeout)
+    while (millis() - windowStartMs < windowMs)
     {
         if (_serial->available())
         {
             uint8_t c = _serial->read();
-            if (idx == 0 && c != DalyFrames::kStartByte)
-                continue;
-
-            buf[idx++] = c;
-            if (idx == DalyFrames::kFrameLen)
+            if (_frameAssembler.feed(c, frame))
             {
-                if (DalyFrames::checksumOk(buf) && buf[2] == static_cast<uint8_t>(expectedCmd))
+                if (frame[2] == static_cast<uint8_t>(expected))
                 {
-                    std::memcpy(dataOut, &buf[4], DalyFrames::kPayloadLen);
+                    std::memcpy(payload, &frame[4], DalyFrames::kPayloadLen);
                     return true;
                 }
-                idx = 0;
+                // A checksum-valid frame for a different command: not ours,
+                // no bytes lost - keep waiting for `expected` (matches the
+                // pre-#101 receiveSingleFrame()/readCellVoltages() behaviour).
+            }
+            else if (logChecksumFailures && _frameAssembler.checksumFailedOnLastFeed())
+            {
+                debugLog("[DALY-LIB] Stream checksum failed. Continuing...\n");
             }
         }
         else
@@ -120,8 +121,9 @@ bool DalyRS485::receiveSingleFrame(DalyFrames::Cmd expectedCmd, uint8_t *dataOut
 
 bool DalyRS485::query(DalyFrames::Cmd cmd, uint8_t payload[DalyFrames::kPayloadLen], unsigned long timeoutMs)
 {
+    _frameAssembler.reset();
     sendCommand(cmd);
-    return receiveSingleFrame(cmd, payload, timeoutMs);
+    return receiveFrame(cmd, payload, millis(), timeoutMs, /*logChecksumFailures=*/false);
 }
 
 bool DalyRS485::readBasicInfo(DalyBasicInfo &info)
@@ -151,56 +153,37 @@ bool DalyRS485::readCellVoltages(uint8_t expectedCells, std::vector<float> &cell
         int framesReceivedCount = 0;
         uint8_t framesMask = 0;
         unsigned long start = millis();
+        _frameAssembler.reset();
 
-        uint8_t buf[DalyFrames::kFrameLen];
-        int idx = 0;
-
-        // 2. Sit quietly and catch all 6 frames as the BMS streams them out
+        // 2. Sit quietly and catch all `expectedFrames` frames as the BMS
+        // streams them out - one receiveFrame() call per frame (#101), all
+        // sharing the same kCellVoltageWindowMs budget off `start`, same as
+        // the single byte-sync loop this replaces.
         while (millis() - start < kCellVoltageWindowMs && framesReceivedCount < expectedFrames)
         {
-            if (_serial->available())
-            {
-                uint8_t c = _serial->read();
-                if (idx == 0 && c != DalyFrames::kStartByte)
-                    continue;
+            uint8_t data[DalyFrames::kPayloadLen];
+            if (!receiveFrame(DalyFrames::CellVoltages, data, start, kCellVoltageWindowMs, /*logChecksumFailures=*/true))
+                break; // window elapsed without another frame
 
-                buf[idx++] = c;
-                if (idx == DalyFrames::kFrameLen)
+            uint8_t frameNum;
+            uint16_t mv[3];
+            DalyFrames::parseCellFrame(data, frameNum, mv);
+
+            if (frameNum > 0 && frameNum <= expectedFrames)
+            {
+                // Check if we haven't seen this specific frame yet
+                if (!(framesMask & (1 << frameNum)))
                 {
-                    if (DalyFrames::checksumOk(buf) && buf[2] == static_cast<uint8_t>(DalyFrames::CellVoltages))
-                    {
-                        uint8_t frameNum;
-                        uint16_t mv[3];
-                        DalyFrames::parseCellFrame(&buf[4], frameNum, mv);
+                    framesMask |= (1 << frameNum);
+                    framesReceivedCount++;
 
-                        if (frameNum > 0 && frameNum <= expectedFrames)
-                        {
-                            // Check if we haven't seen this specific frame yet
-                            if (!(framesMask & (1 << frameNum)))
-                            {
-                                framesMask |= (1 << frameNum);
-                                framesReceivedCount++;
-
-                                for (int i = 0; i < 3; i++)
-                                {
-                                    int cellIdx = (frameNum - 1) * 3 + i;
-                                    if (cellIdx < expectedCells)
-                                        cellVoltages[cellIdx] = mv[i] / 1000.0f;
-                                }
-                            }
-                        }
-                    }
-                    else if (!DalyFrames::checksumOk(buf))
+                    for (int i = 0; i < 3; i++)
                     {
-                        debugLog("[DALY-LIB] Stream checksum failed. Continuing...\n");
+                        int cellIdx = (frameNum - 1) * 3 + i;
+                        if (cellIdx < expectedCells)
+                            cellVoltages[cellIdx] = mv[i] / 1000.0f;
                     }
-                    idx = 0; // Reset for the next frame in the stream
                 }
-            }
-            else
-            {
-                // 3. Keep the Web Server flying while we wait for bytes!
-                vTaskDelay(1);
             }
         }
 

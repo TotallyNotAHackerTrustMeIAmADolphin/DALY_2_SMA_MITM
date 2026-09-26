@@ -52,9 +52,26 @@ public:
 private:
     HardwareSerial *_serial;
     DalyDebugCallback _debugCb; // Stores the callback function
+    DalyFrames::FrameAssembler _frameAssembler;
 
     void sendCommand(DalyFrames::Cmd cmd);
-    bool receiveSingleFrame(DalyFrames::Cmd expectedCmd, uint8_t *dataOut, unsigned long timeout);
+
+    // Receives bytes until either a checksum-valid frame for `expected`
+    // completes (payload filled, true returned) or the window
+    // [windowStartMs, windowStartMs + windowMs) elapses (#101). A
+    // checksum-valid frame for a *different* command is a real frame, not
+    // corruption - it's discarded (no bytes lost, _frameAssembler is
+    // already resynced for the next one) and the wait continues; only a
+    // checksum failure optionally logs, via logChecksumFailures, matching
+    // the pre-#101 difference between receiveSingleFrame() (silent) and
+    // readCellVoltages()'s stream loop (logged). windowStartMs/windowMs
+    // are elapsed-based (`millis() - windowStartMs < windowMs`, not an
+    // absolute deadline) so they stay correct across a millis() wrap, and
+    // so a caller collecting several frames can pass the same
+    // windowStartMs/windowMs to repeated calls and share one overall
+    // budget (see readCellVoltages()).
+    bool receiveFrame(DalyFrames::Cmd expected, uint8_t payload[DalyFrames::kPayloadLen],
+                       unsigned long windowStartMs, unsigned long windowMs, bool logChecksumFailures);
 
     // Sends `cmd` and waits up to timeoutMs for its single-frame reply,
     // writing the 8-byte payload into `payload` on success. One attempt,

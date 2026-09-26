@@ -152,6 +152,91 @@ namespace DalyFrames
         out[kFrameLen - 1] = checksum(out);
     }
 
+    // Pure byte-stream framer (#101). Feed it one incoming UART byte at a
+    // time via feed(); it returns true, and fills frameOut, exactly when a
+    // checksum-valid kFrameLen-byte frame completes. It only resyncs on
+    // kStartByte and validates the checksum - it does not look at the
+    // command byte or address, since a legitimate frame for a different
+    // command is complete and correct, just not the one the caller wanted;
+    // DalyRS485::receiveFrame() is the one that decides what to do with an
+    // unwanted-but-valid frame (see its comment).
+    //
+    // On a checksum failure, the old byte-sync loops this replaces
+    // (DalyRS485::receiveSingleFrame(), and the inner loop of
+    // readCellVoltages()) threw away the whole kFrameLen-byte window and
+    // restarted synchronization from the next byte off the wire. A stray
+    // kStartByte anywhere in that window started a false frame and cost
+    // the real frame behind it. feed() instead discards only the leading
+    // byte and rescans the rest of the window for the next kStartByte, so
+    // a real frame that started inside a bad window is still found. This
+    // is a deliberate behaviour change (#101) - the byte lost to a false
+    // sync no longer takes a real frame down with it.
+    class FrameAssembler
+    {
+    public:
+        void reset()
+        {
+            idx_ = 0;
+            checksumFailedOnLastFeed_ = false;
+        }
+
+        bool feed(uint8_t byte, uint8_t frameOut[kFrameLen])
+        {
+            checksumFailedOnLastFeed_ = false;
+
+            if (idx_ == 0 && byte != kStartByte)
+                return false;
+
+            buf_[idx_++] = byte;
+            if (idx_ < kFrameLen)
+                return false;
+
+            if (checksumOk(buf_))
+            {
+                for (int i = 0; i < kFrameLen; i++)
+                    frameOut[i] = buf_[i];
+                idx_ = 0;
+                return true;
+            }
+
+            checksumFailedOnLastFeed_ = true;
+            rescan();
+            return false;
+        }
+
+        // True for exactly one feed() call: the one whose completed
+        // kFrameLen-byte window failed its checksum. Lets a caller log the
+        // same way the pre-#101 readCellVoltages() loop did, without the
+        // assembler itself doing any logging.
+        bool checksumFailedOnLastFeed() const { return checksumFailedOnLastFeed_; }
+
+    private:
+        // A checksum just failed on buf_[0..kFrameLen-1]. Drop buf_[0] (the
+        // byte that started this bad window) and look for the next
+        // kStartByte among buf_[1..kFrameLen-1], sliding it (and whatever
+        // follows it) down to index 0. If none is found the window really
+        // was noise; start clean from the next byte off the wire.
+        void rescan()
+        {
+            for (int i = 1; i < kFrameLen; i++)
+            {
+                if (buf_[i] == kStartByte)
+                {
+                    int remaining = kFrameLen - i;
+                    for (int j = 0; j < remaining; j++)
+                        buf_[j] = buf_[i + j];
+                    idx_ = remaining;
+                    return;
+                }
+            }
+            idx_ = 0;
+        }
+
+        uint8_t buf_[kFrameLen] = {};
+        int idx_ = 0;
+        bool checksumFailedOnLastFeed_ = false;
+    };
+
     // Daly UART "Basic Info" (cmd 0x90) 8-byte payload:
     //   [0..1] pack voltage, 0.1V units
     //   [4..5] pack current, 0.1A units, offset by 30000 (30000 = 0A)

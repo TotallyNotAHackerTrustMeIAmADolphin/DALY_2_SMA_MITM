@@ -150,6 +150,12 @@ void Diagnostics::confirmImageIfReady(bool wifiUp, bool bmsUp)
 {
     static RollbackConfirm::State st;
 
+    // One clock read for both the guard below and decide(): with two reads,
+    // the guard could see exactly kConfirmAfterMs (skip the OTA query) and
+    // decide() one ms later (take the not-warned branch with
+    // imagePendingVerify=false), silently swallowing the one-shot warning.
+    const unsigned long nowMs = millis();
+
     // Only query the OTA partition state when the answer could actually
     // change the outcome: decide() is a no-op once imageConfirmed or before
     // kConfirmAfterMs, and it only consults imagePendingVerify on the
@@ -157,14 +163,14 @@ void Diagnostics::confirmImageIfReady(bool wifiUp, bool bmsUp)
     // else instead of doing it unconditionally on every loop() iteration.
     bool imagePendingVerify = false;
     if (!st.imageConfirmed && !st.unconfirmedWarned && !(wifiUp && bmsUp) &&
-        millis() > RollbackConfirm::kConfirmAfterMs)
+        nowMs > RollbackConfirm::kConfirmAfterMs)
     {
         esp_ota_img_states_t otaState = ESP_OTA_IMG_UNDEFINED;
         esp_ota_get_state_partition(esp_ota_get_running_partition(), &otaState);
         imagePendingVerify = (otaState == ESP_OTA_IMG_PENDING_VERIFY);
     }
 
-    RollbackConfirm::Action action = RollbackConfirm::decide(st, wifiUp, bmsUp, millis(), imagePendingVerify);
+    RollbackConfirm::Action action = RollbackConfirm::decide(st, wifiUp, bmsUp, nowMs, imagePendingVerify);
 
     if (action.confirmNow)
     {

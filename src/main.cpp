@@ -75,9 +75,8 @@ constexpr TickType_t kCanTickLockTimeout = pdMS_TO_TICKS(20);
 constexpr TickType_t kLoopLockTimeout = pdMS_TO_TICKS(20);
 
 // --- CENTRAL LOGGING ---
-// Serial + SSE only - no timestamp, no SD write. Private: netLog() below is
-// the only caller, once it has formatted and timestamped a line. Nothing
-// else may call this directly, or its line skips the SD .log.
+// Serial + SSE only, no timestamp, no SD - netLog() below is the only
+// caller. Nothing else may call this directly, or its line skips the SD log.
 static void netOut(const char *line)
 {
   Serial.print(line);
@@ -97,8 +96,12 @@ void netLog(const char *format, ...)
   char loc_res[256];
   va_list arg;
   va_start(arg, format);
-  vsnprintf(loc_res, sizeof(loc_res), format, arg);
+  int n = vsnprintf(loc_res, sizeof(loc_res), format, arg);
   va_end(arg);
+  // Truncated: force back the trailing '\n' a longer line would have had,
+  // so it can't run onto whatever the next line writes.
+  if (n >= (int)sizeof(loc_res))
+    loc_res[sizeof(loc_res) - 2] = '\n';
 
   struct tm timeinfo;
   bool haveClock = LocalClock::localNow(timeinfo);
@@ -119,13 +122,9 @@ void netLog(const char *format, ...)
   SDLogger::logEvent(loc_res);
 }
 
-// The LogSink (include/LogSink.h) every other module's setDebugCallback is
-// wired to: routes a pre-formatted line through netLog() itself, so it gets
-// the same timestamp, Serial/SSE and SD .log treatment as a line logged
-// directly via netLog(fmt, ...). SDLogger's own sink is the one exception
-// to watch: its writer task must never call this (see the "No netLog()
-// here" comment in SDLogger.cpp) or logEvent()'s queue send would recurse
-// into the very task draining that queue.
+// The LogSink for every module: same timestamp/Serial/SSE/SD path as
+// netLog(). SDLogger's writer task must never call it (it would recurse
+// into its own queue).
 void netLogLine(const char *line) { netLog("%s", line); }
 
 // SSE telemetry push, serialized with netLog's network sinks (netOutMutex).
@@ -138,9 +137,8 @@ void pushTelemetry(const DashboardData &data)
 }
 
 // --- UI EVENT HANDLER ---
-// Returns whether it applied (false = dataMutex busy), which the web route
-// turns into a 200 or 503. Log text is byte-identical to before the switch
-// to UiAction; "toggleMaint"/"resetSMA" here are only that log wording.
+// Returns whether it applied (false = dataMutex busy); the route answers
+// 200/503.
 bool handleUIAction(UiAction action)
 {
   bool applied = false, maintOn = false;

@@ -103,9 +103,9 @@ void Diagnostics::logHealth()
     else
         strlcpy(why, HealthLog::reasonName(d.reason), sizeof(why));
 
-    logf(debugCb, "[DIAG] Health (%s): heap free %u, min %u, max block %u | stack left: %s | WiFi RSSI %s | SD drops: queue %u, lock %u, write %u\n",
-         why, (unsigned)s.freeHeap, (unsigned)s.minFreeHeap, (unsigned)s.maxBlock,
-         stacks, rssi, (unsigned)s.sdDroppedQueueFull, (unsigned)s.sdDroppedLockTimeout, (unsigned)s.sdWriteFailures);
+    logTo(debugCb, "[DIAG] Health (%s): heap free %u, min %u, max block %u | stack left: %s | WiFi RSSI %s | SD drops: queue %u, lock %u, write %u\n",
+          why, (unsigned)s.freeHeap, (unsigned)s.minFreeHeap, (unsigned)s.maxBlock,
+          stacks, rssi, (unsigned)s.sdDroppedQueueFull, (unsigned)s.sdDroppedLockTimeout, (unsigned)s.sdWriteFailures);
 }
 
 // Why did we (re)boot, and what does the last stored core dump say? Called
@@ -115,28 +115,28 @@ void Diagnostics::logHealth()
 void Diagnostics::logBootDiagnostics()
 {
     esp_reset_reason_t reason = esp_reset_reason();
-    logf(debugCb, "[DIAG] Reset reason: %s (%d), core0 %d, core1 %d\n",
-         resetReasonName(reason), (int)reason,
-         (int)rtc_get_reset_reason(0), (int)rtc_get_reset_reason(1));
+    logTo(debugCb, "[DIAG] Reset reason: %s (%d), core0 %d, core1 %d\n",
+          resetReasonName(reason), (int)reason,
+          (int)rtc_get_reset_reason(0), (int)rtc_get_reset_reason(1));
 
     char elfSha[17];
     runningElfSha(elfSha);
     const esp_partition_t *running = esp_ota_get_running_partition();
     esp_ota_img_states_t otaState = ESP_OTA_IMG_UNDEFINED;
     esp_ota_get_state_partition(running, &otaState);
-    logf(debugCb, "[DIAG] Running firmware ELF sha256: %s, partition %s, image state: %s\n",
-         elfSha, running ? running->label : "?", otaStateName(otaState));
+    logTo(debugCb, "[DIAG] Running firmware ELF sha256: %s, partition %s, image state: %s\n",
+          elfSha, running ? running->label : "?", otaStateName(otaState));
 
     const esp_partition_t *bad = esp_ota_get_last_invalid_partition();
     if (bad)
     {
-        logf(debugCb, "[DIAG] ROLLED BACK: partition %s is invalid/aborted - running the previous firmware\n", bad->label);
+        logTo(debugCb, "[DIAG] ROLLED BACK: partition %s is invalid/aborted - running the previous firmware\n", bad->label);
     }
 
     if (otaState == ESP_OTA_IMG_PENDING_VERIFY)
     {
-        logf(debugCb, "[DIAG] Image pending verification: OTA is refused until it is confirmed (needs >= %lu s uptime with WiFi up and BMS data); a reset before that boots the previous firmware.\n",
-             RollbackConfirm::kConfirmAfterMs / 1000);
+        logTo(debugCb, "[DIAG] Image pending verification: OTA is refused until it is confirmed (needs >= %lu s uptime with WiFi up and BMS data); a reset before that boots the previous firmware.\n",
+              RollbackConfirm::kConfirmAfterMs / 1000);
     }
 
     // A dump stays in flash until the next crash overwrites it, so it can be
@@ -148,22 +148,22 @@ void Diagnostics::logBootDiagnostics()
     {
     case CoreDumpInfo::Present:
     {
-        logf(debugCb, "[DIAG] Stored core dump: task '%s', PC 0x%08x, cause %u, vaddr 0x%08x, ELF %s\n",
-             dump.task, (unsigned)dump.pc, (unsigned)dump.cause, (unsigned)dump.vaddr, dump.elfSha);
+        logTo(debugCb, "[DIAG] Stored core dump: task '%s', PC 0x%08x, cause %u, vaddr 0x%08x, ELF %s\n",
+              dump.task, (unsigned)dump.pc, (unsigned)dump.cause, (unsigned)dump.vaddr, dump.elfSha);
 
         char bt[200];
         BoundedWriter w(bt, sizeof(bt));
         for (int i = 0; i < dump.backtraceDepth; i++)
             w.append(" 0x%08x", (unsigned)dump.backtrace[i]);
-        logf(debugCb, "[DIAG] Backtrace%s:%s\n", dump.corrupted ? " (corrupted)" : "", bt);
-        logf(debugCb, "[DIAG] Full dump: GET /api/coredump\n");
+        logTo(debugCb, "[DIAG] Backtrace%s:%s\n", dump.corrupted ? " (corrupted)" : "", bt);
+        logTo(debugCb, "[DIAG] Full dump: GET /api/coredump\n");
         break;
     }
     case CoreDumpInfo::None:
-        logf(debugCb, "[DIAG] No core dump stored.\n");
+        logTo(debugCb, "[DIAG] No core dump stored.\n");
         break;
     case CoreDumpInfo::Unreadable:
-        logf(debugCb, "[DIAG] Core dump present but unreadable (%s).\n", dump.checkName);
+        logTo(debugCb, "[DIAG] Core dump present but unreadable (%s).\n", dump.checkName);
         break;
     }
 }
@@ -241,13 +241,13 @@ void Diagnostics::confirmImageIfReady(bool wifiUp, bool bmsUp)
     if (action.confirmNow)
     {
         esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
-        logf(debugCb, "[SYS] Firmware confirmed after %lus uptime with WiFi up and BMS data flowing (rollback cancelled): %s\n",
-             millis() / 1000, esp_err_to_name(err));
+        logTo(debugCb, "[SYS] Firmware confirmed after %lus uptime with WiFi up and BMS data flowing (rollback cancelled): %s\n",
+              millis() / 1000, esp_err_to_name(err));
     }
     else if (action.logNotConfirmed)
     {
-        logf(debugCb, "[SYS] Firmware NOT confirmed at %lus: %s%s- a reset now boots the previous firmware\n",
-             millis() / 1000, wifiUp ? "" : "WiFi down ", bmsUp ? "" : "no BMS data ");
+        logTo(debugCb, "[SYS] Firmware NOT confirmed at %lus: %s%s- a reset now boots the previous firmware\n",
+              millis() / 1000, wifiUp ? "" : "WiFi down ", bmsUp ? "" : "no BMS data ");
     }
 }
 

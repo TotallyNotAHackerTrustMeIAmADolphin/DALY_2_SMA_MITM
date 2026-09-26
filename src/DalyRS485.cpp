@@ -81,7 +81,7 @@ bool DalyRS485::receiveFrame(DalyFrames::Cmd expected, uint8_t payload[DalyFrame
             }
             else if (logChecksumFailures && _frameAssembler.checksumFailedOnLastFeed())
             {
-                logf(_debugCb, "[DALY-LIB] Stream checksum failed. Continuing...\n");
+                logTo(_debugCb, "[DALY-LIB] Stream checksum failed. Continuing...\n");
             }
         }
         else
@@ -158,7 +158,7 @@ bool DalyRS485::readCellVoltages(uint8_t expectedCells, std::vector<float> &cell
                 if (!_cellVoltagesRejecting)
                 {
                     uint16_t mv = (uint16_t)(cellVoltages[badIndex] * 1000.0f + 0.5f);
-                    logf(_debugCb, "[BMS] Rejected cell frame: cell %d = %u mV outside 1.5-4.5 V\n", badIndex + 1, mv);
+                    logTo(_debugCb, "[BMS] Rejected cell frame: cell %d = %u mV outside 1.5-4.5 V\n", badIndex + 1, mv);
                     _cellVoltagesRejecting = true;
                 }
                 cellVoltages.assign(expectedCells, 0.0f);
@@ -167,14 +167,14 @@ bool DalyRS485::readCellVoltages(uint8_t expectedCells, std::vector<float> &cell
 
             if (_cellVoltagesRejecting)
             {
-                logf(_debugCb, "[BMS] Cell frames plausible again\n");
+                logTo(_debugCb, "[BMS] Cell frames plausible again\n");
                 _cellVoltagesRejecting = false;
             }
 
             return true; // We got them all!
         }
 
-        logf(_debugCb, "[DALY-LIB] Missed frames. Got %d/%d. Retrying...\n", collector.framesReceived(), collector.expectedFrames());
+        logTo(_debugCb, "[DALY-LIB] Missed frames. Got %d/%d. Retrying...\n", collector.framesReceived(), collector.expectedFrames());
         vTaskDelay(pdMS_TO_TICKS(kCellVoltageRetryPauseMs)); // Pause before retry
     }
     return false;
@@ -189,7 +189,7 @@ bool DalyRS485::readMosfetStatus(DalyMosfetStatus &status)
 
     if (!DalyFrames::parseMosfetStatus(data, status))
     {
-        logf(_debugCb, "[DALY-LIB] 0x93 MOSFET bytes out of expected range (%d,%d). Ignoring frame.\n", data[1], data[2]);
+        logTo(_debugCb, "[DALY-LIB] 0x93 MOSFET bytes out of expected range (%d,%d). Ignoring frame.\n", data[1], data[2]);
         return false;
     }
     return true;

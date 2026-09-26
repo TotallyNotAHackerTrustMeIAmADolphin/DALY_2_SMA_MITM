@@ -31,8 +31,8 @@ void ConfigStore::load(SystemConfig &cfg, LogSink log)
                                                                           : PT_BLOB; // putFloat = putBytes
         if (stored != expected)
         {
-            logf(log, "[CFG] Stored %s has NVS type %d, expected %d - using the default %s\n",
-                 s->label(), (int)stored, (int)expected, defBuf);
+            logTo(log, "[CFG] Stored %s has NVS type %d, expected %d - using the default %s\n",
+                  s->label(), (int)stored, (int)expected, defBuf);
             continue;
         }
 
@@ -57,8 +57,8 @@ void ConfigStore::load(SystemConfig &cfg, LogSink log)
             formatSettingValue(*s, v, valBuf, sizeof(valBuf));
             formatSettingFixed(*s, s->min(), minBuf, sizeof(minBuf));
             formatSettingFixed(*s, s->max(), maxBuf, sizeof(maxBuf));
-            logf(log, "[CFG] Stored %s (%s) is outside %s-%s %s - using the default %s\n",
-                 s->label(), valBuf, minBuf, maxBuf, s->unit(), defBuf);
+            logTo(log, "[CFG] Stored %s (%s) is outside %s-%s %s - using the default %s\n",
+                  s->label(), valBuf, minBuf, maxBuf, s->unit(), defBuf);
         }
     }
 
@@ -67,7 +67,7 @@ void ConfigStore::load(SystemConfig &cfg, LogSink log)
     // #56: set() already range-checked every setting; only the rules
     // relating two settings can still fail. Logged only - never blocks boot.
     SystemConfig::validate(cfg).forEachMessage([log](const char *msg)
-                                                 { logf(log, "[CFG] Loaded config fails validation: %s\n", msg); });
+                                                 { logTo(log, "[CFG] Loaded config fails validation: %s\n", msg); });
 }
 
 void ConfigStore::store(const SystemConfig &cfg, const bool present[SystemConfig::kNumSettings])

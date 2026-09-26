@@ -110,7 +110,7 @@ const char index_html[] PROGMEM = HTML_HEAD("BMS Bridge Pro") R"rawliteral(
   // dataMutex too long to apply it, so the caller can just try again.
   async function postAction(url) {
     try { await fetchOk(url, { method: 'POST' }); }
-    catch (e) { alert('Action failed (' + e.message + ') - device busy, try again'); }
+    catch (e) { alert('Action failed: ' + e.message); }
   }
 
   // Seed the console with the tail of today's SD .log file on load, so it

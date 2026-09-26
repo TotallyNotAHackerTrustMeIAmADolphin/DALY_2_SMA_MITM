@@ -6,6 +6,7 @@
 #include "SettingFormat.h"
 #include "ConfigStore.h"
 #include "ConfigForm.h"
+#include "MutexLock.h"
 #include <SD.h>
 #include <cstddef>
 
@@ -16,6 +17,9 @@ namespace
     // default, and whose set() refuses anything outside that range.
     // ConfigStore::load(), saveConfig() and the /config page just loop over
     // cfg.all().
+
+    // saveConfig()'s dataMutex take - see the comment at its call site.
+    constexpr TickType_t kSaveLockTimeout = pdMS_TO_TICKS(300);
 
     // A value or limit of s, formatted with its display precision - for the
     // /config page and range text, not the [CFG] log (see formatSettingValue).
@@ -51,7 +55,7 @@ void WebDashboard::begin(SystemConfig *cfg)
     // null deref.
     if (cfg == nullptr)
     {
-        logf(_debugCb, "[WEB] begin() called with a null config - server not started\n");
+        logTo(_debugCb, "[WEB] begin() called with a null config - server not started\n");
         return;
     }
     _cfg = cfg;
@@ -109,10 +113,10 @@ void WebDashboard::saveConfig(AsyncWebServerRequest *request)
         for (const String &msg : errors)
         {
             body += msg + "\n";
-            // One log line per violation: logf's buffer is 256 bytes, and
+            // One log line per violation: logTo's buffer is 256 bytes, and
             // one call with embedded newlines would both truncate and leave
             // the continuation lines untimestamped.
-            logf(_debugCb, "[WEB] /save refused: %s\n", msg.c_str());
+            logTo(_debugCb, "[WEB] /save refused: %s\n", msg.c_str());
         }
         request->send(400, "text/plain", body + "Nothing saved.\n");
         return;
@@ -122,21 +126,23 @@ void WebDashboard::saveConfig(AsyncWebServerRequest *request)
     // 250 ms SMA frame, so this holds the lock for nothing but the publish
     // itself; the NVS write (flash erase/write, tens of ms) runs after the
     // lock is released (#21).
-    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(300)) != pdTRUE)
+    if (MutexLock lock{dataMutex, kSaveLockTimeout})
     {
-        logf(_debugCb, "[WEB] /save refused: config busy\n");
+        *_cfg = copy;
+    }
+    else
+    {
+        logTo(_debugCb, "[WEB] /save refused: config busy\n");
         request->send(503, "text/plain", "Device busy, please try Save again");
         return;
     }
-    *_cfg = copy;
-    xSemaphoreGive(dataMutex);
 
     ConfigStore::store(copy, result.present);
 
     // Only now that the save has fully succeeded (published under the lock
     // and written to NVS), never for a refused save.
     ConfigForm::logChanges(before, copy, [this](const char *line)
-                            { logf(_debugCb, "%s", line); });
+                            { logTo(_debugCb, "%s", line); });
 
     request->redirect("/");
 }

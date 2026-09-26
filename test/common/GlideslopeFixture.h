@@ -2,9 +2,10 @@
 
 // Shared SystemConfig fixture for test_glideslope and test_statusframe (#73):
 // both files' setUp() built the same charge/discharge taper shape by hand,
-// which had drifted out of sync once (test_statusframe's cvMaintStart=3.0V
-// equalled cvMinDischarge and failed SystemConfig::validate() - see the
-// nudge to 3.05V below). One definition here removes that drift risk.
+// with setUnchecked(), so nothing checked it was a config the firmware
+// would accept - and it wasn't (test_statusframe's cvMaintStart=3.0V
+// equalled cvMinDischarge and failed SystemConfig::validate(); see the
+// nudge to 3.05V below). One definition, validated, here.
 //
 // Uses set() (not setUnchecked()) throughout: every value here is a normal,
 // in-range config, not one of the out-of-range fail-safe inputs individual

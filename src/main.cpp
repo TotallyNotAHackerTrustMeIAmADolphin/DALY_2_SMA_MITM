@@ -13,6 +13,7 @@
 #include "DalyRS485.h"
 #include "SMA_CAN.h"
 #include "WebDashboard.h"
+#include "ConfigStore.h"
 #include "SDLogger.h"
 #include "Diagnostics.h"
 #include "WifiEvents.h"
@@ -576,11 +577,11 @@ void setup()
   netLog(sdOk ? "[SYS] SD card logging initialized.\n"
               : "[SYS] SD card logging unavailable (no card or mount failed).\n");
 
-  // After SDLogger::begin(), not before: loadConfig() logs any
+  // After SDLogger::begin(), not before: ConfigStore::load() logs any
   // "[CFG] Loaded config fails validation" lines (#56), and SDLogger drops
   // events until it is initialised - on the headless device the SD .log is
   // the only place those would be seen.
-  webUI.loadConfig(cfg);
+  ConfigStore::load(cfg, libraryLogger);
 
   // Reset reason / rollback state / core dump summary, right after the SD
   // log exists to receive it - not deferred to loop(), so a reset within
@@ -609,7 +610,7 @@ void setup()
   ArduinoOTA.setHostname("BMS-Bridge");
   ArduinoOTA.begin();
 
-  webUI.begin();
+  webUI.begin(&cfg);
   netReady = true;
 
   netLog("[SYS] Boot sequence complete. Multithreading Active.\n");

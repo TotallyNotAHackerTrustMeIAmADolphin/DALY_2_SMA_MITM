@@ -4,6 +4,7 @@
 #include "TelemetrySchema.h"
 #include "Diagnostics.h"
 #include "SettingFormat.h"
+#include "ConfigStore.h"
 #include <SD.h>
 #include <cstdarg>
 #include <cstddef>
@@ -20,26 +21,8 @@ namespace
     // Every setting is a Setting<T> member of SystemConfig (include/
     // SystemConfig.h) that carries its own key, label, unit, range and
     // default, and whose set() refuses anything outside that range.
-    // loadConfig(), saveConfig() and the /config page just loop over
+    // ConfigStore::load(), saveConfig() and the /config page just loop over
     // cfg.all().
-
-    // Messages for the ValidationResult rules that relate two settings.
-    struct ValidationMessage
-    {
-        bool SystemConfig::ValidationResult::*flag;
-        const char *message;
-    };
-
-    const ValidationMessage kValidationMessages[] = {
-        {&SystemConfig::ValidationResult::maintStartBelowMinDischarge,
-         "Maint. Start Vpc must be above Min Discharge Vpc (#12)."},
-        {&SystemConfig::ValidationResult::chargeTaperOrderBad,
-         "Charge thresholds must be ordered: Start Taper Vpc < Target Trickle Vpc < Max Charge Vpc."},
-        {&SystemConfig::ValidationResult::dischargeTaperOrderBad,
-         "Discharge thresholds must be ordered: Start Taper Vpc (D) > Target Limp Vpc > Min Discharge Vpc."},
-        {&SystemConfig::ValidationResult::maintHysteresisBad,
-         "Maint. Stop Vpc must be above Maint. Start Vpc (#12)."},
-    };
 
     // A value or limit of s, formatted with its display precision - for the
     // /config page and range text, not the [CFG] log (see formatSettingValue).
@@ -55,16 +38,6 @@ namespace
     {
         return String(s.label()) + " must be between " + formatNumber(s, s.min()) + " and " +
                formatNumber(s, s.max()) + " " + s.unit() + ".";
-    }
-
-    // Calls emit(message) once per violated two-setting rule. Shared by
-    // saveConfig()'s 400 response and loadConfig()'s boot log.
-    template <typename Emit>
-    void forEachViolation(const SystemConfig::ValidationResult &r, Emit emit)
-    {
-        for (const ValidationMessage &vm : kValidationMessages)
-            if (r.*(vm.flag))
-                emit(String(vm.message));
     }
 
     // The setting's <input> plus a "min-max unit - default" line under it,
@@ -103,17 +76,17 @@ void WebDashboard::debugLog(const char *format, ...)
     _debugCb("%s", loc_res);
 }
 
-void WebDashboard::begin()
+void WebDashboard::begin(SystemConfig *cfg)
 {
     // /config and /save (registered by setupRoutes() below) dereference
-    // _cfg; it's only set by loadConfig(), which setup() must call before
-    // begin(). Refuse to start rather than serve routes that would crash on
-    // a null deref if that ordering is ever broken.
-    if (_cfg == nullptr)
+    // _cfg. Refuse to start rather than serve routes that would crash on a
+    // null deref.
+    if (cfg == nullptr)
     {
-        debugLog("[WEB] begin() called before loadConfig() - server not started\n");
+        debugLog("[WEB] begin() called with a null config - server not started\n");
         return;
     }
+    _cfg = cfg;
 
     setupRoutes();
 
@@ -195,76 +168,6 @@ void WebDashboard::broadcastTelemetry(const DashboardData &data)
     _events.send(json, "data", millis());
 }
 
-void WebDashboard::loadConfig(SystemConfig &configOut)
-{
-    _cfg = &configOut;
-
-    // No dataMutex needed here: this runs once from setup(), before bmsTask
-    // or canTask exist, so there is no concurrent reader yet.
-    _prefs.begin("bms-bridge", false);
-
-    // Each setting starts at its default. A stored value is only taken
-    // if the setting's set() accepts it; one outside its range (NaN from
-    // corrupted flash, or one saved before #61 such as a spread threshold
-    // that wrapped to 65476) keeps the default and is logged, instead of
-    // running with it - several of these (bmsTimeout, spread) would switch
-    // a safety mechanism off. NVS integers are read at full width, so the
-    // range check happens before anything is narrowed.
-    for (SettingBase *s : _cfg->all())
-    {
-        s->reset();
-        // One getType() both finds the key and tells its stored type: NVS
-        // enforces the type, so a key written as another type (e.g. by an
-        // older firmware) would make the typed read below fail and quietly
-        // return the default. Say so instead.
-        PreferenceType stored = _prefs.getType(s->key());
-        if (stored == PT_INVALID)
-            continue; // never saved: default
-        PreferenceType expected = s->kind() == SettingBase::KIND_INT      ? PT_I32
-                                  : s->kind() == SettingBase::KIND_UINT16 ? PT_U32
-                                                                          : PT_BLOB; // putFloat = putBytes
-        char defBuf[24];
-        formatSettingValue(*s, s->def(), defBuf, sizeof(defBuf));
-        if (stored != expected)
-        {
-            debugLog("[CFG] Stored %s has NVS type %d, expected %d - using the default %s\n",
-                     s->label(), (int)stored, (int)expected, defBuf);
-            continue;
-        }
-        double v;
-        switch (s->kind())
-        {
-        case SettingBase::KIND_INT:
-            v = _prefs.getInt(s->key(), (int)s->def());
-            break;
-        case SettingBase::KIND_UINT16:
-            v = _prefs.getUInt(s->key(), (uint32_t)s->def());
-            break;
-        default:
-            v = _prefs.getFloat(s->key(), (float)s->def());
-            break;
-        }
-        if (!s->set(v))
-        {
-            char valBuf[24], minBuf[24], maxBuf[24];
-            formatSettingValue(*s, v, valBuf, sizeof(valBuf));
-            formatSettingValue(*s, s->min(), minBuf, sizeof(minBuf));
-            formatSettingValue(*s, s->max(), maxBuf, sizeof(maxBuf));
-            debugLog("[CFG] Stored %s (%s) is outside %s-%s %s - using the default %s\n",
-                     s->label(), valBuf, minBuf, maxBuf, s->unit(), defBuf);
-        }
-    }
-
-    _prefs.end();
-
-    // #56: every setting is in range now (set() saw to that); what can
-    // still fail are the rules relating two settings. Logged only - never blocks boot,
-    // and there's no single safe default to fall back to for an ordering.
-    SystemConfig::ValidationResult validation = SystemConfig::validate(*_cfg);
-    forEachViolation(validation, [this](const String &msg)
-                     { debugLog("[CFG] Loaded config fails validation: %s\n", msg.c_str()); });
-}
-
 void WebDashboard::saveConfig(AsyncWebServerRequest *request)
 {
     // canTask reads *_cfg under dataMutex and only waits 20 ms for it per
@@ -317,8 +220,8 @@ void WebDashboard::saveConfig(AsyncWebServerRequest *request)
     if (errors.empty())
     {
         SystemConfig::ValidationResult validation = SystemConfig::validate(copy);
-        forEachViolation(validation, [&errors](const String &msg)
-                         { errors.push_back(msg); });
+        validation.forEachMessage([&errors](const char *msg)
+                                   { errors.push_back(String(msg)); });
     }
 
     if (!errors.empty())
@@ -344,26 +247,7 @@ void WebDashboard::saveConfig(AsyncWebServerRequest *request)
     *_cfg = copy;
     xSemaphoreGive(dataMutex);
 
-    _prefs.begin("bms-bridge", false);
-    for (size_t i = 0; i < settings.size(); i++)
-    {
-        if (!present[i])
-            continue;
-        const SettingBase &s = *settings[i];
-        switch (s.kind())
-        {
-        case SettingBase::KIND_FLOAT:
-            _prefs.putFloat(s.key(), (float)s.value());
-            break;
-        case SettingBase::KIND_INT:
-            _prefs.putInt(s.key(), (int)s.value());
-            break;
-        case SettingBase::KIND_UINT16:
-            _prefs.putUInt(s.key(), (uint32_t)s.value());
-            break;
-        }
-    }
-    _prefs.end();
+    ConfigStore::store(copy, present);
 
     // Log every setting that actually changed, by name, old -> new - only
     // now that the save has fully succeeded (published under the lock and

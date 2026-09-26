@@ -1,6 +1,5 @@
 #pragma once
 #include <ESPAsyncWebServer.h>
-#include <Preferences.h>
 #include "SystemState.h"
 
 // Define a callback type for button actions (like resetSMA or toggleMaint)
@@ -18,23 +17,21 @@ class WebDashboard
 public:
     WebDashboard(uint16_t port = 80);
 
-    // Loads the NVS config into configOut and keeps a pointer to it for the
-    // /config page and /save. Needs no network, so setup() calls it first -
-    // the CAN/BMS tasks start before WiFi and need the setpoints right away.
-    void loadConfig(SystemConfig &configOut);
-
-    // Registers routes and starts the server. Call after setupNetwork(): the
-    // async TCP stack must be initialised (connected or not). Refuses to
-    // start if loadConfig() hasn't run.
-    void begin();
+    // Registers routes and starts the server, using cfg for the /config
+    // page and /save (ConfigStore::load() must have populated it already -
+    // setup() calls that directly, before the BMS/CAN tasks start, since it
+    // needs no network). Call after setupNetwork(): the async TCP stack
+    // must be initialised (connected or not). Refuses to start if cfg is
+    // null.
+    void begin(SystemConfig *cfg);
 
     // Attach an action listener for the buttons
     void setActionCallback(ActionCallback cb);
 
     // Attach a debug/diagnostics sink (e.g. netLog) for WebDashboard's own
-    // log lines - begin()'s startup-ordering guard, /save's "busy" refusal,
-    // etc. - instead of Serial.println. Call before loadConfig()/begin() so
-    // nothing logs to Serial-only in between.
+    // log lines - begin()'s null-cfg guard, /save's "busy" refusal, etc. -
+    // instead of Serial.println. Call before begin() so nothing logs to
+    // Serial-only in between.
     void setDebugCallback(WebDebugCallback cb);
 
     // Push a log line to the Web UI console
@@ -46,7 +43,6 @@ public:
 private:
     AsyncWebServer _server;
     AsyncEventSource _events;
-    Preferences _prefs;
     SystemConfig *_cfg; // Pointer to the main app's config struct
     ActionCallback _actionCb;
     WebDebugCallback _debugCb;

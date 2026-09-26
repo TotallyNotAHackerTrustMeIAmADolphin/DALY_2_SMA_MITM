@@ -274,6 +274,23 @@ struct SystemConfig
             return !maintStartBelowMinDischarge && !chargeTaperOrderBad && !dischargeTaperOrderBad &&
                    !maintHysteresisBad;
         }
+
+        // Calls emit(message) once per violated flag above, in one place so
+        // a load-time [CFG] log line and a /save 400 response can't drift
+        // apart. message is a string literal, valid for the program's
+        // lifetime.
+        template <typename Emit>
+        void forEachMessage(Emit emit) const
+        {
+            if (maintStartBelowMinDischarge)
+                emit("Maint. Start Vpc must be above Min Discharge Vpc (#12).");
+            if (chargeTaperOrderBad)
+                emit("Charge thresholds must be ordered: Start Taper Vpc < Target Trickle Vpc < Max Charge Vpc.");
+            if (dischargeTaperOrderBad)
+                emit("Discharge thresholds must be ordered: Start Taper Vpc (D) > Target Limp Vpc > Min Discharge Vpc.");
+            if (maintHysteresisBad)
+                emit("Maint. Stop Vpc must be above Maint. Start Vpc (#12).");
+        }
     };
 
     // Pure, tested in test/test_systemconfig/. saveConfig() refuses a

@@ -113,13 +113,13 @@ static void test_index_unknown_name(void)
     TEST_ASSERT_EQUAL(-1, index("nope"));
 }
 
-// --- kGraphColumns (#93): every name the Graphs page asks for must
+// --- graphColumns() (#93): every name the Graphs page asks for must
 // actually resolve, or readGraphSeries() would size its Accumulator off a
 // SIZE_MAX index and silently emit an empty column.
 static void test_graph_columns_all_resolve(void)
 {
     for (size_t i = 0; i < kGraphColumnCount; i++)
-        TEST_ASSERT_TRUE(index(kGraphColumns[i]) >= 0);
+        TEST_ASSERT_TRUE(index(graphColumns()[i]) >= 0);
 }
 
 // --- count() / formatter output count ---
@@ -135,7 +135,7 @@ static void test_formatter_output_count_matches_columns_minus_timestamp(void)
     for (int i = 0; i < count(); i++)
     {
         char field[64];
-        int n = kColumns[i].format(d, field, sizeof(field));
+        int n = columns()[i].format(d, field, sizeof(field));
         if (n > 0)
             produced++;
     }

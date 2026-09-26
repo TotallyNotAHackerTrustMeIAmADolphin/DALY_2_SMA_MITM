@@ -75,58 +75,71 @@ namespace TelemetrySchema
     inline int formatDerate(const DashboardData &d, char *buf, size_t len) { return snprintf(buf, len, "%.2f", d.derateFactor); }
 
     // Column order is the CSV row layout - see CLAUDE.md's SDLogger bullet.
-    static const Column kColumns[] = {
-        {"Timestamp", formatTimestampPlaceholder},
-        {"PackV", formatPackV},
-        {"PackI", formatPackI},
-        {"SOC", formatSOC},
-        {"MinCellV", formatMinCellV},
-        {"MaxCellV", formatMaxCellV},
-        {"ReqI", formatReqI},
-        {"Mode", formatMode},
-        {"ForceCharge", formatForceCharge},
-        {"MaintenanceActive", formatMaintenanceActive},
-        {"GridPresent", formatGridPresent},
-        {"Cell1", formatCell<1>},
-        {"Cell2", formatCell<2>},
-        {"Cell3", formatCell<3>},
-        {"Cell4", formatCell<4>},
-        {"Cell5", formatCell<5>},
-        {"Cell6", formatCell<6>},
-        {"Cell7", formatCell<7>},
-        {"Cell8", formatCell<8>},
-        {"Cell9", formatCell<9>},
-        {"Cell10", formatCell<10>},
-        {"Cell11", formatCell<11>},
-        {"Cell12", formatCell<12>},
-        {"Cell13", formatCell<13>},
-        {"Cell14", formatCell<14>},
-        {"Cell15", formatCell<15>},
-        {"Cell16", formatCell<16>},
-        {"ChargeMOS", formatChargeMOS},
-        {"DischargeMOS", formatDischargeMOS},
-        {"BmsProtection", formatBmsProtection},
-        {"CellOV1", formatCellOV1},
-        {"CellOV2", formatCellOV2},
-        {"PackOV1", formatPackOV1},
-        {"PackOV2", formatPackOV2},
-        {"MinCellRaw", formatMinCellRaw},
-        {"MaxCellRaw", formatMaxCellRaw},
-        {"RawSpreadMv", formatRawSpreadMv},
-        {"Derate", formatDerate},
-    };
+    // Function-local static (like DalyFrames::kAlarmBitNames()/HealthLog::
+    // taskNames()) rather than an inline namespace-scope array: this table
+    // is referenced from the inline functions below, and the device build
+    // predates C++17 inline variables (-std=gnu++11).
+    inline const Column (&columns())[38]
+    {
+        static const Column table[] = {
+            {"Timestamp", formatTimestampPlaceholder},
+            {"PackV", formatPackV},
+            {"PackI", formatPackI},
+            {"SOC", formatSOC},
+            {"MinCellV", formatMinCellV},
+            {"MaxCellV", formatMaxCellV},
+            {"ReqI", formatReqI},
+            {"Mode", formatMode},
+            {"ForceCharge", formatForceCharge},
+            {"MaintenanceActive", formatMaintenanceActive},
+            {"GridPresent", formatGridPresent},
+            {"Cell1", formatCell<1>},
+            {"Cell2", formatCell<2>},
+            {"Cell3", formatCell<3>},
+            {"Cell4", formatCell<4>},
+            {"Cell5", formatCell<5>},
+            {"Cell6", formatCell<6>},
+            {"Cell7", formatCell<7>},
+            {"Cell8", formatCell<8>},
+            {"Cell9", formatCell<9>},
+            {"Cell10", formatCell<10>},
+            {"Cell11", formatCell<11>},
+            {"Cell12", formatCell<12>},
+            {"Cell13", formatCell<13>},
+            {"Cell14", formatCell<14>},
+            {"Cell15", formatCell<15>},
+            {"Cell16", formatCell<16>},
+            {"ChargeMOS", formatChargeMOS},
+            {"DischargeMOS", formatDischargeMOS},
+            {"BmsProtection", formatBmsProtection},
+            {"CellOV1", formatCellOV1},
+            {"CellOV2", formatCellOV2},
+            {"PackOV1", formatPackOV1},
+            {"PackOV2", formatPackOV2},
+            {"MinCellRaw", formatMinCellRaw},
+            {"MaxCellRaw", formatMaxCellRaw},
+            {"RawSpreadMv", formatRawSpreadMv},
+            {"Derate", formatDerate},
+        };
+        return table;
+    }
 
-    inline int count() { return (int)(sizeof(kColumns) / sizeof(kColumns[0])); }
+    inline int count() { return (int)(sizeof(columns()) / sizeof(columns()[0])); }
 
     // The columns the Graphs page (#93) plots - one ordered name list
-    // shared by readGraphSeries() (resolves each into a kColumns index,
+    // shared by readGraphSeries() (resolves each into a columns() index,
     // builds the CSV header from it, and sizes its Accumulator off it) and
     // graphs_html's JS (reads the served header row to map name -> column),
     // instead of each of those writing out the same seven names separately.
-    static const char *const kGraphColumns[] = {
-        "Timestamp", "PackV", "PackI", "SOC", "MinCellV", "MaxCellV", "ReqI",
-    };
-    constexpr size_t kGraphColumnCount = sizeof(kGraphColumns) / sizeof(kGraphColumns[0]);
+    // Same function-local-static reasoning as columns() above.
+    inline const char *const (&graphColumns())[7]
+    {
+        static const char *const table[] = {
+            "Timestamp", "PackV", "PackI", "SOC", "MinCellV", "MaxCellV", "ReqI",
+        };
+        return table;
+    }
+    constexpr size_t kGraphColumnCount = 7;
 
     // Linear search is fine - called a handful of times per request
     // (readGraphSeries() resolves its column indices once, outside its
@@ -134,7 +147,7 @@ namespace TelemetrySchema
     inline int index(const char *csvName)
     {
         for (int i = 0; i < count(); i++)
-            if (strcmp(kColumns[i].csvName, csvName) == 0)
+            if (strcmp(columns()[i].csvName, csvName) == 0)
                 return i;
         return -1;
     }
@@ -154,7 +167,7 @@ namespace TelemetrySchema
         for (int i = 1; i < count(); i++)
         {
             char field[64];
-            int n = kColumns[i].format(d, field, sizeof(field));
+            int n = columns()[i].format(d, field, sizeof(field));
             const char *value = n > 0 ? field : "";
             if ((size_t)written >= len)
                 break;
@@ -176,7 +189,7 @@ namespace TelemetrySchema
         {
             if ((size_t)written >= len)
                 break;
-            int m = snprintf(buf + written, len - (size_t)written, i > 0 ? ",%s" : "%s", kColumns[i].csvName);
+            int m = snprintf(buf + written, len - (size_t)written, i > 0 ? ",%s" : "%s", columns()[i].csvName);
             if (m < 0)
                 break;
             written += m;

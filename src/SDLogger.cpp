@@ -383,7 +383,7 @@ SDLogger::ReadResult SDLogger::readGraphSeries(const String &fileName, size_t ta
     {
         if (i > 0)
             outCSV += ",";
-        outCSV += TelemetrySchema::kGraphColumns[i];
+        outCSV += TelemetrySchema::graphColumns()[i];
     }
     outCSV += "\n";
 
@@ -393,7 +393,7 @@ SDLogger::ReadResult SDLogger::readGraphSeries(const String &fileName, size_t ta
     size_t fieldIndices[TelemetrySchema::kGraphColumnCount];
     for (size_t i = 0; i < TelemetrySchema::kGraphColumnCount; i++)
     {
-        int idx = TelemetrySchema::index(TelemetrySchema::kGraphColumns[i]);
+        int idx = TelemetrySchema::index(TelemetrySchema::graphColumns()[i]);
         if (idx < 0)
         {
             outCSV = "";

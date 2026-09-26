@@ -5,7 +5,7 @@
 
 // The SSE "data" event's JSON (#95), via bounded appends instead of an
 // unchecked strcat loop. Hand-written, not derived from
-// TelemetrySchema::kColumns: several keys/precisions genuinely differ from
+// TelemetrySchema's column table: several keys/precisions genuinely differ from
 // their CSV column (e.g. "i" is one decimal here, two in the CSV's PackI).
 namespace TelemetryJson
 {

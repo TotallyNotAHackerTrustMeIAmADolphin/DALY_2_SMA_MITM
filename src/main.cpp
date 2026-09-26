@@ -507,7 +507,14 @@ void canTask(void *pvParameters)
           currentData.isResetting = dec.isResetting;
           currentData.derateFactor = dec.derateFactor;
           currentData.requestedCurrent = dec.values.ccl / 10.0f;
+        }
+        xSemaphoreGive(dataMutex);
 
+        // Transmit outside the lock (#74): dec is this task's own copy, and
+        // inverter is only ever touched by canTask, so bmsTask/loop()/the
+        // web task don't wait on encodeStatus() and the twai_transmit()s.
+        if (dec.sendFrames)
+        {
           SMATxData tx;
           tx.packVoltage = dec.values.packVoltage;
           tx.packCurrent = dec.values.packCurrent;
@@ -522,7 +529,6 @@ void canTask(void *pvParameters)
 
           inverter.sendStatus(tx);
         }
-        xSemaphoreGive(dataMutex);
       }
 
       // Log lines for whichever events decide() flagged, outside the lock -

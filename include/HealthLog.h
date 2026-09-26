@@ -1,17 +1,8 @@
 #pragma once
 
-// When a periodic health sample is worth a log line. Kept free of Arduino/
-// FreeRTOS/ESP-IDF dependencies, same as StatusFrame.h/BmsEvents.h/
-// RollbackConfirm.h, so test/test_healthlog runs this code natively.
-//
-// Diagnostics::logHealth() samples every 10 minutes, but only the things
-// that can actually go wrong are logged - not an identical line 144 times
-// a day: the heap low-water mark or largest free block shrinking (a leak
-// or fragmentation), a task's stack high-water mark shrinking (a task
-// heading for overflow), plus one baseline line after boot and a daily
-// heartbeat so a long quiet log still shows the device alive with its
-// current numbers. WiFi RSSI rides along in the line but never triggers
-// one - WiFi transitions have their own edge-triggered [WIFI] lines.
+// Whether a 10-minute health sample is worth a log line - see the Health
+// bullet under Diagnostics in CLAUDE.md for what triggers one. Pure, so
+// test/test_healthlog runs this code natively.
 
 #include <stdint.h>
 

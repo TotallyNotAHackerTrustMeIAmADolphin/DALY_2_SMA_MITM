@@ -38,8 +38,6 @@ public:
     // Returns false if no card is present / mount fails.
     static bool begin();
 
-    static bool isReady();
-
     // Attach a logging function, called for mount/init failures. Set this
     // before begin() to have those failures reach netLog() too.
     static void setDebugCallback(LogSink cb);

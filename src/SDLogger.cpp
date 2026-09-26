@@ -105,11 +105,6 @@ namespace
     }
 }
 
-bool SDLogger::isReady()
-{
-    return initialized;
-}
-
 void SDLogger::setDebugCallback(LogSink cb)
 {
     debugCb = cb;

@@ -1,21 +1,17 @@
 #pragma once
 
 // One ordered table of telemetry column descriptors driving the CSV header
-// and the CSV row, built from DashboardData (#32). The SSE JSON is a
-// separate, hand-written format (TelemetryJson.h, #95) with different
-// precision and key order, not derived from this table. Pure - no Arduino/
-// FreeRTOS dependencies, like SystemConfig.h/Glideslope.h - so
-// test/test_telemetryschema compiles and runs *this* code natively
-// (`pio test -e native`) instead of a mirrored copy of it.
+// and row, built from DashboardData (#32). The SSE JSON is a separate,
+// hand-written format (TelemetryJson.h, #95) with different precision and
+// key order, not derived from this table. Pure, so test/test_telemetryschema
+// runs it natively.
 //
-// Column::format() reproduces the exact snprintf spec each field used
-// before this refactor (see the CSV row-layout sentence in CLAUDE.md's
-// SDLogger bullet) byte for byte: existing CSV files on the SD card, and
-// the dashboard JS that parses the SSE JSON, depend on those bytes staying
-// identical. Treat a change to a format string here with the same care as
-// Glideslope.h's math - it changes every future row on disk.
+// Column::format()'s snprintf spec for each field is exact and byte-stable:
+// existing CSV files on the SD card, and the dashboard JS parsing the SSE
+// JSON, depend on it. Treat a format-string change here with the same care
+// as Glideslope.h's math - it changes every future row on disk.
 //
-// Index semantics are part of the contract and covered by the native test:
+// Index order is part of the contract, covered by the native test:
 // Timestamp=0, PackV=1, PackI=2, SOC=3, MinCellV=4, MaxCellV=5, ReqI=6.
 // Callers (readGraphSeries()) look columns up by name via index(), never by
 // memorizing position.
@@ -55,8 +51,7 @@ namespace TelemetrySchema
 
     // One descriptor family for Cell1..Cell16 (N is 1-based, matching the
     // CSV column name CellN, indexing into cellVoltages at N-1) rather than
-    // 16 hand-written functions. Returns 0 - omit this field entirely, same
-    // as the pre-refactor loop bounded to min(16, cellVoltages.size()) - if
+    // 16 hand-written functions. Returns 0 - omit this field entirely - if
     // this cell slot hasn't actually been read yet (e.g. early in boot).
     template <int N>
     inline int formatCell(const DashboardData &d, char *buf, size_t len)
@@ -78,8 +73,7 @@ namespace TelemetrySchema
     inline int formatRawSpreadMv(const DashboardData &d, char *buf, size_t len) { return snprintf(buf, len, "%u", (unsigned)d.cellSpreadRawMv); }
     inline int formatDerate(const DashboardData &d, char *buf, size_t len) { return snprintf(buf, len, "%.2f", d.derateFactor); }
 
-    // Ordered exactly like the pre-refactor CSV row (see CLAUDE.md's
-    // SDLogger bullet).
+    // Column order is the CSV row layout - see CLAUDE.md's SDLogger bullet.
     static const Column kColumns[] = {
         {"Timestamp", formatTimestampPlaceholder},
         {"PackV", formatPackV},
@@ -148,11 +142,8 @@ namespace TelemetrySchema
     // logger prepends itself from the row's write time - by joining every
     // column's formatted text with commas, in table order, skipping columns
     // whose formatter reports nothing to write (a CellN slot beyond how
-    // many cells have actually been read this boot). Matches the
-    // pre-refactor logTelemetry()'s behavior of bounding the cell loop to
-    // min(16, cellVoltages.size()) and appending every other field
-    // unconditionally. Returns the number of characters written into buf
-    // (excluding the NUL).
+    // many cells have actually been read this boot). Returns the number of
+    // characters written into buf (excluding the NUL).
     inline int formatRow(const DashboardData &d, char *buf, size_t len)
     {
         int written = 0;

@@ -4,11 +4,7 @@
 #include <stdint.h>
 #include <vector>
 
-// Pure rolling tail-trim, extracted out of SDLogger::readTail() (#43) so it
-// has no Arduino/FreeRTOS dependency and test/test_tailtrim can include and
-// run *this* code natively (`pio test -e native`), same pattern as
-// Glideslope.h/CellSmoother.h/StatusFrame.h/CsvDecimation.h.
-//
+// Pure rolling tail-trim (#43), so test/test_tailtrim can run it natively.
 // Usage: construct with maxBytes and the read-chunk size, feed() each chunk
 // in order, then finish(). data()/length() give the retained tail.
 namespace TailTrim
@@ -46,11 +42,9 @@ namespace TailTrim
         // drops the leading partial line (up to and including its first
         // '\n') so the retained tail doesn't start mid-line. Only fires
         // when truncation actually happened - a file that never exceeded
-        // maxBytes is left completely untouched, since its first line is
-        // real content from byte 0, not a truncation artifact. Same guard
-        // as the pre-refactor code: doesn't drop the newline if it's the
-        // very last byte (so a tail that happens to end right at a
-        // newline isn't wiped out entirely).
+        // maxBytes is left untouched, since its first line is real content
+        // from byte 0. Doesn't drop the newline if it's the very last byte,
+        // so a tail ending right at a newline isn't wiped out entirely.
         void finish()
         {
             if (!truncated_ || buf_.empty())

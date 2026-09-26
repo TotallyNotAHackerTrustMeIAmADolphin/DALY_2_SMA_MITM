@@ -1,19 +1,14 @@
 #pragma once
 
-// The bmsTask edge-triggered event logic (#44), kept free of Arduino/
-// FreeRTOS dependencies for the same reason as StatusFrame.h/Glideslope.h:
-// so test/test_bmsevents compiles and runs *this* code natively
-// (`pio test -e native`) instead of a hand-copied mirror of it. bmsTask
-// becomes: read from the Daly driver, call decide() (no lock needed, it's
-// pure), take dataMutex to write currentData, then log whatever events came
-// back via netLog.
+// The bmsTask edge-triggered event logic (#44): pure, so test/test_bmsevents
+// runs it natively. bmsTask reads from the Daly driver, calls decide() (no
+// lock needed), takes dataMutex to write currentData, then logs whatever
+// events came back via netLog.
 //
 // Same shape as StatusFrame::decide(): previous state + a new reading in,
 // one-shot events to log + updated state out. Unlike StatusFrame (one
 // Snapshot per 250ms tick), bmsTask reads DalyBasicInfo/DalyMosfetStatus/
-// DalyAlarmStatus at three different points in its loop (each gated on its
-// own `bms.readX()` succeeding, with a vTaskDelay and a separate
-// dataMutex-protected currentData write in between) - so decide() takes
+// DalyAlarmStatus at three different points in its loop, so decide() takes
 // each reading as an optional pointer and bmsTask calls it once per
 // successful read, passing nullptr for the other two.
 

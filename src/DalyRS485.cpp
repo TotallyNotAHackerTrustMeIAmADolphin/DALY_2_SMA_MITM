@@ -109,18 +109,12 @@ bool DalyRS485::readBasicInfo(DalyBasicInfo &info)
     return false;
 }
 
-bool DalyRS485::readCellVoltages(uint8_t expectedCells, std::vector<float> &cellVoltages)
+bool DalyRS485::readCellVoltages(uint8_t expectedCells, uint16_t *cellMv)
 {
     // The collector holds at most kMaxCollectorCells; reading mv() past
     // that would be out of bounds.
     if (expectedCells > DalyFrames::kMaxCollectorCells)
         return false;
-
-    if (cellVoltages.size() != expectedCells)
-    {
-        cellVoltages.clear();
-        cellVoltages.resize(expectedCells, 0.0f);
-    }
 
     DalyFrames::CellFrameCollector collector;
 
@@ -144,8 +138,6 @@ bool DalyRS485::readCellVoltages(uint8_t expectedCells, std::vector<float> &cell
         if (collector.complete())
         {
             const uint16_t *mv = collector.mv();
-            for (int i = 0; i < expectedCells; i++)
-                cellVoltages[i] = mv[i] / 1000.0f;
 
             // A checksum can still pass on a garbled value, and bmsTask
             // seeds its whole moving-average window from the first
@@ -153,15 +145,15 @@ bool DalyRS485::readCellVoltages(uint8_t expectedCells, std::vector<float> &cell
             // frame, if any cell falls outside a plausible LiFePO4 range;
             // the stale-data fail-safe then drops limits to 0A.
             int badIndex;
-            if (!DalyFrames::cellVoltagesPlausible(cellVoltages.data(), expectedCells, badIndex))
+            if (!DalyFrames::cellVoltagesPlausible(mv, expectedCells, badIndex))
             {
                 if (!_cellVoltagesRejecting)
                 {
-                    uint16_t mv = (uint16_t)(cellVoltages[badIndex] * 1000.0f + 0.5f);
-                    logTo(_debugCb, "[BMS] Rejected cell frame: cell %d = %u mV outside 1.5-4.5 V\n", badIndex + 1, mv);
+                    logTo(_debugCb, "[BMS] Rejected cell frame: cell %d = %u mV outside 1.5-4.5 V\n", badIndex + 1, mv[badIndex]);
                     _cellVoltagesRejecting = true;
                 }
-                cellVoltages.assign(expectedCells, 0.0f);
+                for (int i = 0; i < expectedCells; i++)
+                    cellMv[i] = 0;
                 return false;
             }
 
@@ -171,6 +163,8 @@ bool DalyRS485::readCellVoltages(uint8_t expectedCells, std::vector<float> &cell
                 _cellVoltagesRejecting = false;
             }
 
+            for (int i = 0; i < expectedCells; i++)
+                cellMv[i] = mv[i];
             return true; // We got them all!
         }
 

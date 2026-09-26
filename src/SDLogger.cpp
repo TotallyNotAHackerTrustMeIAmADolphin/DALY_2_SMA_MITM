@@ -3,11 +3,13 @@
 #include <SPI.h>
 #include <time.h>
 #include <utility>
+#include <algorithm>
 #include "pin_config.h"
 #include "esp_task_wdt.h"
 #include "TelemetrySchema.h"
 #include "CsvDecimation.h"
 #include "TailTrim.h"
+#include "LogFileOrder.h"
 
 bool SDLogger::initialized = false;
 QueueHandle_t SDLogger::logQueue = NULL;
@@ -266,10 +268,9 @@ void SDLogger::loggingTask(void *parameter)
     }
 }
 
-bool SDLogger::listLogFiles(std::vector<String> &outNames, std::vector<uint32_t> &outSizes)
+bool SDLogger::listLogFiles(std::vector<LogFileInfo> &outFiles)
 {
-    outNames.clear();
-    outSizes.clear();
+    outFiles.clear();
 
     if (!initialized)
         return false;
@@ -289,10 +290,7 @@ bool SDLogger::listLogFiles(std::vector<String> &outNames, std::vector<uint32_t>
                 if (name.startsWith("/"))
                     name.remove(0, 1);
                 if (name.endsWith(".csv") || name.endsWith(".log"))
-                {
-                    outNames.push_back(name);
-                    outSizes.push_back((uint32_t)file.size());
-                }
+                    outFiles.push_back({name, (uint32_t)file.size()});
             }
             file = root.openNextFile();
         }
@@ -301,31 +299,13 @@ bool SDLogger::listLogFiles(std::vector<String> &outNames, std::vector<uint32_t>
 
     xSemaphoreGive(sdMutex_);
 
-    // Bubble sort is fine here: at most a few dozen daily files. boot_*
-    // fallback files (written pre-NTP-sync) always sort before dated
-    // YYYY-MM-DD files regardless of their boot ID, since a plain string
-    // compare would otherwise put "boot_..." AFTER any digit-starting name
-    // ('b' > '0'-'9') - which would wrongly rank a stale boot_ file as more
-    // recent than a properly dated one and break "select most recent = last".
-    auto isOlderName = [](const String &a, const String &b)
-    {
-        bool aBoot = a.startsWith("boot_");
-        bool bBoot = b.startsWith("boot_");
-        if (aBoot != bBoot)
-            return aBoot; // boot_* always sorts first
-        return a < b;
-    };
-    for (size_t i = 0; i < outNames.size(); i++)
-    {
-        for (size_t j = i + 1; j < outNames.size(); j++)
-        {
-            if (isOlderName(outNames[j], outNames[i]))
-            {
-                std::swap(outNames[i], outNames[j]);
-                std::swap(outSizes[i], outSizes[j]);
-            }
-        }
-    }
+    // The ordering rule itself (boot_* fallback files always sort first,
+    // "select most recent = last") lives in LogFileOrder::isOlder() (#97),
+    // pure and natively tested - a handful of files at most, so std::sort
+    // over the untested hand-rolled bubble sort this replaced costs nothing.
+    std::sort(outFiles.begin(), outFiles.end(),
+              [](const LogFileInfo &a, const LogFileInfo &b)
+              { return LogFileOrder::isOlder(a.name.c_str(), b.name.c_str()); });
 
     return true;
 }

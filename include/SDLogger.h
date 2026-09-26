@@ -47,6 +47,15 @@ namespace SdTuning
 class SDLogger
 {
 public:
+    // One entry from listLogFiles(): a bare filename (no leading '/') and
+    // its size in bytes.
+    struct LogFileInfo
+    {
+        String name;
+        uint32_t size;
+    };
+
+
     // Mounts the card and starts the background writer task.
     // Returns false if no card is present / mount fails.
     static bool begin();
@@ -63,9 +72,10 @@ public:
     // Enqueues a free-text event line for the .log file. Safe to call from any task.
     static void logEvent(const char *msg);
 
-    // Lists bare filenames (no leading '/') of .csv/.log files on the card,
-    // sorted ascending (oldest date first). Returns false if not ready.
-    static bool listLogFiles(std::vector<String> &outNames, std::vector<uint32_t> &outSizes);
+    // Lists .csv/.log files on the card, sorted ascending (oldest date
+    // first; see include/LogFileOrder.h for the exact ordering, including
+    // where boot_* fallback files land). Returns false if not ready.
+    static bool listLogFiles(std::vector<LogFileInfo> &outFiles);
 
     // Reads up to maxBytes from the end of fileName (bare name, must be one
     // returned by listLogFiles) into outContent. Returns false if the file

@@ -396,9 +396,8 @@ bool WebDashboard::findLogFile(AsyncWebServerRequest *request, String &outName, 
 
     // Only match names we actually listed ourselves - this doubles as the
     // path-traversal guard, since our filenames never contain '/' or '..'.
-    std::vector<String> names;
-    std::vector<uint32_t> sizes;
-    if (!SDLogger::listLogFiles(names, sizes))
+    std::vector<SDLogger::LogFileInfo> files;
+    if (!SDLogger::listLogFiles(files))
     {
         // Distinguish "SD card busy/not ready" from "genuinely no such file"
         // below - otherwise a transient lock timeout looks like a 404 and
@@ -407,12 +406,12 @@ bool WebDashboard::findLogFile(AsyncWebServerRequest *request, String &outName, 
         return false;
     }
 
-    for (size_t i = 0; i < names.size(); i++)
+    for (const SDLogger::LogFileInfo &f : files)
     {
-        if (names[i] == requested)
+        if (f.name == requested)
         {
-            outName = names[i];
-            outSize = sizes[i];
+            outName = f.name;
+            outSize = f.size;
             return true;
         }
     }
@@ -461,19 +460,18 @@ void WebDashboard::setupRoutes()
 
     _server.on("/api/logs/list", HTTP_GET, [](AsyncWebServerRequest *request)
                {
-        std::vector<String> names;
-        std::vector<uint32_t> sizes;
+        std::vector<SDLogger::LogFileInfo> files;
         // Same 503 as findLogFile(): a busy card must not read as "no log
         // files yet" (#67).
-        if (!SDLogger::listLogFiles(names, sizes)) {
+        if (!SDLogger::listLogFiles(files)) {
             request->send(503, "text/plain", "SD card busy, try again");
             return;
         }
 
         String json = "[";
-        for (size_t i = 0; i < names.size(); i++) {
+        for (size_t i = 0; i < files.size(); i++) {
             if (i > 0) json += ",";
-            json += "{\"name\":\"" + names[i] + "\",\"size\":" + String(sizes[i]) + "}";
+            json += "{\"name\":\"" + files[i].name + "\",\"size\":" + String(files[i].size) + "}";
         }
         json += "]";
         request->send(200, "application/json", json); });

@@ -83,13 +83,8 @@ namespace
         return OpenBoundedResult::Opened;
     }
 
-    // A web-route read runs on async_tcp; while /api/logs/download holds
-    // sdMutex_ for its whole transfer, any other web-route read that lands
-    // on the same task would otherwise block on a lock async_tcp itself
-    // already holds, stalling that task (and with it HTTP/SSE) for its
-    // full timeout before failing anyway. Fail such a self-wait instantly
-    // instead - a different task holding the lock still waits the normal
-    // timeout.
+    // All web routes run on async_tcp: if it already holds sdMutex_ (a
+    // download in progress), fail now instead of waiting on itself (#116).
     TickType_t webLockTimeout(SemaphoreHandle_t mutex, TickType_t t)
     {
         if (xSemaphoreGetMutexHolder(mutex) == xTaskGetCurrentTaskHandle())

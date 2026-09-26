@@ -140,13 +140,14 @@ namespace Glideslope
             isnan(cfg.maxChargeA) || isnan(cfg.trickleA) || isnan(cfg.maintAmps))
             return 0;
 
-        if (maintenanceActive)
-            return toDeciAmps(cfg.maintAmps);
-
+        // Checked before maintenance: a force charge never bypasses the cutoff or gate (#60).
         if (rawMaxV >= cfg.cvMaxCharge)
             return 0;
         if (rawMaxV >= cfg.cvHighAlarmGate)
-            return toDeciAmps(cfg.trickleA);
+            return toDeciAmps(maintenanceActive ? fminf(cfg.maintAmps, cfg.trickleA) : (float)cfg.trickleA);
+
+        if (maintenanceActive)
+            return toDeciAmps(cfg.maintAmps);
 
         float factor = spreadFactor(spreadMv, cfg.spreadStartMv, cfg.spreadMaxMv);
 

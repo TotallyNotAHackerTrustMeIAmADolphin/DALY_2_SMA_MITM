@@ -11,11 +11,6 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
-#include "esp_core_dump.h"
-#include "esp_partition.h"
-#include "esp_spi_flash.h"
-#include "esp_system.h"
-#include "esp_ota_ops.h"
 
 namespace
 {
@@ -50,7 +45,7 @@ namespace
 }
 
 WebDashboard::WebDashboard(uint16_t port)
-    : _server(port), _events("/events"), _actionCb(nullptr), _debugCb(nullptr), _cfg(nullptr) {}
+    : _server(port), _events("/events") {}
 
 void WebDashboard::debugLog(const char *format, ...)
 {
@@ -281,248 +276,180 @@ namespace
     }
 }
 
+void WebDashboard::handleIndex(AsyncWebServerRequest *request)
+{
+    request->send(200, "text/html", index_html);
+}
+
+void WebDashboard::handleToggleMaint(AsyncWebServerRequest *request)
+{
+    if (_actionCb)
+        _actionCb("toggleMaint");
+    request->redirect("/");
+}
+
+void WebDashboard::handleResetSMA(AsyncWebServerRequest *request)
+{
+    if (_actionCb)
+        _actionCb("resetSMA");
+    request->send(200, "text/plain", "OK");
+}
+
+void WebDashboard::handleConfigPage(AsyncWebServerRequest *request)
+{
+    String h = String(config_html);
+    // Each setting's label and <input> (value, min, max, step, range line)
+    // come from the Setting itself, via !!LABEL_<key>!! and !!IN_<key>!!.
+    for (const SettingBase *s : static_cast<const SystemConfig *>(_cfg)->all())
+    {
+        h.replace(String("!!LABEL_") + s->key() + "!!", s->label());
+        h.replace(String("!!IN_") + s->key() + "!!", inputTag(*s));
+    }
+    request->send(200, "text/html", h);
+}
+
+void WebDashboard::handleLogsPage(AsyncWebServerRequest *request)
+{
+    request->send(200, "text/html", logs_html);
+}
+
+void WebDashboard::handleGraphsPage(AsyncWebServerRequest *request)
+{
+    request->send(200, "text/html", graphs_html);
+}
+
+void WebDashboard::handleLogList(AsyncWebServerRequest *request)
+{
+    std::vector<SDLogger::LogFileInfo> files;
+    // Same 503 as findLogFile(): a busy card must not read as "no log
+    // files yet" (#67).
+    if (!SDLogger::listLogFiles(files))
+    {
+        request->send(503, "text/plain", "SD card busy, try again");
+        return;
+    }
+
+    String json = "[";
+    for (size_t i = 0; i < files.size(); i++)
+    {
+        if (i > 0)
+            json += ",";
+        json += "{\"name\":\"" + files[i].name + "\",\"size\":" + String(files[i].size) + "}";
+    }
+    json += "]";
+    request->send(200, "application/json", json);
+}
+
+void WebDashboard::handleLogContent(AsyncWebServerRequest *request)
+{
+    String name;
+    uint32_t size;
+    if (!findLogFile(request, name, size))
+        return;
+
+    // Deliberately conservative, not "as much as fits in RAM": this is a
+    // single contiguous String, copied again internally by beginResponse().
+    // Live-tested at 64KB with 80KB+ free heap and it still failed -
+    // getMaxAllocHeap() showed only ~43KB was actually contiguous, so the
+    // copy silently produced an empty String (no error, just
+    // content-length: 0) rather than the requested tail. 8KB stays
+    // comfortably under real-world fragmentation on this device. A
+    // chunked/streaming response (like /api/logs/download already uses)
+    // would remove this ceiling entirely if a larger tail is ever needed.
+    const size_t maxBytes = 8192;
+    String content;
+    SDLogger::ReadResult r = SDLogger::readTail(name, content, maxBytes);
+    if (r != SDLogger::ReadResult::Ok)
+    {
+        sendReadFailure(request, r, "File too large to view (over 512KB) - try Download instead");
+        return;
+    }
+
+    AsyncWebServerResponse *response = request->beginResponse(200, "text/plain", content);
+    if (size > maxBytes)
+    {
+        response->addHeader("X-Truncated", "1");
+    }
+    request->send(response);
+}
+
+void WebDashboard::handleLogDownload(AsyncWebServerRequest *request)
+{
+    String name;
+    uint32_t size;
+    if (!findLogFile(request, name, size))
+        return;
+
+    String sdPath;
+    auto lock = SDLogger::beginDownload(name, sdPath);
+    if (!lock)
+    {
+        request->send(503, "text/plain", "SD card busy, try again");
+        return;
+    }
+
+    // Held for the whole transfer (accepted tradeoff: the background writer
+    // drops samples it can't log during that window). Force a stalled
+    // client's disconnect within 5s so the lock can't be held indefinitely;
+    // resetting the shared_ptr in onDisconnect releases it exactly once,
+    // whichever side closes the connection.
+    request->client()->setAckTimeout(5000);
+    request->onDisconnect([lock]() mutable
+                           { lock.reset(); });
+
+    request->send(SD, sdPath, contentTypeForLogFile(name), true /* download */);
+}
+
+void WebDashboard::handleGraph(AsyncWebServerRequest *request)
+{
+    String name;
+    uint32_t size;
+    if (!findLogFile(request, name, size))
+        return;
+
+    if (!name.endsWith(".csv"))
+    {
+        request->send(400, "text/plain", "Not a telemetry CSV file");
+        return;
+    }
+
+    // 300, not readGraphSeries' own 2000-point ceiling: request->send()
+    // needs this whole CSV as one contiguous String, same as
+    // /api/logs/content - live-tested at 600 points (~42KB) with a
+    // fragmented heap (getMaxAllocHeap() well under that) and it came back
+    // as a silent empty 200 response. 300 points keeps output small enough
+    // to reliably fit, and is still plenty of resolution for a trend chart
+    // at typical browser widths.
+    String csv;
+    SDLogger::ReadResult r = SDLogger::readGraphSeries(name, 300, csv);
+    if (r != SDLogger::ReadResult::Ok)
+    {
+        sendReadFailure(request, r, "Failed to read file (it may be too large to graph - try Download instead)");
+        return;
+    }
+
+    request->send(200, "text/csv", csv);
+}
+
 void WebDashboard::setupRoutes()
 {
-    _server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
-               { request->send(200, "text/html", index_html); });
-
-    _server.on("/toggleMaint", HTTP_GET, [this](AsyncWebServerRequest *request)
-               { 
-        if (_actionCb) _actionCb("toggleMaint");
-        request->redirect("/"); });
-
-    _server.on("/resetSMA", HTTP_GET, [this](AsyncWebServerRequest *request)
-               { 
-        if (_actionCb) _actionCb("resetSMA");
-        request->send(200, "text/plain", "OK"); });
-
-    _server.on("/config", HTTP_GET, [this](AsyncWebServerRequest *request)
-               {
-        String h = String(config_html);
-        // Each setting's label and <input> (value, min, max, step, range
-        // line) come from the Setting itself, via !!LABEL_<key>!! and
-        // !!IN_<key>!!.
-        for (const SettingBase *s : static_cast<const SystemConfig *>(_cfg)->all()) {
-            h.replace(String("!!LABEL_") + s->key() + "!!", s->label());
-            h.replace(String("!!IN_") + s->key() + "!!", inputTag(*s));
-        }
-        request->send(200, "text/html", h); });
-
-    _server.on("/save", HTTP_GET, [this](AsyncWebServerRequest *request)
-               { saveConfig(request); });
-
-    _server.on("/logs", HTTP_GET, [](AsyncWebServerRequest *request)
-               { request->send(200, "text/html", logs_html); });
-
-    _server.on("/api/logs/list", HTTP_GET, [](AsyncWebServerRequest *request)
-               {
-        std::vector<SDLogger::LogFileInfo> files;
-        // Same 503 as findLogFile(): a busy card must not read as "no log
-        // files yet" (#67).
-        if (!SDLogger::listLogFiles(files)) {
-            request->send(503, "text/plain", "SD card busy, try again");
-            return;
-        }
-
-        String json = "[";
-        for (size_t i = 0; i < files.size(); i++) {
-            if (i > 0) json += ",";
-            json += "{\"name\":\"" + files[i].name + "\",\"size\":" + String(files[i].size) + "}";
-        }
-        json += "]";
-        request->send(200, "application/json", json); });
-
-    _server.on("/api/logs/content", HTTP_GET, [](AsyncWebServerRequest *request)
-               {
-        String name; uint32_t size;
-        if (!findLogFile(request, name, size)) return;
-
-        // Deliberately conservative, not "as much as fits in RAM": this is
-        // a single contiguous String, copied again internally by
-        // beginResponse(). Live-tested at 64KB with 80KB+ free heap and it
-        // still failed - getMaxAllocHeap() showed only ~43KB was actually
-        // contiguous, so the copy silently produced an empty String (no
-        // error, just content-length: 0) rather than the requested tail.
-        // 8KB stays comfortably under real-world fragmentation on this
-        // device. A chunked/streaming response (like /api/logs/download
-        // already uses) would remove this ceiling entirely if a larger
-        // tail is ever needed.
-        const size_t maxBytes = 8192;
-        String content;
-        SDLogger::ReadResult r = SDLogger::readTail(name, content, maxBytes);
-        if (r != SDLogger::ReadResult::Ok) {
-            sendReadFailure(request, r, "File too large to view (over 512KB) - try Download instead");
-            return;
-        }
-
-        AsyncWebServerResponse *response = request->beginResponse(200, "text/plain", content);
-        if (size > maxBytes) {
-            response->addHeader("X-Truncated", "1");
-        }
-        request->send(response); });
-
-    _server.on("/api/logs/download", HTTP_GET, [](AsyncWebServerRequest *request)
-               {
-        String name; uint32_t size;
-        if (!findLogFile(request, name, size)) return;
-
-        String sdPath;
-        auto lock = SDLogger::beginDownload(name, sdPath);
-        if (!lock) {
-            request->send(503, "text/plain", "SD card busy, try again");
-            return;
-        }
-
-        // Held for the whole transfer (accepted tradeoff: the background
-        // writer drops samples it can't log during that window). Force a
-        // stalled client's disconnect within 5s so the lock can't be held
-        // indefinitely; resetting the shared_ptr in onDisconnect releases
-        // it exactly once, whichever side closes the connection.
-        request->client()->setAckTimeout(5000);
-        request->onDisconnect([lock]() mutable { lock.reset(); });
-
-        request->send(SD, sdPath, contentTypeForLogFile(name), true /* download */); });
-
-    // JSON headline of the last stored core dump (issue #11) - task/PC/cause/
-    // backtrace, for a UI or API consumer that doesn't want to pull and
-    // decode the whole raw ELF dump via /api/coredump below.
-    //
-    // Registered BEFORE /api/coredump: AsyncURIMatcher's default match type
-    // for a plain string with no trailing '*' is "BackwardCompatible", which
-    // matches the URI itself OR anything starting with "<uri>/" (see
-    // AsyncURIMatcher::matches() in ESPAsyncWebServer's WebServer.cpp) - so
-    // "/api/coredump" would also swallow requests to "/api/coredump/summary"
-    // if that route were registered second, since AsyncWebServer dispatches
-    // to the first handler in registration order whose canHandle() matches
-    // (see AsyncWebServer::_attachHandler()).
-    _server.on("/api/coredump/summary", HTTP_GET, [](AsyncWebServerRequest *request)
-               {
-        CoreDumpInfo dump;
-        Diagnostics::readCoreDump(dump);
-        char runningSha[17];
-        Diagnostics::runningElfSha(runningSha);
-        esp_reset_reason_t reason = esp_reset_reason();
-
-        char json[900];
-        if (!formatCoreDumpJson(dump, (int)reason, Diagnostics::resetReasonName(reason), runningSha, json, sizeof(json))) {
-            request->send(500, "text/plain", "coredump summary too large");
-            return;
-        }
-        request->send(200, "application/json", json); });
-
-    // Raw core dump image from the flash "coredump" partition, written by
-    // ESP-IDF on the last panic (ELF format, CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH
-    // is on in this Arduino core's prebuilt sdkconfig). Decode on a PC with
-    // the ELF of the firmware that crashed:
-    //   espcoredump.py info_corefile -t raw -c coredump.bin firmware.elf
-    //
-    // Mapped once via esp_partition_mmap() (#21) instead of a per-chunk
-    // esp_flash_read(): the previous filler's flash read disabled the cache
-    // and stalled the other core for every single chunk. The mapping is
-    // released exactly once - on normal completion AND on client abort -
-    // via onDisconnect, same single-release pattern as /api/logs/download's
-    // sdMutex release above (this library always closes non-keep-alive
-    // file-response connections, so onDisconnect is a reliable single
-    // release point).
-    //
-    // esp_core_dump_image_check() runs first (not just image_get()) so a
-    // dump that's present-sized but fails its CRC (e.g. brownout mid-panic,
-    // writing cut off partway) is refused with 409 instead of being streamed
-    // as bytes espcoredump.py will reject anyway while the boot log claims
-    // "no core dump".
-    _server.on("/api/coredump", HTTP_GET, [](AsyncWebServerRequest *request)
-               {
-        esp_err_t checkErr = esp_core_dump_image_check();
-        if (Diagnostics::coreDumpAbsent(checkErr)) {
-            request->send(404, "text/plain", "No core dump stored");
-            return;
-        }
-        if (checkErr != ESP_OK) {
-            char msg[96];
-            snprintf(msg, sizeof(msg), "core dump present but corrupt: %.64s", esp_err_to_name(checkErr));
-            request->send(409, "text/plain", msg);
-            return;
-        }
-
-        size_t addr = 0, size = 0;
-        if (esp_core_dump_image_get(&addr, &size) != ESP_OK || size == 0) {
-            request->send(404, "text/plain", "No core dump stored");
-            return;
-        }
-
-        const esp_partition_t *part = esp_partition_find_first(
-            ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_COREDUMP, NULL);
-        if (!part) {
-            request->send(404, "text/plain", "No core dump stored");
-            return;
-        }
-
-        // esp_core_dump_image_get()'s size describes the stored image and
-        // should never exceed the partition it lives in - but if it ever
-        // did (e.g. a corrupt size field slipping past image_check()'s CRC),
-        // mapping/serving more than the partition actually holds must never
-        // happen. Clamp once, here, and use this same value for the mmap
-        // call, the filler's bound and Content-Length below, so those three
-        // can't disagree with each other (#21) - unlike the old per-chunk
-        // esp_flash_read() filler, whose only error path (a failed chunk
-        // read) returned 0 mid-stream and left the response short against
-        // an already-sent, un-clamped Content-Length.
-        size_t mapSize = size < part->size ? size : part->size;
-
-        const void *mapPtr = nullptr;
-        spi_flash_mmap_handle_t mapHandle = 0;
-        if (esp_partition_mmap(part, 0, mapSize, SPI_FLASH_MMAP_DATA, &mapPtr, &mapHandle) != ESP_OK) {
-            request->send(500, "text/plain", "Failed to map core dump partition");
-            return;
-        }
-
-        const uint8_t *base = static_cast<const uint8_t *>(mapPtr);
-        request->onDisconnect([mapHandle]() { spi_flash_munmap(mapHandle); });
-
-        AsyncWebServerResponse *response = request->beginResponse(
-            "application/octet-stream", mapSize,
-            [base, mapSize](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
-                // The only remaining "end" condition: index has reached the
-                // clamped size. memcpy from an already-successful mmap
-                // can't itself fail mid-stream the way esp_flash_read()
-                // could, so there is no other error path left to handle.
-                if (index >= mapSize)
-                    return 0;
-                size_t n = mapSize - index;
-                if (n > maxLen)
-                    n = maxLen;
-                memcpy(buffer, base + index, n);
-                return n;
-            });
-        response->addHeader("Content-Disposition", "attachment; filename=\"coredump.bin\"");
-        request->send(response); });
-
-    _server.on("/graphs", HTTP_GET, [](AsyncWebServerRequest *request)
-               { request->send(200, "text/html", graphs_html); });
-
-    _server.on("/api/logs/graph", HTTP_GET, [](AsyncWebServerRequest *request)
-               {
-        String name; uint32_t size;
-        if (!findLogFile(request, name, size)) return;
-
-        if (!name.endsWith(".csv")) {
-            request->send(400, "text/plain", "Not a telemetry CSV file");
-            return;
-        }
-
-        // 300, not readGraphSeries' own 2000-point ceiling: request->send()
-        // needs this whole CSV as one contiguous String, same as
-        // /api/logs/content - live-tested at 600 points (~42KB) with a
-        // fragmented heap (getMaxAllocHeap() well under that) and it came
-        // back as a silent empty 200 response. 300 points keeps output
-        // small enough to reliably fit, and is still plenty of resolution
-        // for a trend chart at typical browser widths.
-        String csv;
-        SDLogger::ReadResult r = SDLogger::readGraphSeries(name, 300, csv);
-        if (r != SDLogger::ReadResult::Ok) {
-            sendReadFailure(request, r, "Failed to read file (it may be too large to graph - try Download instead)");
-            return;
-        }
-
-        request->send(200, "text/csv", csv); });
+    _server.on("/", HTTP_GET, handleIndex);
+    _server.on("/toggleMaint", HTTP_GET, [this](AsyncWebServerRequest *r)
+               { handleToggleMaint(r); });
+    _server.on("/resetSMA", HTTP_GET, [this](AsyncWebServerRequest *r)
+               { handleResetSMA(r); });
+    _server.on("/config", HTTP_GET, [this](AsyncWebServerRequest *r)
+               { handleConfigPage(r); });
+    _server.on("/save", HTTP_GET, [this](AsyncWebServerRequest *r)
+               { saveConfig(r); });
+    _server.on("/logs", HTTP_GET, handleLogsPage);
+    _server.on("/api/logs/list", HTTP_GET, handleLogList);
+    _server.on("/api/logs/content", HTTP_GET, handleLogContent);
+    _server.on("/api/logs/download", HTTP_GET, handleLogDownload);
+    // Both coredump routes, and the comment on why their registration order
+    // matters, live in Diagnostics::registerRoutes() (#90) - neither is web
+    // code.
+    Diagnostics::registerRoutes(_server);
+    _server.on("/graphs", HTTP_GET, handleGraphsPage);
+    _server.on("/api/logs/graph", HTTP_GET, handleGraph);
 }

@@ -43,11 +43,25 @@ public:
 private:
     AsyncWebServer _server;
     AsyncEventSource _events;
-    SystemConfig *_cfg; // Pointer to the main app's config struct
-    ActionCallback _actionCb;
-    WebDebugCallback _debugCb;
+    SystemConfig *_cfg = nullptr; // Pointer to the main app's config struct
+    ActionCallback _actionCb = nullptr;
+    WebDebugCallback _debugCb = nullptr;
 
+    // One handler per route (#90) - setupRoutes() just wires each URI to
+    // one of these. The stateless ones (page/API handlers below that touch
+    // neither _cfg nor _actionCb) are static, so they're registered
+    // directly with no capturing-lambda wrapper.
+    static void handleIndex(AsyncWebServerRequest *request);
+    void handleToggleMaint(AsyncWebServerRequest *request);
+    void handleResetSMA(AsyncWebServerRequest *request);
+    void handleConfigPage(AsyncWebServerRequest *request);
     void saveConfig(AsyncWebServerRequest *request);
+    static void handleLogsPage(AsyncWebServerRequest *request);
+    static void handleGraphsPage(AsyncWebServerRequest *request);
+    static void handleLogList(AsyncWebServerRequest *request);
+    static void handleLogContent(AsyncWebServerRequest *request);
+    static void handleLogDownload(AsyncWebServerRequest *request);
+    static void handleGraph(AsyncWebServerRequest *request);
     void setupRoutes();
 
     // Formats like printf and forwards to _debugCb (a no-op if unset). See

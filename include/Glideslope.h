@@ -26,6 +26,22 @@ namespace Glideslope
         return (uint32_t)(nowMs - lastReadMs) <= (uint32_t)timeoutS * 1000u;
     }
 
+    // Converts a current in A to the 0.1A units sent in 0x351, clamped to
+    // what a uint16_t can hold. A float -> uint16_t cast of a negative (or
+    // too large) value is undefined and in practice wraps: a negative
+    // trickleA/limpDischargeA/maintAmps (e.g. a /config typo) used to go
+    // out as ~6550A instead of 0A (#52). Every current-limit return below
+    // goes through here, so no branch can reintroduce the wraparound.
+    inline uint16_t toDeciAmps(float amps)
+    {
+        float deci = roundf(amps * 10.0f);
+        if (!(deci > 0.0f))
+            return 0;
+        if (deci > 65535.0f)
+            return 65535;
+        return (uint16_t)deci;
+    }
+
     // Derating factor from the raw (max-min) cell spread (#24). A weak
     // cell's IR drop is proportional to current, not state of charge, so a
     // voltage threshold alone reacts late (see #8 - Cell 16's offset grows
@@ -84,12 +100,12 @@ namespace Glideslope
             return 0;
 
         if (maintenanceActive)
-            return (uint16_t)round(cfg.maintAmps * 10.0f);
+            return toDeciAmps(cfg.maintAmps);
 
         if (rawMaxV >= cfg.cvMaxCharge)
             return 0;
         if (rawMaxV >= cfg.cvHighAlarmGate)
-            return (uint16_t)round(cfg.trickleA * 10.0f);
+            return toDeciAmps(cfg.trickleA);
 
         float factor = spreadFactor(spreadMv, cfg.spreadStartMv, cfg.spreadMaxMv);
 
@@ -97,7 +113,7 @@ namespace Glideslope
         {
             float div = cfg.cvHighAlarmGate - cfg.cvStartTaper;
             if (div <= 0.0001f)
-                return (uint16_t)round(cfg.trickleA * 10.0f);
+                return toDeciAmps(cfg.trickleA);
 
             // If smoothedMaxV is already at/above cvHighAlarmGate here (raw
             // has since fallen back below the gate, or this cell's smoothed
@@ -111,9 +127,9 @@ namespace Glideslope
                 slope = 1.0f;
 
             float target = cfg.trickleA + (slope * (cfg.maxChargeA - cfg.trickleA));
-            return (uint16_t)round(fmaxf(target * factor, cfg.trickleA) * 10.0f);
+            return toDeciAmps(fmaxf(target * factor, cfg.trickleA));
         }
-        return (uint16_t)round(fmaxf(cfg.maxChargeA * factor, cfg.trickleA) * 10.0f);
+        return toDeciAmps(fmaxf(cfg.maxChargeA * factor, cfg.trickleA));
     }
 
     // Discharge current limit - mirror image of calculateCCL. See its
@@ -138,7 +154,7 @@ namespace Glideslope
         if (rawMinV <= cfg.cvMinDischarge)
             return 0;
         if (rawMinV <= cfg.cvLowAlarmGate)
-            return (uint16_t)round(cfg.limpDischargeA * 10.0f);
+            return toDeciAmps(cfg.limpDischargeA);
 
         float factor = spreadFactor(spreadMv, cfg.spreadStartMv, cfg.spreadMaxMv);
 
@@ -146,7 +162,7 @@ namespace Glideslope
         {
             float div = cfg.cvStartDTaper - cfg.cvLowAlarmGate;
             if (div <= 0.0001f)
-                return (uint16_t)round(cfg.limpDischargeA * 10.0f);
+                return toDeciAmps(cfg.limpDischargeA);
 
             // Mirror of calculateCCL()'s slope clamp: smoothedMinV at/below
             // cvLowAlarmGate here (raw has since risen back above it) makes
@@ -159,8 +175,8 @@ namespace Glideslope
                 slope = 1.0f;
 
             float target = cfg.limpDischargeA + (slope * (cfg.maxDischargeA - cfg.limpDischargeA));
-            return (uint16_t)round(fmaxf(target * factor, cfg.limpDischargeA) * 10.0f);
+            return toDeciAmps(fmaxf(target * factor, cfg.limpDischargeA));
         }
-        return (uint16_t)round(fmaxf(cfg.maxDischargeA * factor, cfg.limpDischargeA) * 10.0f);
+        return toDeciAmps(fmaxf(cfg.maxDischargeA * factor, cfg.limpDischargeA));
     }
 }

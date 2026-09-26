@@ -411,6 +411,69 @@ void test_nan_current_setpoint_is_zero(void)
     TEST_ASSERT_EQUAL(0, calculateDCL(cfg, 3.05f, 3.05f, 0, true, false));
 }
 
+// --- Negative current setpoints floor at 0A, never wrap (#52) ---
+// A float -> uint16_t cast of a negative value used to wrap to ~65500
+// (~6550A reported to the SMA). Every branch must come back 0 instead.
+
+void test_ccl_negative_trickle_at_gate_is_zero(void)
+{
+    cfg.trickleA = -5.0f;
+    TEST_ASSERT_EQUAL(0, calculateCCL(cfg, 3.4f, 3.4f, 0, true, false));
+}
+
+void test_ccl_negative_trickle_degenerate_taper_is_zero(void)
+{
+    cfg.trickleA = -5.0f;
+    cfg.cvHighAlarmGate = cfg.cvStartTaper;
+    cfg.cvMaxCharge = 3.6f;
+    TEST_ASSERT_EQUAL(0, calculateCCL(cfg, 3.35f, 3.35f, 0, true, false));
+}
+
+void test_ccl_negative_maint_amps_is_zero(void)
+{
+    cfg.maintAmps = -20.0f;
+    TEST_ASSERT_EQUAL(0, calculateCCL(cfg, 3.0f, 3.0f, 0, true, true));
+}
+
+void test_ccl_negative_max_and_trickle_is_zero(void)
+{
+    // Taper and full-current branches: fmaxf(x, trickleA) no longer
+    // guarantees a non-negative result once trickleA itself is negative.
+    cfg.maxChargeA = -100.0f;
+    cfg.trickleA = -5.0f;
+    TEST_ASSERT_EQUAL(0, calculateCCL(cfg, 3.0f, 3.0f, 0, true, false));
+    TEST_ASSERT_EQUAL(0, calculateCCL(cfg, 3.35f, 3.35f, 0, true, false));
+}
+
+void test_dcl_negative_limp_at_gate_is_zero(void)
+{
+    cfg.limpDischargeA = -15.0f;
+    TEST_ASSERT_EQUAL(0, calculateDCL(cfg, 3.1f, 3.1f, 0, true, false));
+}
+
+void test_dcl_negative_limp_degenerate_taper_is_zero(void)
+{
+    cfg.limpDischargeA = -15.0f;
+    cfg.cvLowAlarmGate = cfg.cvStartDTaper;
+    cfg.cvMinDischarge = 2.9f;
+    TEST_ASSERT_EQUAL(0, calculateDCL(cfg, 3.15f, 3.25f, 0, true, false));
+}
+
+void test_dcl_negative_max_and_limp_is_zero(void)
+{
+    cfg.maxDischargeA = -200.0f;
+    cfg.limpDischargeA = -15.0f;
+    TEST_ASSERT_EQUAL(0, calculateDCL(cfg, 3.3f, 3.3f, 0, true, false));
+    TEST_ASSERT_EQUAL(0, calculateDCL(cfg, 3.15f, 3.15f, 0, true, false));
+}
+
+void test_huge_setpoint_saturates_instead_of_wrapping(void)
+{
+    // 7000A * 10 = 70000 > UINT16_MAX: saturate, don't wrap to 4464.
+    cfg.maxChargeA = 7000.0f;
+    TEST_ASSERT_EQUAL(65535, calculateCCL(cfg, 3.0f, 3.0f, 0, true, false));
+}
+
 // --- Fail-safe: no data / stale data forces 0A (#10) ---
 
 void test_limits_zero_when_not_fresh(void)
@@ -498,6 +561,14 @@ int main(int, char **)
     RUN_TEST(test_nan_voltage_is_zero);
     RUN_TEST(test_nan_threshold_is_zero);
     RUN_TEST(test_nan_current_setpoint_is_zero);
+    RUN_TEST(test_ccl_negative_trickle_at_gate_is_zero);
+    RUN_TEST(test_ccl_negative_trickle_degenerate_taper_is_zero);
+    RUN_TEST(test_ccl_negative_maint_amps_is_zero);
+    RUN_TEST(test_ccl_negative_max_and_trickle_is_zero);
+    RUN_TEST(test_dcl_negative_limp_at_gate_is_zero);
+    RUN_TEST(test_dcl_negative_limp_degenerate_taper_is_zero);
+    RUN_TEST(test_dcl_negative_max_and_limp_is_zero);
+    RUN_TEST(test_huge_setpoint_saturates_instead_of_wrapping);
     RUN_TEST(test_limits_zero_when_not_fresh);
     RUN_TEST(test_never_read_is_stale_right_after_boot);
     RUN_TEST(test_fresh_within_timeout);

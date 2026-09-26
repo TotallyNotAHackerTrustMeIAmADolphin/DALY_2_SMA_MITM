@@ -143,52 +143,32 @@ bool DalyRS485::readCellVoltages(uint8_t expectedCells, std::vector<float> &cell
         cellVoltages.resize(expectedCells, 0.0f);
     }
 
-    int expectedFrames = (expectedCells + 2) / 3;
+    DalyFrames::CellFrameCollector collector;
 
     for (int retry = 0; retry < kCellVoltageRetries; retry++)
     {
-        // 1. Send the command EXACTLY ONCE
-        sendCommand(DalyFrames::CellVoltages);
-
-        int framesReceivedCount = 0;
-        uint8_t framesMask = 0;
-        unsigned long start = millis();
+        collector.reset(expectedCells);
         _frameAssembler.reset();
+        sendCommand(DalyFrames::CellVoltages); // send the command EXACTLY ONCE
 
-        // 2. Sit quietly and catch all `expectedFrames` frames as the BMS
-        // streams them out - one receiveFrame() call per frame (#101), all
-        // sharing the same kCellVoltageWindowMs budget off `start`, same as
-        // the single byte-sync loop this replaces.
-        while (millis() - start < kCellVoltageWindowMs && framesReceivedCount < expectedFrames)
+        // Sit quietly and catch all the frames as the BMS streams them out
+        // - one receiveFrame() call per frame (#101), all sharing the same
+        // kCellVoltageWindowMs budget off `start`.
+        unsigned long start = millis();
+        while (millis() - start < kCellVoltageWindowMs && !collector.complete())
         {
-            uint8_t data[DalyFrames::kPayloadLen];
-            if (!receiveFrame(DalyFrames::CellVoltages, data, start, kCellVoltageWindowMs, /*logChecksumFailures=*/true))
+            uint8_t payload[DalyFrames::kPayloadLen];
+            if (!receiveFrame(DalyFrames::CellVoltages, payload, start, kCellVoltageWindowMs, /*logChecksumFailures=*/true))
                 break; // window elapsed without another frame
-
-            uint8_t frameNum;
-            uint16_t mv[3];
-            DalyFrames::parseCellFrame(data, frameNum, mv);
-
-            if (frameNum > 0 && frameNum <= expectedFrames)
-            {
-                // Check if we haven't seen this specific frame yet
-                if (!(framesMask & (1 << frameNum)))
-                {
-                    framesMask |= (1 << frameNum);
-                    framesReceivedCount++;
-
-                    for (int i = 0; i < 3; i++)
-                    {
-                        int cellIdx = (frameNum - 1) * 3 + i;
-                        if (cellIdx < expectedCells)
-                            cellVoltages[cellIdx] = mv[i] / 1000.0f;
-                    }
-                }
-            }
+            collector.accept(payload);
         }
 
-        if (framesReceivedCount == expectedFrames)
+        if (collector.complete())
         {
+            const uint16_t *mv = collector.mv();
+            for (int i = 0; i < expectedCells; i++)
+                cellVoltages[i] = mv[i] / 1000.0f;
+
             // All frames parsed cleanly on the wire (checksums passed), but a
             // checksum can still pass on a garbled value. bmsTask seeds its
             // whole moving-average window from the first successful read, so
@@ -197,30 +177,29 @@ bool DalyRS485::readCellVoltages(uint8_t expectedCells, std::vector<float> &cell
             // frame - if any cell falls outside a physically plausible
             // LiFePO4 range; the caller's stale-data fail-safe then drops
             // limits to 0A instead of trusting the value.
-            static bool rejecting = false;
             int badIndex;
             if (!DalyFrames::cellVoltagesPlausible(cellVoltages.data(), expectedCells, badIndex))
             {
-                if (!rejecting)
+                if (!_cellVoltagesRejecting)
                 {
                     uint16_t mv = (uint16_t)(cellVoltages[badIndex] * 1000.0f + 0.5f);
                     debugLog("[BMS] Rejected cell frame: cell %d = %u mV outside 1.5-4.5 V\n", badIndex + 1, mv);
-                    rejecting = true;
+                    _cellVoltagesRejecting = true;
                 }
                 cellVoltages.assign(expectedCells, 0.0f);
                 return false;
             }
 
-            if (rejecting)
+            if (_cellVoltagesRejecting)
             {
                 debugLog("[BMS] Cell frames plausible again\n");
-                rejecting = false;
+                _cellVoltagesRejecting = false;
             }
 
             return true; // We got them all!
         }
 
-        debugLog("[DALY-LIB] Missed frames. Got %d/%d. Retrying...\n", framesReceivedCount, expectedFrames);
+        debugLog("[DALY-LIB] Missed frames. Got %d/%d. Retrying...\n", collector.framesReceived(), collector.expectedFrames());
         vTaskDelay(pdMS_TO_TICKS(kCellVoltageRetryPauseMs)); // Pause before retry
     }
     return false;

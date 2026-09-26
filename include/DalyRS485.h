@@ -54,6 +54,12 @@ private:
     DalyDebugCallback _debugCb; // Stores the callback function
     DalyFrames::FrameAssembler _frameAssembler;
 
+    // Edge-triggered flag for the "Rejected cell frame"/"plausible again"
+    // log pair in readCellVoltages() (#102) - moved out of a function-
+    // local `static bool` (hidden state shared across every DalyRS485
+    // instance) into a member of this one.
+    bool _cellVoltagesRejecting = false;
+
     void sendCommand(DalyFrames::Cmd cmd);
 
     // Receives bytes until either a checksum-valid frame for `expected`

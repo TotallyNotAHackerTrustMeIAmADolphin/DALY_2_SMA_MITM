@@ -259,8 +259,8 @@ namespace DalyFrames
     //   [3..4] cell voltage N+1, mV, big-endian
     //   [5..6] cell voltage N+2, mV, big-endian
     //   [7]    unused by this firmware (not decoded)
-    // Frame-number range/dedup checking and cellIdx bounds against
-    // expectedCells stay in DalyRS485::readCellVoltages(), since they
+    // Frame-number range/dedup checking and cellIdx mapping against
+    // expectedCells now live in CellFrameCollector below, since they
     // depend on the pack's configured cell count, not the frame itself.
     inline bool parseCellFrame(const uint8_t data[8], uint8_t &frameNo, uint16_t mv[3])
     {
@@ -270,6 +270,94 @@ namespace DalyFrames
         mv[2] = (data[5] << 8) | data[6];
         return true;
     }
+
+    // Upper bound on the cell count CellFrameCollector will collect
+    // (#102). Generously above CellSmoother::MAX_CELLS (16, the actual
+    // pack size this firmware supports) rather than importing that
+    // constant, so DalyFrames.h stays free of a dependency on
+    // CellSmoother.h; reset() clamps to this rather than trusting an
+    // out-of-range expectedCells. A uint32_t frame mask (below) safely
+    // covers every frame number this bound can produce.
+    constexpr int kMaxCollectorCells = 32;
+
+    // Collects the 0x95 "Cell Voltages" stream into per-cell millivolt
+    // values (#102): reset(cells) for a fresh read, accept() once per
+    // received payload, complete() once every frame has arrived. Replaces
+    // the frame-number range check, dedup (framesMask), and frame->cell
+    // mapping ((frameNo-1)*3+i) that used to live inline in
+    // DalyRS485::readCellVoltages() - same logic, now pure and native-
+    // testable. framesMask_ is uint32_t, not the uint8_t the inline
+    // version used, which silently truncated (1 << frameNum wrapped) for
+    // more than ~21 cells; not reachable with today's 16-cell pack, but a
+    // real latent bug the old shape couldn't express.
+    class CellFrameCollector
+    {
+    public:
+        void reset(int cells)
+        {
+            if (cells < 0)
+                cells = 0;
+            if (cells > kMaxCollectorCells)
+                cells = kMaxCollectorCells;
+            cells_ = cells;
+            expectedFrames_ = (cells_ + 2) / 3;
+            framesMask_ = 0;
+            framesReceived_ = 0;
+            for (int i = 0; i < kMaxCollectorCells; i++)
+                mv_[i] = 0;
+        }
+
+        // Feeds one 8-byte cell-voltage payload. Out-of-range frame
+        // numbers (0, or beyond expectedFrames_) are rejected; a frame
+        // number already seen is a duplicate and is ignored (its mv
+        // values were already stored). The last frame is partial when
+        // cells_ isn't a multiple of 3 (e.g. 16 cells -> frame 6 carries
+        // only 1 cell); its unused mv slots are never written, matching
+        // the `if (cellIdx < cells_)` bound the old inline code had.
+        // Returns true iff this payload's frame number was newly
+        // accepted (false for out-of-range or duplicate).
+        bool accept(const uint8_t payload[kPayloadLen])
+        {
+            uint8_t frameNo;
+            uint16_t mv[3];
+            parseCellFrame(payload, frameNo, mv);
+
+            if (frameNo == 0 || frameNo > expectedFrames_)
+                return false;
+
+            uint32_t bit = 1u << frameNo;
+            if (framesMask_ & bit)
+                return false; // duplicate - already counted and stored
+
+            framesMask_ |= bit;
+            framesReceived_++;
+
+            for (int i = 0; i < 3; i++)
+            {
+                int cellIdx = (frameNo - 1) * 3 + i;
+                if (cellIdx < cells_)
+                    mv_[cellIdx] = mv[i];
+            }
+            return true;
+        }
+
+        bool complete() const { return framesReceived_ == expectedFrames_; }
+
+        // Per-cell millivolt values, indexed [0, cells_). Only valid past
+        // an index once its frame has been accept()-ed; unset slots stay
+        // at the 0 reset() left them.
+        const uint16_t *mv() const { return mv_; }
+
+        int framesReceived() const { return framesReceived_; }
+        int expectedFrames() const { return expectedFrames_; }
+
+    private:
+        int cells_ = 0;
+        int expectedFrames_ = 0;
+        uint32_t framesMask_ = 0;
+        int framesReceived_ = 0;
+        uint16_t mv_[kMaxCollectorCells] = {};
+    };
 
     // Daly UART "Status Info 2" (cmd 0x93) payload layout, from the same
     // community-documented protocol family as the 0x90/0x95 frames above

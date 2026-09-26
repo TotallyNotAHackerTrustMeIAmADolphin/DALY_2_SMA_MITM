@@ -145,6 +145,61 @@ static void test_finish_with_no_input_writes_nothing(void)
     TEST_ASSERT_EQUAL_UINT32(0, outLen);
 }
 
+// --- CsvDecimation::estimateSkip (#96): the skip-interval math extracted
+// out of readGraphSeries(), pure and directly testable now ---
+
+using CsvDecimation::estimateSkip;
+
+// Zero sample lines (huge single line, or a file barely bigger than its
+// header): estimatedLines stays at its default of 1, so skip is always 1
+// regardless of dataBytes/targetPoints.
+static void test_estimateskip_zero_sample_lines_is_skip_one(void)
+{
+    TEST_ASSERT_EQUAL_UINT32(1, estimateSkip(/*dataBytes=*/500000, /*sampleBytes=*/4096, /*sampleLines=*/0, /*targetPoints=*/300));
+    TEST_ASSERT_EQUAL_UINT32(1, estimateSkip(0, 0, 0, 1));
+}
+
+// A tiny file whose estimated line count rounds down to 0 is clamped back
+// up to 1 rather than dividing by zero downstream.
+static void test_estimateskip_tiny_file_clamped_to_one_line(void)
+{
+    // avgLineLen = 4096/100 ~= 41; dataBytes=10 -> estimatedLines rounds to 0.
+    TEST_ASSERT_EQUAL_UINT32(1, estimateSkip(/*dataBytes=*/10, /*sampleBytes=*/4096, /*sampleLines=*/100, /*targetPoints=*/300));
+}
+
+// targetPoints far bigger than the estimated row count: keep every row (skip=1).
+static void test_estimateskip_oversized_target_keeps_every_row(void)
+{
+    // avgLineLen = 4096/100 = 40.96; dataBytes=4096 -> estimatedLines ~= 100.
+    TEST_ASSERT_EQUAL_UINT32(1, estimateSkip(/*dataBytes=*/4096, /*sampleBytes=*/4096, /*sampleLines=*/100, /*targetPoints=*/100000));
+}
+
+// Normal case: matches the pre-refactor inline math exactly (same floats,
+// same integer truncation order: estimatedLines first, then /targetPoints).
+static void test_estimateskip_normal_case_matches_old_inline_math(void)
+{
+    const uint32_t dataBytes = 24000;
+    const uint32_t sampleBytes = 4096;
+    const size_t sampleLines = 100;
+    const size_t targetPoints = 100;
+
+    float avgLineLen = (float)sampleBytes / (float)sampleLines; // 40.96
+    size_t estimatedLines = (size_t)((float)dataBytes / avgLineLen); // truncates
+    size_t expectedSkip = (estimatedLines > targetPoints) ? (estimatedLines / targetPoints) : 1;
+
+    TEST_ASSERT_EQUAL_UINT32(expectedSkip, estimateSkip(dataBytes, sampleBytes, sampleLines, targetPoints));
+    // Pin the actual number too, so a future accidental formula change is caught.
+    TEST_ASSERT_EQUAL_UINT32(5, estimateSkip(dataBytes, sampleBytes, sampleLines, targetPoints));
+}
+
+// targetPoints == 0 is treated as 1, same as the caller-side clamp this
+// used to rely on (callers still clamp before calling, but estimateSkip
+// doesn't divide by zero even if one doesn't).
+static void test_estimateskip_zero_target_points_treated_as_one(void)
+{
+    TEST_ASSERT_EQUAL_UINT32(estimateSkip(24000, 4096, 100, 1), estimateSkip(24000, 4096, 100, 0));
+}
+
 int main(int, char **)
 {
     UNITY_BEGIN();
@@ -154,5 +209,10 @@ int main(int, char **)
     RUN_TEST(test_oversized_line_safely_truncated);
     RUN_TEST(test_final_line_without_newline_flushed_by_finish);
     RUN_TEST(test_finish_with_no_input_writes_nothing);
+    RUN_TEST(test_estimateskip_zero_sample_lines_is_skip_one);
+    RUN_TEST(test_estimateskip_tiny_file_clamped_to_one_line);
+    RUN_TEST(test_estimateskip_oversized_target_keeps_every_row);
+    RUN_TEST(test_estimateskip_normal_case_matches_old_inline_math);
+    RUN_TEST(test_estimateskip_zero_target_points_treated_as_one);
     return UNITY_END();
 }

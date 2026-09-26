@@ -29,6 +29,27 @@ namespace CsvDecimation
     // a full telemetry row is ~230 bytes today, generous margin.
     constexpr size_t kLineBufSize = 320;
 
+    // Skip interval for decimating dataBytes of CSV rows down to
+    // targetPoints, estimated from a short sample (sampleBytes read,
+    // sampleLines '\n's found) instead of a full-file scan. Always >= 1.
+    inline size_t estimateSkip(uint32_t dataBytes, uint32_t sampleBytes,
+                                size_t sampleLines, size_t targetPoints)
+    {
+        if (targetPoints == 0)
+            targetPoints = 1;
+
+        size_t estimatedLines = 1;
+        if (sampleLines > 0 && sampleBytes > 0)
+        {
+            float avgLineLen = (float)sampleBytes / (float)sampleLines;
+            estimatedLines = (size_t)((float)dataBytes / avgLineLen);
+            if (estimatedLines == 0)
+                estimatedLines = 1;
+        }
+
+        return (estimatedLines > targetPoints) ? (estimatedLines / targetPoints) : 1;
+    }
+
     // Generous upper bound on how many fields a caller can request per
     // decimated line - readGraphSeries() resolves 7 today
     // (Timestamp..ReqI).

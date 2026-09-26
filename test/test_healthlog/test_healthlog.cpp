@@ -203,6 +203,64 @@ static void test_task_disappearing_is_logged(void)
     TEST_ASSERT_EQUAL(kNone, decide(st, s, 2 * kTen).reason);
 }
 
+// --- SD drop/failure counters (#99): any increase logs, once ---
+
+static void test_sd_drops_increase_triggers_once(void)
+{
+    State st;
+    decide(st, steady(), 0);
+    Sample s = steady();
+    s.sdDroppedQueueFull += 1;
+    Decision d = decide(st, s, kTen);
+    TEST_ASSERT_EQUAL(kSdDrops, d.reason);
+    // Logged value is the new reference: no repeat with the same counters.
+    TEST_ASSERT_EQUAL(kNone, decide(st, s, 2 * kTen).reason);
+}
+
+static void test_sd_drops_each_counter_triggers_independently(void)
+{
+    State st;
+    decide(st, steady(), 0);
+
+    Sample s1 = steady();
+    s1.sdDroppedLockTimeout += 1;
+    TEST_ASSERT_EQUAL(kSdDrops, decide(st, s1, kTen).reason);
+
+    Sample s2 = steady();
+    s2.sdDroppedLockTimeout = s1.sdDroppedLockTimeout; // already-seen value
+    s2.sdWriteFailures += 1;
+    TEST_ASSERT_EQUAL(kSdDrops, decide(st, s2, 2 * kTen).reason);
+}
+
+static void test_sd_drops_no_increase_no_trigger(void)
+{
+    // A steady device with some already-nonzero SD counters from earlier
+    // in its uptime must not re-log every cycle just because they're > 0.
+    State st;
+    Sample baseline = steady();
+    baseline.sdDroppedQueueFull = 3;
+    baseline.sdDroppedLockTimeout = 1;
+    baseline.sdWriteFailures = 2;
+    decide(st, baseline, 0);
+
+    for (uint32_t k = 1; k < 10; k++)
+        TEST_ASSERT_EQUAL(kNone, decide(st, baseline, k * kTen).reason);
+}
+
+static void test_sd_drops_baseline_captures_nonzero_counters(void)
+{
+    // The very first sample (kBaseline) must adopt whatever the counters
+    // already are as the reference, not silently assume 0 - otherwise the
+    // very next identical sample would wrongly look like an increase.
+    State st;
+    Sample s = steady();
+    s.sdDroppedQueueFull = 5;
+    s.sdDroppedLockTimeout = 2;
+    s.sdWriteFailures = 7;
+    TEST_ASSERT_EQUAL(kBaseline, decide(st, s, 0).reason);
+    TEST_ASSERT_EQUAL(kNone, decide(st, s, kTen).reason);
+}
+
 static void test_block_reference_ratchets_up(void)
 {
     // Review finding: a baseline taken while buffers were held (60 KB)
@@ -235,6 +293,10 @@ int main(int, char **)
     RUN_TEST(test_late_starting_task_adopts_first_reading);
     RUN_TEST(test_late_starting_task_already_low_is_flagged);
     RUN_TEST(test_task_disappearing_is_logged);
+    RUN_TEST(test_sd_drops_increase_triggers_once);
+    RUN_TEST(test_sd_drops_each_counter_triggers_independently);
+    RUN_TEST(test_sd_drops_no_increase_no_trigger);
+    RUN_TEST(test_sd_drops_baseline_captures_nonzero_counters);
     RUN_TEST(test_block_reference_ratchets_up);
     return UNITY_END();
 }

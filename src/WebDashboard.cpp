@@ -397,9 +397,8 @@ bool WebDashboard::findLogFile(AsyncWebServerRequest *request, String &outName, 
 
     // Only match names we actually listed ourselves - this doubles as the
     // path-traversal guard, since our filenames never contain '/' or '..'.
-    std::vector<String> names;
-    std::vector<uint32_t> sizes;
-    if (!SDLogger::listLogFiles(names, sizes))
+    std::vector<SDLogger::LogFileInfo> files;
+    if (!SDLogger::listLogFiles(files))
     {
         // Distinguish "SD card busy/not ready" from "genuinely no such file"
         // below - otherwise a transient lock timeout looks like a 404 and
@@ -408,12 +407,12 @@ bool WebDashboard::findLogFile(AsyncWebServerRequest *request, String &outName, 
         return false;
     }
 
-    for (size_t i = 0; i < names.size(); i++)
+    for (const SDLogger::LogFileInfo &f : files)
     {
-        if (names[i] == requested)
+        if (f.name == requested)
         {
-            outName = names[i];
-            outSize = sizes[i];
+            outName = f.name;
+            outSize = f.size;
             return true;
         }
     }
@@ -425,6 +424,29 @@ bool WebDashboard::findLogFile(AsyncWebServerRequest *request, String &outName, 
 const char *WebDashboard::contentTypeForLogFile(const String &name)
 {
     return name.endsWith(".csv") ? "text/csv" : "text/plain";
+}
+
+namespace
+{
+    // ReadResult -> status code, once, for both /api/logs/content and
+    // /api/logs/graph. tooLargeBody differs per route (different caps).
+    void sendReadFailure(AsyncWebServerRequest *request, SDLogger::ReadResult r, const char *tooLargeBody)
+    {
+        switch (r)
+        {
+        case SDLogger::ReadResult::Busy:
+            request->send(503, "text/plain", "SD card busy, try again");
+            return;
+        case SDLogger::ReadResult::NotFound:
+            request->send(404, "text/plain", "Unknown log file");
+            return;
+        case SDLogger::ReadResult::TooLarge:
+            request->send(413, "text/plain", tooLargeBody);
+            return;
+        case SDLogger::ReadResult::Ok:
+            return;
+        }
+    }
 }
 
 void WebDashboard::setupRoutes()
@@ -462,19 +484,18 @@ void WebDashboard::setupRoutes()
 
     _server.on("/api/logs/list", HTTP_GET, [](AsyncWebServerRequest *request)
                {
-        std::vector<String> names;
-        std::vector<uint32_t> sizes;
+        std::vector<SDLogger::LogFileInfo> files;
         // Same 503 as findLogFile(): a busy card must not read as "no log
         // files yet" (#67).
-        if (!SDLogger::listLogFiles(names, sizes)) {
+        if (!SDLogger::listLogFiles(files)) {
             request->send(503, "text/plain", "SD card busy, try again");
             return;
         }
 
         String json = "[";
-        for (size_t i = 0; i < names.size(); i++) {
+        for (size_t i = 0; i < files.size(); i++) {
             if (i > 0) json += ",";
-            json += "{\"name\":\"" + names[i] + "\",\"size\":" + String(sizes[i]) + "}";
+            json += "{\"name\":\"" + files[i].name + "\",\"size\":" + String(files[i].size) + "}";
         }
         json += "]";
         request->send(200, "application/json", json); });
@@ -496,8 +517,9 @@ void WebDashboard::setupRoutes()
         // tail is ever needed.
         const size_t maxBytes = 8192;
         String content;
-        if (!SDLogger::readTail(name, content, maxBytes)) {
-            request->send(500, "text/plain", "Failed to read file");
+        SDLogger::ReadResult r = SDLogger::readTail(name, content, maxBytes);
+        if (r != SDLogger::ReadResult::Ok) {
+            sendReadFailure(request, r, "File too large to view (over 512KB) - try Download instead");
             return;
         }
 
@@ -512,25 +534,22 @@ void WebDashboard::setupRoutes()
         String name; uint32_t size;
         if (!findLogFile(request, name, size)) return;
 
-        SemaphoreHandle_t mtx = SDLogger::sdMutex();
-        if (!mtx || xSemaphoreTake(mtx, pdMS_TO_TICKS(2000)) != pdTRUE) {
+        String sdPath;
+        auto lock = SDLogger::beginDownload(name, sdPath);
+        if (!lock) {
             request->send(503, "text/plain", "SD card busy, try again");
             return;
         }
 
-        // Released exactly once when this connection closes (completion or
-        // abort) - this library always closes file-response connections
-        // (no keep-alive), so onDisconnect is a reliable single release point.
-        // Held for the WHOLE transfer (accepted tradeoff: the background
-        // writer drops samples it can't log during that window - see PR
-        // description). Explicitly (re-)set the library's ack timeout so a
-        // client that stops ACKing (e.g. walks out of WiFi range) gets
-        // force-disconnected - and this mutex released - within 5s rather
-        // than relying silently on the library's own default.
+        // Held for the whole transfer (accepted tradeoff: the background
+        // writer drops samples it can't log during that window). Force a
+        // stalled client's disconnect within 5s so the lock can't be held
+        // indefinitely; resetting the shared_ptr in onDisconnect releases
+        // it exactly once, whichever side closes the connection.
         request->client()->setAckTimeout(5000);
-        request->onDisconnect([mtx]() { xSemaphoreGive(mtx); });
+        request->onDisconnect([lock]() mutable { lock.reset(); });
 
-        request->send(SD, "/" + name, contentTypeForLogFile(name), true /* download */); });
+        request->send(SD, sdPath, contentTypeForLogFile(name), true /* download */); });
 
     // JSON headline of the last stored core dump (issue #11) - task/PC/cause/
     // backtrace, for a UI or API consumer that doesn't want to pull and
@@ -667,8 +686,9 @@ void WebDashboard::setupRoutes()
         // small enough to reliably fit, and is still plenty of resolution
         // for a trend chart at typical browser widths.
         String csv;
-        if (!SDLogger::readGraphSeries(name, 300, csv)) {
-            request->send(500, "text/plain", "Failed to read file (it may be too large to graph - try Download instead)");
+        SDLogger::ReadResult r = SDLogger::readGraphSeries(name, 300, csv);
+        if (r != SDLogger::ReadResult::Ok) {
+            sendReadFailure(request, r, "Failed to read file (it may be too large to graph - try Download instead)");
             return;
         }
 

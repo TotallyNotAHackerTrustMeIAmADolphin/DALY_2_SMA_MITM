@@ -42,6 +42,11 @@ namespace HealthLog
         uint32_t maxBlock = 0;    // largest allocatable block
         // Stack high-water marks in bytes, or kNoTask.
         uint32_t stackLeft[kNumTasks] = {kNoTask, kNoTask, kNoTask, kNoTask, kNoTask, kNoTask};
+        // SDLogger::Stats' drop/failure counters - monotonic, so any
+        // increase since the last logged line is real.
+        uint32_t sdDroppedQueueFull = 0;
+        uint32_t sdDroppedLockTimeout = 0;
+        uint32_t sdWriteFailures = 0;
     };
 
     // Log when the heap low-water mark has dropped this much since the last
@@ -67,6 +72,7 @@ namespace HealthLog
         kStackLow,
         kTaskGone,
         kStackDrop,
+        kSdDrops,
         kHeapDrop,
         kBlockDrop,
         kHeartbeat
@@ -84,6 +90,8 @@ namespace HealthLog
             return "TASK GONE";
         case kStackDrop:
             return "stack high-water dropped";
+        case kSdDrops:
+            return "SD DROPS";
         case kHeapDrop:
             return "heap low-water dropped";
         case kBlockDrop:
@@ -145,6 +153,13 @@ namespace HealthLog
                     d.task = i;
                 }
             }
+            // Unlike the drops below, any increase logs: one dropped
+            // sample or write failure is already worth knowing about.
+            if (d.reason == kNone &&
+                (s.sdDroppedQueueFull > st.ref.sdDroppedQueueFull ||
+                 s.sdDroppedLockTimeout > st.ref.sdDroppedLockTimeout ||
+                 s.sdWriteFailures > st.ref.sdWriteFailures))
+                d.reason = kSdDrops;
             if (d.reason == kNone && s.minFreeHeap < st.ref.minFreeHeap &&
                 st.ref.minFreeHeap - s.minFreeHeap >= kHeapDropBytes)
                 d.reason = kHeapDrop;

@@ -9,29 +9,23 @@
 // run *this* code natively (`pio test -e native`), same pattern as
 // Glideslope.h/CellSmoother.h/StatusFrame.h/CsvDecimation.h.
 //
-// Usage: construct once with maxBytes, feed() every chunk read from the
-// source file in order, then call finish() once after the last feed().
-// data()/length() then give the retained tail.
+// Usage: construct with maxBytes and the read-chunk size, feed() each chunk
+// in order, then finish(). data()/length() give the retained tail.
 namespace TailTrim
 {
     class Trimmer
     {
     public:
-        // maxBytes: how many trailing bytes of the fed stream to retain.
-        // Reserves capacity once up front (maxBytes plus one chunk's worth
-        // of slack, matching the pre-refactor readTail()'s
-        // `outContent.reserve(maxBytes + 600)`) so appending never
-        // reallocates mid-scan: repeated grow/shrink across a file scanned
-        // in hundreds of small chunks was observed live to fragment the
-        // heap badly enough to make a later, unrelated allocation (the
-        // caller's own copy of the finished tail into an HTTP response)
-        // fail silently, even though this function's own output was
-        // correct - see readTail()'s comment in SDLogger.cpp before this
-        // extraction.
-        explicit Trimmer(size_t maxBytes)
+        static constexpr size_t kDefaultChunkBytes = 512;
+
+        // chunkBytes must match the caller's real feed() size: reserving
+        // maxBytes+chunkBytes up front means appending never reallocates
+        // mid-scan, which otherwise fragmented the heap badly enough to
+        // fail a later, unrelated allocation.
+        explicit Trimmer(size_t maxBytes, size_t chunkBytes = kDefaultChunkBytes)
             : maxBytes_(maxBytes), truncated_(false)
         {
-            buf_.reserve(maxBytes + kSlackBytes);
+            buf_.reserve(maxBytes + chunkBytes);
         }
 
         // Feed one chunk of raw file bytes, in the order read from the
@@ -77,9 +71,6 @@ namespace TailTrim
         bool truncated() const { return truncated_; }
 
     private:
-        // Matches the pre-refactor readTail()'s `reserve(maxBytes + 600)`.
-        static constexpr size_t kSlackBytes = 600;
-
         std::vector<char> buf_;
         size_t maxBytes_;
         bool truncated_;

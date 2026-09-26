@@ -2,45 +2,106 @@
 #include <SD.h>
 #include <SPI.h>
 #include <time.h>
-#include <utility>
+#include <algorithm>
 #include "pin_config.h"
 #include "esp_task_wdt.h"
 #include "TelemetrySchema.h"
 #include "CsvDecimation.h"
 #include "TailTrim.h"
+#include "LogFileOrder.h"
 
 bool SDLogger::initialized = false;
 QueueHandle_t SDLogger::logQueue = NULL;
 SemaphoreHandle_t SDLogger::sdMutex_ = NULL;
 SDDebugCallback SDLogger::debugCb = nullptr;
+std::atomic<uint32_t> SDLogger::droppedQueueFull_{0};
+std::atomic<uint32_t> SDLogger::droppedLockTimeout_{0};
+std::atomic<uint32_t> SDLogger::writeFailures_{0};
 
 namespace
 {
-    struct LogMessage
+    enum class MsgType : char
     {
-        char type; // 'T' telemetry, 'E' event
-        char data[480];
+        Telemetry = 'T',
+        Event = 'E',
     };
 
-    // Caps how much of a source file readGraphSeries() will scan, so a very
-    // large (e.g. multi-week boot_ fallback) file can't hold sdMutex_ for an
-    // unbounded two-pass scan.
-    constexpr uint32_t kMaxGraphSourceBytes = 4 * 1024 * 1024;
+    constexpr size_t kMsgDataBytes = 480;
+    struct LogMessage
+    {
+        MsgType type;
+        char data[kMsgDataBytes];
+    };
 
-    // Same idea for readTail(), but much tighter: unlike readGraphSeries
-    // (which only needs to touch the card twice, briefly, per request),
-    // readTail can't seek to near the end (file.seek() on a file reopened
-    // for FILE_APPEND hundreds of times across reboots was observed to make
-    // the following read() return 0 bytes - see readTail()'s comment), so
-    // it must scan sequentially from byte 0 for the whole time it holds
-    // sdMutex_. Bounding that scan to kMaxGraphSourceBytes (4MB) would let a
-    // single request hold the mutex far longer than the SD writer task's
-    // own 1s mutex-acquire timeout, dropping telemetry samples for the
-    // whole scan. 512KB comfortably covers a full day's telemetry CSV
-    // (observed ~400KB/day in practice) while keeping the worst case small;
-    // beyond that, readTail() fails cleanly (like readGraphSeries does for
-    // oversized files) rather than silently returning a stale tail.
+    // readGraphSeries() only extracts the first ~7 columns, well under this.
+    static_assert(CsvDecimation::kLineBufSize < kMsgDataBytes, "line buffer must reach past ReqI");
+
+    constexpr uint32_t kQueueDepth = 32;
+    constexpr uint32_t kWriterTaskStackBytes = 8192;
+    constexpr UBaseType_t kWriterTaskPriority = 1;
+    constexpr BaseType_t kWriterTaskCore = 0;
+
+    // Bounds sdMutex_ hold time for a two-pass scan of a huge source file.
+    constexpr uint32_t kMaxGraphSourceBytes = 4 * 1024 * 1024;
+    // readTail() can't seek (see its own comment) and scans from 0 for its
+    // whole hold, so this cap is much tighter.
     constexpr uint32_t kMaxTailSourceBytes = 512 * 1024;
+    constexpr size_t kMaxGraphTargetPoints = 2000;
+    constexpr size_t kGraphOutBufBytes = 2048;
+    constexpr size_t kSdReadChunkBytes = 512;
+
+    constexpr TickType_t kWriterLockTimeout = pdMS_TO_TICKS(1000);
+    constexpr TickType_t kListLockTimeout = pdMS_TO_TICKS(500);
+    constexpr TickType_t kTailLockTimeout = pdMS_TO_TICKS(500);
+    constexpr TickType_t kGraphLockTimeout = pdMS_TO_TICKS(2000);
+    constexpr TickType_t kDownloadLockTimeout = pdMS_TO_TICKS(2000);
+
+    // Distinguishes "couldn't open it" from "opened, but over the size cap".
+    enum class OpenBoundedResult
+    {
+        Opened,
+        NotFound,
+        TooLarge,
+    };
+
+    // One open + size check; closes and reports why on failure.
+    OpenBoundedResult openBounded(const String &path, uint32_t maxBytes, File &outFile, uint32_t &outSize)
+    {
+        outFile = SD.open(path, FILE_READ);
+        if (!outFile)
+            return OpenBoundedResult::NotFound;
+
+        uint32_t size = outFile.size();
+        if (size > maxBytes)
+        {
+            outFile.close();
+            return OpenBoundedResult::TooLarge;
+        }
+
+        outSize = size;
+        return OpenBoundedResult::Opened;
+    }
+
+    // Reads file in kSdReadChunkBytes pieces up to limitBytes, calling
+    // onChunk(data, len) per chunk and feeding the watchdog along the way.
+    template <class F>
+    void streamChunks(File &file, uint32_t limitBytes, F onChunk)
+    {
+        uint8_t buf[kSdReadChunkBytes];
+        uint32_t bytesRead = 0;
+        uint32_t chunkCount = 0;
+        int n;
+        while (bytesRead < limitBytes && (n = file.read(buf, sizeof(buf))) > 0)
+        {
+            onChunk(buf, (size_t)n);
+            bytesRead += (uint32_t)n;
+            if (++chunkCount % 8 == 0)
+            {
+                esp_task_wdt_reset();
+                vTaskDelay(1);
+            }
+        }
+    }
 }
 
 bool SDLogger::isReady()
@@ -76,7 +137,7 @@ bool SDLogger::begin()
         return false;
     }
 
-    logQueue = xQueueCreate(32, sizeof(LogMessage));
+    logQueue = xQueueCreate(kQueueDepth, sizeof(LogMessage));
     if (logQueue == NULL)
     {
         logFailure("[SD] Failed to create log queue");
@@ -90,15 +151,25 @@ bool SDLogger::begin()
         return false;
     }
 
-    xTaskCreatePinnedToCore(loggingTask, "SD_LogTask", 8192, NULL, 1, NULL, 0);
+    xTaskCreatePinnedToCore(loggingTask, "SD_LogTask", kWriterTaskStackBytes, NULL,
+                            kWriterTaskPriority, NULL, kWriterTaskCore);
 
     initialized = true;
     return true;
 }
 
-SemaphoreHandle_t SDLogger::sdMutex()
+String SDLogger::pathFor(const String &bareName)
 {
-    return sdMutex_;
+    return "/" + bareName;
+}
+
+SDLogger::Stats SDLogger::stats()
+{
+    return {
+        droppedQueueFull_.load(std::memory_order_relaxed),
+        droppedLockTimeout_.load(std::memory_order_relaxed),
+        writeFailures_.load(std::memory_order_relaxed),
+    };
 }
 
 void SDLogger::logTelemetry(const DashboardData &data)
@@ -107,17 +178,11 @@ void SDLogger::logTelemetry(const DashboardData &data)
         return;
 
     LogMessage msg;
-    msg.type = 'T';
-
-    // Column order, formatting and the "omit a not-yet-read cell slot"
-    // behavior all live in TelemetrySchema::formatRow() now (#32) - this
-    // reproduces the pre-refactor row byte for byte (see its own comment).
+    msg.type = MsgType::Telemetry;
     TelemetrySchema::formatRow(data, msg.data, sizeof(msg.data));
 
-    // Queue is sized generously for the ~1 sample/10s telemetry rate; if a
-    // write is genuinely stuck (e.g. card removed mid-session) we drop the
-    // sample rather than block the caller.
-    xQueueSend(logQueue, &msg, 0);
+    if (xQueueSend(logQueue, &msg, 0) != pdTRUE)
+        droppedQueueFull_.fetch_add(1, std::memory_order_relaxed);
 }
 
 void SDLogger::logEvent(const char *msg_text)
@@ -126,11 +191,12 @@ void SDLogger::logEvent(const char *msg_text)
         return;
 
     LogMessage msg;
-    msg.type = 'E';
+    msg.type = MsgType::Event;
     strncpy(msg.data, msg_text, sizeof(msg.data) - 1);
     msg.data[sizeof(msg.data) - 1] = '\0';
 
-    xQueueSend(logQueue, &msg, 0);
+    if (xQueueSend(logQueue, &msg, 0) != pdTRUE)
+        droppedQueueFull_.fetch_add(1, std::memory_order_relaxed);
 }
 
 String SDLogger::currentLogPath(const char *extension)
@@ -163,11 +229,11 @@ void SDLogger::writeCSVHeaderIfMissing(const String &path)
 
     File file = SD.open(path, FILE_WRITE);
     if (!file)
+    {
+        writeFailures_.fetch_add(1, std::memory_order_relaxed);
         return;
+    }
 
-    // Column names/order come from TelemetrySchema::kColumns (#32), the
-    // same table logTelemetry() formats each row from - this reproduces
-    // the pre-refactor header string byte for byte.
     char header[512];
     TelemetrySchema::formatHeader(header, sizeof(header));
     file.print(header);
@@ -198,10 +264,14 @@ void SDLogger::loggingTask(void *parameter)
             snprintf(timeStr, sizeof(timeStr), "UP:%lu", millis() / 1000);
         }
 
-        if (xSemaphoreTake(sdMutex_, pdMS_TO_TICKS(1000)) != pdTRUE)
-            continue; // a reader is hogging the bus; drop this line rather than stall forever
+        if (xSemaphoreTake(sdMutex_, kWriterLockTimeout) != pdTRUE)
+        {
+            // No netLog() here: that would recurse back through logEvent().
+            droppedLockTimeout_.fetch_add(1, std::memory_order_relaxed);
+            continue;
+        }
 
-        if (msg.type == 'T')
+        if (msg.type == MsgType::Telemetry)
         {
             String path = currentLogPath(".csv");
             writeCSVHeaderIfMissing(path);
@@ -211,8 +281,12 @@ void SDLogger::loggingTask(void *parameter)
                 file.printf("%s,%s\n", timeStr, msg.data);
                 file.close();
             }
+            else
+            {
+                writeFailures_.fetch_add(1, std::memory_order_relaxed);
+            }
         }
-        else if (msg.type == 'E')
+        else if (msg.type == MsgType::Event)
         {
             File file = SD.open(currentLogPath(".log"), FILE_APPEND);
             if (file)
@@ -220,21 +294,24 @@ void SDLogger::loggingTask(void *parameter)
                 file.printf("[%s] %s", timeStr, msg.data);
                 file.close();
             }
+            else
+            {
+                writeFailures_.fetch_add(1, std::memory_order_relaxed);
+            }
         }
 
         xSemaphoreGive(sdMutex_);
     }
 }
 
-bool SDLogger::listLogFiles(std::vector<String> &outNames, std::vector<uint32_t> &outSizes)
+bool SDLogger::listLogFiles(std::vector<LogFileInfo> &outFiles)
 {
-    outNames.clear();
-    outSizes.clear();
+    outFiles.clear();
 
     if (!initialized)
         return false;
 
-    if (xSemaphoreTake(sdMutex_, pdMS_TO_TICKS(500)) != pdTRUE)
+    if (xSemaphoreTake(sdMutex_, kListLockTimeout) != pdTRUE)
         return false;
 
     File root = SD.open("/");
@@ -249,10 +326,7 @@ bool SDLogger::listLogFiles(std::vector<String> &outNames, std::vector<uint32_t>
                 if (name.startsWith("/"))
                     name.remove(0, 1);
                 if (name.endsWith(".csv") || name.endsWith(".log"))
-                {
-                    outNames.push_back(name);
-                    outSizes.push_back((uint32_t)file.size());
-                }
+                    outFiles.push_back({name, (uint32_t)file.size()});
             }
             file = root.openNextFile();
         }
@@ -261,113 +335,57 @@ bool SDLogger::listLogFiles(std::vector<String> &outNames, std::vector<uint32_t>
 
     xSemaphoreGive(sdMutex_);
 
-    // Bubble sort is fine here: at most a few dozen daily files. boot_*
-    // fallback files (written pre-NTP-sync) always sort before dated
-    // YYYY-MM-DD files regardless of their boot ID, since a plain string
-    // compare would otherwise put "boot_..." AFTER any digit-starting name
-    // ('b' > '0'-'9') - which would wrongly rank a stale boot_ file as more
-    // recent than a properly dated one and break "select most recent = last".
-    auto isOlderName = [](const String &a, const String &b)
-    {
-        bool aBoot = a.startsWith("boot_");
-        bool bBoot = b.startsWith("boot_");
-        if (aBoot != bBoot)
-            return aBoot; // boot_* always sorts first
-        return a < b;
-    };
-    for (size_t i = 0; i < outNames.size(); i++)
-    {
-        for (size_t j = i + 1; j < outNames.size(); j++)
-        {
-            if (isOlderName(outNames[j], outNames[i]))
-            {
-                std::swap(outNames[i], outNames[j]);
-                std::swap(outSizes[i], outSizes[j]);
-            }
-        }
-    }
+    // Ordering rule (boot_* sorts first, "select most recent = last") lives
+    // in LogFileOrder::isOlder(), pure and natively tested.
+    std::sort(outFiles.begin(), outFiles.end(),
+              [](const LogFileInfo &a, const LogFileInfo &b)
+              { return LogFileOrder::isOlder(a.name.c_str(), b.name.c_str()); });
 
     return true;
 }
 
-bool SDLogger::readTail(const String &fileName, String &outContent, size_t maxBytes)
+SDLogger::ReadResult SDLogger::readTail(const String &fileName, String &outContent, size_t maxBytes)
 {
     outContent = "";
 
     if (!initialized)
-        return false;
+        return ReadResult::Busy;
 
-    if (xSemaphoreTake(sdMutex_, pdMS_TO_TICKS(500)) != pdTRUE)
-        return false;
+    MutexLock lock(sdMutex_, kTailLockTimeout);
+    if (!lock)
+        return ReadResult::Busy;
 
-    bool ok = false;
-
-    // Cheap size-check first (matches readGraphSeries' pattern) - readTail
-    // can't seek to near the end (see below), so it must scan sequentially
-    // from byte 0 for its whole sdMutex_ hold. Rejecting outsized files
-    // here keeps that hold bounded to kMaxTailSourceBytes worst-case,
-    // instead of silently scanning (and holding the mutex for) however
-    // large the file has grown.
-    File sizeCheck = SD.open("/" + fileName, FILE_READ);
-    bool opened = (bool)sizeCheck;
-    uint32_t sourceSize = opened ? sizeCheck.size() : 0;
-    if (opened)
-        sizeCheck.close();
-    if (!opened || sourceSize > kMaxTailSourceBytes)
+    File file;
+    uint32_t sourceSize = 0;
+    switch (openBounded(pathFor(fileName), kMaxTailSourceBytes, file, sourceSize))
     {
-        xSemaphoreGive(sdMutex_);
-        return false;
+    case OpenBoundedResult::NotFound:
+        return ReadResult::NotFound;
+    case OpenBoundedResult::TooLarge:
+        return ReadResult::TooLarge;
+    case OpenBoundedResult::Opened:
+        break;
     }
 
-    File file = SD.open("/" + fileName, FILE_READ);
-    if (file)
-    {
-        // Read sequentially from the start rather than file.seek()-ing near
-        // the end - live-tested against a file that's been reopened for
-        // FILE_APPEND hundreds of times across many reboots, seek() to an
-        // arbitrary offset near EOF consistently made the following read()
-        // return 0 bytes immediately (empty tail, silently "successful").
-        // Sequential reads from 0 are the one access pattern proven
-        // reliable everywhere else in this file (readGraphSeries() below,
-        // and the /api/logs/download route), so use that here too. The
-        // rolling trim-to-last-maxBytes and leading-partial-line-drop logic
-        // itself now lives in TailTrim::Trimmer (#43), pure and natively
-        // tested - this loop is just SD I/O and the watchdog yield cadence.
-        TailTrim::Trimmer trimmer(maxBytes);
-        uint8_t buf[512];
-        int n;
-        uint32_t bytesScanned = 0;
-        uint32_t chunkCount = 0;
-        while (bytesScanned < sourceSize && (n = file.read(buf, sizeof(buf))) > 0)
-        {
-            trimmer.feed(buf, (size_t)n);
-            bytesScanned += (uint32_t)n;
-            if (++chunkCount % 8 == 0)
-                { esp_task_wdt_reset(); vTaskDelay(1); }
-        }
-        trimmer.finish();
-        outContent = String(trimmer.data(), (unsigned int)trimmer.length());
-        file.close();
-        ok = true;
-    }
-
-    xSemaphoreGive(sdMutex_);
-    return ok;
+    // Sequential reads only: seeking near EOF on a file reopened for
+    // FILE_APPEND hundreds of times made the next read() return 0 bytes.
+    TailTrim::Trimmer trimmer(maxBytes, kSdReadChunkBytes);
+    streamChunks(file, sourceSize, [&trimmer](const uint8_t *data, size_t len)
+                 { trimmer.feed(data, len); });
+    trimmer.finish();
+    outContent = String(trimmer.data(), (unsigned int)trimmer.length());
+    file.close();
+    return ReadResult::Ok;
 }
 
-bool SDLogger::readGraphSeries(const String &fileName, size_t targetPoints, String &outCSV)
+SDLogger::ReadResult SDLogger::readGraphSeries(const String &fileName, size_t targetPoints, String &outCSV)
 {
     outCSV = "Timestamp,PackV,PackI,SOC,MinCellV,MaxCellV,ReqI\n";
 
     if (!initialized)
-        return false;
+        return ReadResult::Busy;
 
-    // Column positions in a full telemetry row, looked up by name once
-    // (#32) instead of hardcoding 0-6 - these happen to still be 0-6 today
-    // since Timestamp..ReqI are the first seven TelemetrySchema columns,
-    // but a source row is read by position here regardless of any later
-    // reordering upstream in the table. Handed to CsvDecimation::Accumulator
-    // below, which never interprets them itself (#43).
+    // Timestamp..ReqI happen to be the first seven TelemetrySchema columns.
     const size_t fieldIndices[7] = {
         (size_t)TelemetrySchema::index("Timestamp"),
         (size_t)TelemetrySchema::index("PackV"),
@@ -378,63 +396,49 @@ bool SDLogger::readGraphSeries(const String &fileName, size_t targetPoints, Stri
         (size_t)TelemetrySchema::index("ReqI"),
     };
 
-    if (targetPoints == 0)
-        targetPoints = 1;
-    if (targetPoints > 2000)
-        targetPoints = 2000; // keep worst-case output bounded regardless of caller
+    targetPoints = std::max<size_t>(targetPoints, 1);
+    targetPoints = std::min(targetPoints, kMaxGraphTargetPoints);
 
-    if (xSemaphoreTake(sdMutex_, pdMS_TO_TICKS(2000)) != pdTRUE)
-        return false;
+    MutexLock lock(sdMutex_, kGraphLockTimeout);
+    if (!lock)
+        return ReadResult::Busy;
 
-    String path = "/" + fileName;
-    bool ok = false;
+    String path = pathFor(fileName);
 
-    // Cheap check (just a directory-entry size, no read) before committing
-    // to a two-pass scan of the whole file - bounds the mutex hold time
-    // regardless of how large the source file has grown.
-    File sizeCheck = SD.open(path, FILE_READ);
-    bool opened = (bool)sizeCheck;
-    uint32_t sourceSize = opened ? sizeCheck.size() : 0;
-    if (opened)
-        sizeCheck.close();
-    if (!opened || sourceSize > kMaxGraphSourceBytes)
+    // Cheap size check before committing to a two-pass scan.
+    File sizeCheck;
+    uint32_t sourceSize = 0;
+    OpenBoundedResult openResult = openBounded(path, kMaxGraphSourceBytes, sizeCheck, sourceSize);
+    if (openResult != OpenBoundedResult::Opened)
     {
-        xSemaphoreGive(sdMutex_);
         outCSV = "";
-        return false;
+        return (openResult == OpenBoundedResult::TooLarge) ? ReadResult::TooLarge : ReadResult::NotFound;
     }
+    sizeCheck.close();
 
-    // Estimate the data-row count from a small sample instead of a full-file
-    // scan (#40 - this used to be "pass 1", an exact-count byte scan of the
-    // *whole* file just to pick a skip interval). targetPoints tops out at
-    // 2000 and a telemetry row is a fairly uniform width, so an estimate
-    // from a short sample right after the header gives the same skip
-    // interval in practice, without the full pass. Re-opens the file (this
-    // route already accepted multiple short opens for the same reason the
-    // size-check above does) rather than seeking, matching the existing
-    // pattern in this function and avoiding any seek-after-partial-read
-    // question entirely.
+    // Estimate the row count from a short sample after the header instead
+    // of a full-file scan - a telemetry row is fairly uniform width.
     constexpr uint32_t kSampleBytes = 4096;
-    size_t estimatedLines = 1;
     uint32_t dataBytes = 0;
+    size_t skip = 1;
     {
         File f = SD.open(path, FILE_READ);
         if (!f)
         {
-            xSemaphoreGive(sdMutex_);
+            // Race: the size-check just opened this file successfully.
             outCSV = "";
-            return false;
+            return ReadResult::NotFound;
         }
         String header = f.readStringUntil('\n');
-        uint32_t headerBytes = (uint32_t)header.length() + 1; // + the '\n' it consumed
+        uint32_t headerBytes = (uint32_t)header.length() + 1;
         dataBytes = (sourceSize > headerBytes) ? (sourceSize - headerBytes) : 0;
 
-        uint8_t sampleBuf[512];
+        uint8_t sampleBuf[kSdReadChunkBytes];
         uint32_t sampleBytesRead = 0;
         size_t sampleLines = 0;
         int n;
         while (sampleBytesRead < kSampleBytes &&
-               (n = f.read(sampleBuf, (size_t)((kSampleBytes - sampleBytesRead) < sizeof(sampleBuf) ? (kSampleBytes - sampleBytesRead) : sizeof(sampleBuf)))) > 0)
+               (n = f.read(sampleBuf, std::min<size_t>(kSampleBytes - sampleBytesRead, sizeof(sampleBuf)))) > 0)
         {
             sampleBytesRead += (uint32_t)n;
             for (int i = 0; i < n; i++)
@@ -443,76 +447,50 @@ bool SDLogger::readGraphSeries(const String &fileName, size_t targetPoints, Stri
         }
         f.close();
 
-        // sampleLines==0 means the sample didn't even contain one full row
-        // (a huge single line, or a file barely bigger than its header) -
-        // estimatedLines stays at its 1 default rather than dividing by
-        // zero, which makes skip below come out to 1 (keep every row).
-        if (sampleLines > 0 && sampleBytesRead > 0)
-        {
-            float avgLineLen = (float)sampleBytesRead / (float)sampleLines;
-            estimatedLines = (size_t)((float)dataBytes / avgLineLen);
-            if (estimatedLines == 0)
-                estimatedLines = 1;
-        }
-        ok = true;
+        skip = CsvDecimation::estimateSkip(dataBytes, sampleBytesRead, sampleLines, targetPoints);
     }
 
-    // Single buffered pass: re-open and read the whole file in 512-byte
-    // chunks (like the old pass 1's byte scan - fast block reads, not the
-    // old pass 2's one-Stream-call-per-line readStringUntil(), which was
-    // the dominant cost: ~30s measured on a 1.7MB/~24k-row day on-device,
-    // see #40). Line-accumulation and skip-decimation themselves now live
-    // in CsvDecimation::Accumulator (#43), pure and natively tested - this
-    // loop is just SD I/O, feeding it chunks and appending whatever it
-    // wrote for that chunk onto outCSV, plus the watchdog yield cadence.
-    if (ok)
+    // Fresh handle, buffered pass: feeds decimated rows straight into outCSV.
+    File f = SD.open(path, FILE_READ);
+    if (!f)
     {
-        size_t skip = (estimatedLines > targetPoints) ? (estimatedLines / targetPoints) : 1;
-        if (skip == 0)
-            skip = 1;
-
-        File f = SD.open(path, FILE_READ);
-        if (f)
-        {
-            outCSV.reserve(outCSV.length() + (targetPoints + 1) * 60);
-            f.readStringUntil('\n'); // header, discarded (fresh open, same as the sample pass above)
-
-            CsvDecimation::Accumulator accum(fieldIndices, 7, skip);
-            uint8_t buf[512];
-            char outBuf[2048]; // generous margin over the largest single 512-byte chunk's worth of decimated output
-            uint32_t bytesRead = 0;
-            uint32_t chunkCount = 0;
-            int n;
-
-            while (bytesRead < dataBytes && (n = f.read(buf, sizeof(buf))) > 0)
-            {
-                bytesRead += (uint32_t)n;
-                size_t outLen = 0;
-                accum.feed(buf, (size_t)n, outBuf, sizeof(outBuf), &outLen);
-                if (outLen > 0)
-                    outCSV.concat(outBuf, (unsigned int)outLen);
-                // Same watchdog reasoning as the old pass 1 (this route runs
-                // synchronously on the AsyncTCP task; a hung/slow scan here
-                // previously starved its watchdog feed and crashed the
-                // device - `task_wdt: ... async_tcp` -> abort() -> reboot).
-                if (++chunkCount % 8 == 0)
-                    { esp_task_wdt_reset(); vTaskDelay(1); }
-            }
-            // A final row without a trailing newline (e.g. the writer
-            // task's last flush hadn't landed yet) - flush it too, same as
-            // the old f.available()-driven loop did.
-            size_t finalLen = 0;
-            accum.finish(outBuf, sizeof(outBuf), &finalLen);
-            if (finalLen > 0)
-                outCSV.concat(outBuf, (unsigned int)finalLen);
-            f.close();
-        }
-        else
-        {
-            ok = false;
-        }
+        outCSV = "";
+        return ReadResult::NotFound;
     }
 
-    xSemaphoreGive(sdMutex_);
-    return ok;
+    outCSV.reserve(outCSV.length() + (targetPoints + 1) * 60);
+    f.readStringUntil('\n'); // header, discarded
+
+    CsvDecimation::Accumulator accum(fieldIndices, 7, skip);
+    char outBuf[kGraphOutBufBytes];
+    streamChunks(f, dataBytes, [&accum, &outCSV, &outBuf](const uint8_t *data, size_t len)
+                 {
+        size_t outLen = 0;
+        accum.feed(data, len, outBuf, sizeof(outBuf), &outLen);
+        if (outLen > 0)
+            outCSV.concat(outBuf, (unsigned int)outLen); });
+
+    // A final row with no trailing newline (writer's last flush pending).
+    size_t finalLen = 0;
+    accum.finish(outBuf, sizeof(outBuf), &finalLen);
+    if (finalLen > 0)
+        outCSV.concat(outBuf, (unsigned int)finalLen);
+    f.close();
+
+    return ReadResult::Ok;
+}
+
+std::shared_ptr<MutexLock> SDLogger::beginDownload(const String &fileName, String &outPath)
+{
+    outPath = "";
+
+    if (!initialized)
+        return nullptr;
+
+    auto lock = std::make_shared<MutexLock>(sdMutex_, kDownloadLockTimeout);
+    if (!*lock)
+        return nullptr;
+
+    outPath = pathFor(fileName);
+    return lock;
 }

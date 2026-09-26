@@ -187,150 +187,168 @@ struct LockDropLog
   }
 };
 
+// bmsTask's cadence: one cycle is the four Daly reads below with
+// kInterFrameGapMs between them and kBmsCycleIdleMs after the last, about
+// 2.4 s including the reads themselves.
+constexpr uint32_t kBmsStartupDelayMs = 2000;
+constexpr uint32_t kInterFrameGapMs = 100;
+constexpr uint32_t kBmsCycleIdleMs = 2000;
+
+// Everything bmsTask keeps between cycles.
+struct BmsPollState
+{
+  // Edge-triggered SOC/MOSFET/alarm decisions (#44, include/BmsEvents.h).
+  BmsEvents::State events;
+  LockDropLog lockDrops;
+  // cfg.vSamples as last read under the lock; kept if the lock is briefly
+  // contended. Starts at the setting's default (def() never changes, so
+  // reading it needs no lock).
+  int vSamples = (int)cfg.vSamples.def();
+};
+
+// Each poll: read one Daly frame, decide/log its events outside the lock,
+// then store it into currentData/bmsLink under dataMutex.
+
+static void pollBasicInfo(BmsPollState &st)
+{
+  DalyBasicInfo info;
+  if (!bms.readBasicInfo(info))
+    return;
+
+  // A Daly BMS recalibrates SOC to 100% on a "charge full" condition (or
+  // occasionally jumps for other reasons); flag that as an event so an
+  // abrupt CCL drop at the SMA can be lined up against it.
+  BmsEvents::Events ev = BmsEvents::decide(st.events, &info, nullptr, nullptr);
+  if (ev.socJumped)
+    netLog("[BMS] SOC jumped %.1f -> %.1f %% (Daly recalibration?)\n", ev.socFrom, ev.socTo);
+
+  bool stored = false;
+  if (MutexLock lock{dataMutex, kBmsStoreLockTimeout})
+  {
+    currentData.packVoltage = info.packVoltage;
+    currentData.packCurrent = info.packCurrent;
+    currentData.packSOC = info.packSOC;
+    bmsLink.lastBasicInfoMs = millis();
+    bmsLink.haveBasicInfo = true;
+    stored = true;
+  }
+  st.lockDrops.note(stored, "basic info");
+}
+
+static void pollCells(BmsPollState &st)
+{
+  std::vector<float> cellVolts;
+  if (!bms.readCellVoltages(kPackCells, cellVolts))
+    return;
+
+  if (MutexLock lock{dataMutex, kBmsCfgReadLockTimeout})
+    st.vSamples = cfg.vSamples;
+
+  // Moving average with reseed-on-window-change (CellSmoother.h, which also
+  // clamps the window to its buffer).
+  CellSmoother::Result r = cellSmoother.update(cellVolts.data(), (int)cellVolts.size(), st.vSamples);
+  if (r.reseeded)
+    netLog("[BMS] Cell filter seeded from current reading (window %d samples)\n", st.vSamples);
+
+  DashboardData broadcastCopy;
+  bool stored = false;
+  if (MutexLock lock{dataMutex, kBmsCellStoreLockTimeout})
+  {
+    currentData.avgCellVoltage = r.avgV;
+    currentData.minCellVoltage = r.minV;
+    currentData.maxCellVoltage = r.maxV;
+    currentData.minCellVoltageRaw = r.rawMinV;
+    currentData.maxCellVoltageRaw = r.rawMaxV;
+    // Raw spread (#24), from the same unsmoothed read as rawMin/rawMax -
+    // drives Glideslope::spreadFactor().
+    currentData.cellSpreadRawMv = r.rawSpreadMv;
+    currentData.cellVoltages.assign(r.smoothedV, r.smoothedV + r.cells);
+    bmsLink.lastCellMs = millis();
+    bmsLink.haveCellData = true;
+    broadcastCopy = currentData; // pushed outside the lock
+    stored = true;
+  }
+  st.lockDrops.note(stored, "cell voltage");
+
+  if (stored)
+    pushTelemetry(broadcastCopy);
+}
+
+// The BMS's own hardware protection state. Edge-triggered logging only, so
+// a stuck-on alarm doesn't spam the log queue; this is what lets an SMA
+// "battery voltage out of range" fault be lined up against the BMS's own
+// MOSFET/alarm timeline to the second.
+static void pollMosfet(BmsPollState &st)
+{
+  DalyMosfetStatus mos;
+  if (!bms.readMosfetStatus(mos))
+    return;
+
+  BmsEvents::Events ev = BmsEvents::decide(st.events, nullptr, &mos, nullptr);
+  if (ev.chargeMosChanged)
+    netLog("[BMS] Charge MOSFET %s\n", ev.chargeMosOn ? "ON" : "OFF - protection or BMS-initiated cutoff");
+  if (ev.dischargeMosChanged)
+    netLog("[BMS] Discharge MOSFET %s\n", ev.dischargeMosOn ? "ON" : "OFF - protection or BMS-initiated cutoff");
+
+  bool stored = false;
+  if (MutexLock lock{dataMutex, kBmsStoreLockTimeout})
+  {
+    currentData.chargeMosOn = mos.chargeMosOn;
+    currentData.dischargeMosOn = mos.dischargeMosOn;
+    stored = true;
+  }
+  st.lockDrops.note(stored, "MOSFET status");
+}
+
+static void pollAlarms(BmsPollState &st)
+{
+  DalyAlarmStatus alarm;
+  if (!bms.readAlarmStatus(alarm))
+    return;
+
+  // One line per changed bit (undefined bits still log, by byte.bit, so an
+  // unexpected fault isn't swallowed); the first read after boot is the
+  // baseline and logs nothing.
+  BmsEvents::Events ev = BmsEvents::decide(st.events, nullptr, nullptr, &alarm);
+  for (int i = 0; i < ev.alarmBitCount; i++)
+  {
+    const BmsEvents::AlarmBitEvent &e = ev.alarmBits[i];
+    if (e.name)
+      netLog("[BMS] Alarm: %s %s\n", e.name, e.set ? "SET" : "CLEARED");
+    else
+      netLog("[BMS] Alarm: bit %d.%d %s\n", e.byteIndex, e.bitIndex, e.set ? "SET" : "CLEARED");
+  }
+  if (ev.faultCodeChanged)
+    netLog("[BMS] Fault code %u -> %u\n", ev.faultCodeFrom, ev.faultCodeTo);
+
+  bool stored = false;
+  if (MutexLock lock{dataMutex, kBmsStoreLockTimeout})
+  {
+    currentData.bmsProtectionActive = alarm.anyProtectionActive;
+    currentData.cellOvervoltLevel1 = alarm.cellOvervoltLevel1;
+    currentData.cellOvervoltLevel2 = alarm.cellOvervoltLevel2;
+    currentData.packOvervoltLevel1 = alarm.packOvervoltLevel1;
+    currentData.packOvervoltLevel2 = alarm.packOvervoltLevel2;
+    stored = true;
+  }
+  st.lockDrops.note(stored, "alarm status");
+}
+
 void bmsTask(void *pvParameters)
 {
-  vTaskDelay(pdMS_TO_TICKS(2000));
+  vTaskDelay(pdMS_TO_TICKS(kBmsStartupDelayMs));
 
-  // Persistent decision state for the edge-triggered SOC/MOSFET/alarm
-  // events below - replaces the three function-local `static`s this used
-  // to hold (#44, see include/BmsEvents.h).
-  BmsEvents::State bmsEventState;
-  LockDropLog lockDrops;
-
+  BmsPollState st;
   while (true)
   {
-    DalyBasicInfo info;
-    if (bms.readBasicInfo(info))
-    {
-      // A Daly BMS recalibrates SOC to 100% on a "charge full" condition
-      // (or occasionally jumps for other reasons); flag that as an event so
-      // an abrupt CCL drop at the SMA can be lined up against it. Logged
-      // outside dataMutex, before the mutex-protected store below.
-      BmsEvents::Events ev = BmsEvents::decide(bmsEventState, &info, nullptr, nullptr);
-      if (ev.socJumped)
-        netLog("[BMS] SOC jumped %.1f -> %.1f %% (Daly recalibration?)\n", ev.socFrom, ev.socTo);
-
-      bool stored = false;
-      if (MutexLock lock{dataMutex, kBmsStoreLockTimeout})
-      {
-        currentData.packVoltage = info.packVoltage;
-        currentData.packCurrent = info.packCurrent;
-        currentData.packSOC = info.packSOC;
-        bmsLink.lastBasicInfoMs = millis();
-        bmsLink.haveBasicInfo = true;
-        stored = true;
-      }
-      lockDrops.note(stored, "basic info");
-    }
-
-    vTaskDelay(pdMS_TO_TICKS(100));
-
-    std::vector<float> cellVolts;
-    if (bms.readCellVoltages(kPackCells, cellVolts))
-    {
-      static int lastKnownVSamples = 12; // falls back to this if the lock is briefly contended
-      if (MutexLock lock{dataMutex, kBmsCfgReadLockTimeout})
-        lastKnownVSamples = cfg.vSamples;
-      int windowSize = max(1, min(CellSmoother::MAX_SAMPLES, lastKnownVSamples));
-
-      // The moving-average/reseed-on-window-change logic (and the
-      // documented boot-swing regression it guards against - CCL
-      // 500A -> trickle -> 500A after boot from stale ring-buffer slots)
-      // now lives in CellSmoother.h, with its own native test.
-      CellSmoother::Result r = cellSmoother.update(cellVolts.data(), (int)cellVolts.size(), windowSize);
-
-      // bmsTask isn't holding dataMutex here.
-      if (r.reseeded)
-        netLog("[BMS] Cell filter seeded from current reading (window %d samples)\n", windowSize);
-
-      DashboardData broadcastCopy;
-      bool shouldBroadcast = false;
-
-      if (MutexLock lock{dataMutex, kBmsCellStoreLockTimeout})
-      {
-        currentData.avgCellVoltage = r.avgV;
-        currentData.minCellVoltage = r.minV;
-        currentData.maxCellVoltage = r.maxV;
-        currentData.minCellVoltageRaw = r.rawMinV;
-        currentData.maxCellVoltageRaw = r.rawMaxV;
-        // Raw spread (#24), from the same unsmoothed read as rawMin/rawMax
-        // above - drives Glideslope::spreadFactor() in canTask.
-        currentData.cellSpreadRawMv = r.rawSpreadMv;
-        currentData.cellVoltages.assign(r.smoothedV, r.smoothedV + r.cells);
-        bmsLink.lastCellMs = millis();
-        bmsLink.haveCellData = true;
-
-        // Copy for broadcast outside mutex
-        broadcastCopy = currentData;
-        shouldBroadcast = true;
-      }
-      lockDrops.note(shouldBroadcast, "cell voltage");
-
-      if (shouldBroadcast)
-        pushTelemetry(broadcastCopy);
-    }
-
-    vTaskDelay(pdMS_TO_TICKS(100));
-
-    // BMS's own hardware protection state - polled at the same 2s cadence
-    // as the rest of this loop. Edge-triggered logging only (not every
-    // poll) so a stuck-on alarm doesn't spam the log queue; this is what
-    // lets a future SMA "battery voltage out of range" fault be lined up
-    // against the BMS's own MOSFET/alarm timeline to the second.
-    DalyMosfetStatus mosStatus;
-    if (bms.readMosfetStatus(mosStatus))
-    {
-      BmsEvents::Events ev = BmsEvents::decide(bmsEventState, nullptr, &mosStatus, nullptr);
-      if (ev.chargeMosChanged)
-        netLog("[BMS] Charge MOSFET %s\n", ev.chargeMosOn ? "ON" : "OFF - protection or BMS-initiated cutoff");
-      if (ev.dischargeMosChanged)
-        netLog("[BMS] Discharge MOSFET %s\n", ev.dischargeMosOn ? "ON" : "OFF - protection or BMS-initiated cutoff");
-
-      bool stored = false;
-      if (MutexLock lock{dataMutex, kBmsStoreLockTimeout})
-      {
-        currentData.chargeMosOn = mosStatus.chargeMosOn;
-        currentData.dischargeMosOn = mosStatus.dischargeMosOn;
-        stored = true;
-      }
-      lockDrops.note(stored, "MOSFET status");
-    }
-
-    vTaskDelay(pdMS_TO_TICKS(100));
-
-    DalyAlarmStatus alarmStatus;
-    if (bms.readAlarmStatus(alarmStatus))
-    {
-      // Edge-triggered, one line per changed bit (undefined bits still log,
-      // by byte.bit position, so an unexpected fault isn't silently
-      // swallowed) - baseline flag so the first read after boot doesn't log
-      // every bit as "SET"/"CLEARED" from an all-zero starting point.
-      BmsEvents::Events ev = BmsEvents::decide(bmsEventState, nullptr, nullptr, &alarmStatus);
-      for (int i = 0; i < ev.alarmBitCount; i++)
-      {
-        const BmsEvents::AlarmBitEvent &e = ev.alarmBits[i];
-        if (e.name)
-          netLog("[BMS] Alarm: %s %s\n", e.name, e.set ? "SET" : "CLEARED");
-        else
-          netLog("[BMS] Alarm: bit %d.%d %s\n", e.byteIndex, e.bitIndex, e.set ? "SET" : "CLEARED");
-      }
-      if (ev.faultCodeChanged)
-        netLog("[BMS] Fault code %u -> %u\n", ev.faultCodeFrom, ev.faultCodeTo);
-
-      bool stored = false;
-      if (MutexLock lock{dataMutex, kBmsStoreLockTimeout})
-      {
-        currentData.bmsProtectionActive = alarmStatus.anyProtectionActive;
-        currentData.cellOvervoltLevel1 = alarmStatus.cellOvervoltLevel1;
-        currentData.cellOvervoltLevel2 = alarmStatus.cellOvervoltLevel2;
-        currentData.packOvervoltLevel1 = alarmStatus.packOvervoltLevel1;
-        currentData.packOvervoltLevel2 = alarmStatus.packOvervoltLevel2;
-        stored = true;
-      }
-      lockDrops.note(stored, "alarm status");
-    }
-
-    vTaskDelay(pdMS_TO_TICKS(2000));
+    pollBasicInfo(st);
+    vTaskDelay(pdMS_TO_TICKS(kInterFrameGapMs));
+    pollCells(st);
+    vTaskDelay(pdMS_TO_TICKS(kInterFrameGapMs));
+    pollMosfet(st);
+    vTaskDelay(pdMS_TO_TICKS(kInterFrameGapMs));
+    pollAlarms(st);
+    vTaskDelay(pdMS_TO_TICKS(kBmsCycleIdleMs));
   }
 }
 

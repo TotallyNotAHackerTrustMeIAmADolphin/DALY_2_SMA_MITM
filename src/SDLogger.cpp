@@ -83,6 +83,20 @@ namespace
         return OpenBoundedResult::Opened;
     }
 
+    // A web-route read runs on async_tcp; while /api/logs/download holds
+    // sdMutex_ for its whole transfer, any other web-route read that lands
+    // on the same task would otherwise block on a lock async_tcp itself
+    // already holds, stalling that task (and with it HTTP/SSE) for its
+    // full timeout before failing anyway. Fail such a self-wait instantly
+    // instead - a different task holding the lock still waits the normal
+    // timeout.
+    TickType_t webLockTimeout(SemaphoreHandle_t mutex, TickType_t t)
+    {
+        if (xSemaphoreGetMutexHolder(mutex) == xTaskGetCurrentTaskHandle())
+            return 0;
+        return t;
+    }
+
     // Reads file in kSdReadChunkBytes pieces up to limitBytes, calling
     // onChunk(data, len) per chunk and feeding the watchdog along the way.
     template <class F>
@@ -300,7 +314,7 @@ bool SDLogger::listLogFiles(std::vector<LogFileInfo> &outFiles)
     if (!initialized)
         return false;
 
-    if (xSemaphoreTake(sdMutex_, kListLockTimeout) != pdTRUE)
+    if (xSemaphoreTake(sdMutex_, webLockTimeout(sdMutex_, kListLockTimeout)) != pdTRUE)
         return false;
 
     File root = SD.open("/");
@@ -340,7 +354,7 @@ SDLogger::ReadResult SDLogger::readTail(const String &fileName, String &outConte
     if (!initialized)
         return ReadResult::Busy;
 
-    MutexLock lock(sdMutex_, kTailLockTimeout);
+    MutexLock lock(sdMutex_, webLockTimeout(sdMutex_, kTailLockTimeout));
     if (!lock)
         return ReadResult::Busy;
 
@@ -396,7 +410,7 @@ SDLogger::ReadResult SDLogger::readGraphSeries(const String &fileName, size_t ta
     targetPoints = std::max<size_t>(targetPoints, 1);
     targetPoints = std::min(targetPoints, kMaxGraphTargetPoints);
 
-    MutexLock lock(sdMutex_, kGraphLockTimeout);
+    MutexLock lock(sdMutex_, webLockTimeout(sdMutex_, kGraphLockTimeout));
     if (!lock)
         return ReadResult::Busy;
 
@@ -484,7 +498,7 @@ std::shared_ptr<MutexLock> SDLogger::beginDownload(const String &fileName, Strin
     if (!initialized)
         return nullptr;
 
-    auto lock = std::make_shared<MutexLock>(sdMutex_, kDownloadLockTimeout);
+    auto lock = std::make_shared<MutexLock>(sdMutex_, webLockTimeout(sdMutex_, kDownloadLockTimeout));
     if (!*lock)
         return nullptr;
 

@@ -57,5 +57,5 @@ private:
     bool receiveSingleFrame(uint8_t expectedCmd, uint8_t *dataOut, unsigned long timeout = 150);
 
     // Internal variadic logger (works exactly like printf)
-    void debugLog(const char *format, ...);
+    void debugLog(const char *format, ...) __attribute__((format(printf, 2, 3)));
 };

@@ -210,8 +210,22 @@ void WebDashboard::loadConfig(SystemConfig &configOut)
     for (SettingBase *s : _cfg->all())
     {
         s->reset();
-        if (!_prefs.isKey(s->key()))
+        // One getType() both finds the key and tells its stored type: NVS
+        // enforces the type, so a key written as another type (e.g. by an
+        // older firmware) would make the typed read below fail and quietly
+        // return the default. Say so instead.
+        PreferenceType stored = _prefs.getType(s->key());
+        if (stored == PT_INVALID)
+            continue; // never saved: default
+        PreferenceType expected = s->kind() == SettingBase::KIND_INT      ? PT_I32
+                                  : s->kind() == SettingBase::KIND_UINT16 ? PT_U32
+                                                                          : PT_BLOB; // putFloat = putBytes
+        if (stored != expected)
+        {
+            debugLog("[CFG] Stored %s has NVS type %d, expected %d - using the default %s\n",
+                     s->label(), (int)stored, (int)expected, formatNumber(*s, s->def()).c_str());
             continue;
+        }
         double v;
         switch (s->kind())
         {

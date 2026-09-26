@@ -68,6 +68,9 @@ public:
     // so a -60 can't wrap to 65476 (#61) and a NaN can't get in.
     virtual bool set(double v) = 0;
     virtual void reset() = 0; // back to the default
+    // Copies only the value from the same setting of another SystemConfig
+    // (see SystemConfig::operator=). o must be the same Setting<T> member.
+    virtual void copyValueFrom(const SettingBase &o) = 0;
 
     // Parses a /save form value and set()s it. The whole string (spaces
     // around it aside) must be a number - an integer for an integer
@@ -158,11 +161,25 @@ public:
         return true;
     }
     void reset() override { value_ = def_; }
+    void copyValueFrom(const SettingBase &o) override
+    {
+        value_ = static_cast<const Setting<T> &>(o).value_;
+    }
 
-    // Bypasses the range check. Only for native tests that feed the math
-    // layer values set() would refuse (NaN, negative, reversed thresholds)
-    // to prove its own fail-safes. Firmware code never calls this.
+    // Copy-constructing is fine (a SystemConfig copy copies each member
+    // from the same member). Assigning is not: the implicit operator=
+    // would also copy key/label/range, so `cfg.cvStartTaper =
+    // cfg.cvMaxCharge` would turn one setting into another (NVS key "cmv")
+    // and skip set(). Use set(), or assign whole SystemConfigs.
+    Setting(const Setting &) = default;
+    Setting &operator=(const Setting &) = delete;
+
+#ifdef PIO_UNIT_TESTING
+    // Bypasses the range check. Only compiled into native tests, which feed
+    // the math values set() would refuse (NaN, negative amps, reversed
+    // thresholds) to prove its own fail-safes. Firmware can't call it.
     void setUnchecked(T v) { value_ = v; }
+#endif
 
 private:
     T value_;
@@ -211,22 +228,23 @@ struct SystemConfig
     static constexpr size_t kNumSettings = 17;
 
     // Every setting, in /config page order - for NVS load/save, /save
-    // parsing and the page. A new member must be added here too
-    // (test_systemconfig checks each one appears on the page).
-    std::array<SettingBase *, kNumSettings> all()
+    // parsing and the page. A new member must be added here too:
+    // test_systemconfig checks that all() covers every byte of
+    // SystemConfig, so a member missing from the list fails the tests.
+    std::array<SettingBase *, kNumSettings> all() { return list<SettingBase>(*this); }
+    std::array<const SettingBase *, kNumSettings> all() const { return list<const SettingBase>(*this); }
+
+    SystemConfig() = default;
+    SystemConfig(const SystemConfig &) = default;
+    // Settings can't be assigned one by one (see Setting), so assigning a
+    // whole config copies each setting's value from the same setting.
+    SystemConfig &operator=(const SystemConfig &o)
     {
-        return {{&maxChargeA, &cvStartTaper, &cvHighAlarmGate, &trickleA, &cvMaxCharge,
-                 &cvMaintStart, &cvMaintStop, &maintAmps,
-                 &maxDischargeA, &cvStartDTaper, &cvLowAlarmGate, &limpDischargeA, &cvMinDischarge,
-                 &vSamples, &bmsTimeout, &spreadStartMv, &spreadMaxMv}};
-    }
-    std::array<const SettingBase *, kNumSettings> all() const
-    {
-        std::array<SettingBase *, kNumSettings> a = const_cast<SystemConfig *>(this)->all();
-        std::array<const SettingBase *, kNumSettings> r;
+        std::array<SettingBase *, kNumSettings> dst = all();
+        std::array<const SettingBase *, kNumSettings> src = o.all();
         for (size_t i = 0; i < kNumSettings; i++)
-            r[i] = a[i];
-        return r;
+            dst[i]->copyValueFrom(*src[i]);
+        return *this;
     }
 
     // Each setting's own range is enforced by set(); these are the rules
@@ -266,5 +284,15 @@ struct SystemConfig
             !(cfg.cvStartDTaper > cfg.cvLowAlarmGate && cfg.cvLowAlarmGate > cfg.cvMinDischarge);
         r.maintHysteresisBad = cfg.cvMaintStart >= cfg.cvMaintStop;
         return r;
+    }
+
+private:
+    template <typename B, typename Self>
+    static std::array<B *, kNumSettings> list(Self &c)
+    {
+        return {{&c.maxChargeA, &c.cvStartTaper, &c.cvHighAlarmGate, &c.trickleA, &c.cvMaxCharge,
+                 &c.cvMaintStart, &c.cvMaintStop, &c.maintAmps,
+                 &c.maxDischargeA, &c.cvStartDTaper, &c.cvLowAlarmGate, &c.limpDischargeA, &c.cvMinDischarge,
+                 &c.vSamples, &c.bmsTimeout, &c.spreadStartMv, &c.spreadMaxMv}};
     }
 };

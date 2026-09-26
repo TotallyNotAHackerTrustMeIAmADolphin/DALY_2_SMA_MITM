@@ -6,6 +6,7 @@
 #include <math.h>
 #include <string.h>
 #include <string>
+#include <type_traits>
 #include "SystemConfig.h"
 #include "WebPages.h"
 
@@ -56,6 +57,49 @@ static void test_every_setting_is_listed_once_with_a_sane_range(void)
             TEST_ASSERT_TRUE_MESSAGE(strcmp(s->key(), all[j]->key()) != 0, s->key());
         }
     }
+}
+
+static size_t settingSize(const SettingBase *s)
+{
+    switch (s->kind())
+    {
+    case SettingBase::KIND_INT:
+        return sizeof(Setting<int>);
+    case SettingBase::KIND_UINT16:
+        return sizeof(Setting<uint16_t>);
+    default:
+        return sizeof(Setting<float>);
+    }
+}
+
+static void test_all_covers_every_member(void)
+{
+    // all() is the list load/save/page loop over. A Setting member left
+    // out of it would never be loaded, saved or shown: the listed settings
+    // must tile the whole SystemConfig object, with no bytes unaccounted.
+    SystemConfig cfg;
+    size_t bytes = 0;
+    for (const SettingBase *s : cfg.all())
+    {
+        const char *p = reinterpret_cast<const char *>(s);
+        TEST_ASSERT_TRUE(p >= reinterpret_cast<const char *>(&cfg));
+        TEST_ASSERT_TRUE(p + settingSize(s) <= reinterpret_cast<const char *>(&cfg) + sizeof(cfg));
+        bytes += settingSize(s);
+    }
+    TEST_ASSERT_EQUAL(sizeof(SystemConfig), bytes);
+}
+
+static void test_assigning_a_config_copies_values_not_identities(void)
+{
+    SystemConfig a, b;
+    TEST_ASSERT_TRUE(b.cvStartTaper.set(3.30));
+    a = b;
+    TEST_ASSERT_EQUAL_FLOAT(3.30f, a.cvStartTaper);
+    TEST_ASSERT_EQUAL_STRING("cvt", a.cvStartTaper.key());
+    TEST_ASSERT_TRUE(a.all()[1] == &a.cvStartTaper);
+    // `a.cvStartTaper = a.cvMaxCharge;` must not compile (it would copy
+    // the key "cmv" too): Setting's copy-assignment is deleted.
+    TEST_ASSERT_FALSE((std::is_copy_assignable<Setting<float>>::value));
 }
 
 static void test_every_setting_has_exactly_one_label_and_input_on_config_page(void)
@@ -274,6 +318,8 @@ int main(int, char **)
     UNITY_BEGIN();
     RUN_TEST(test_defaults_pass_validation);
     RUN_TEST(test_every_setting_is_listed_once_with_a_sane_range);
+    RUN_TEST(test_all_covers_every_member);
+    RUN_TEST(test_assigning_a_config_copies_values_not_identities);
     RUN_TEST(test_every_setting_has_exactly_one_label_and_input_on_config_page);
     RUN_TEST(test_copy_carries_values_and_all_points_into_the_copy);
     RUN_TEST(test_set_accepts_limits_and_refuses_just_outside);

@@ -54,7 +54,7 @@ private:
     // for why: debugCb is itself variadic (netLog), and a log line
     // containing a literal '%' must not be reinterpreted as one of its own
     // format specifiers.
-    static void debugLog(const char *format, ...);
+    static void debugLog(const char *format, ...) __attribute__((format(printf, 1, 2)));
 
     static DiagDebugCallback debugCb;
 };

@@ -78,6 +78,10 @@ unsigned long lastBasicInfoRead = 0;
 unsigned long lastCellRead = 0;
 
 // --- CENTRAL LOGGING ---
+// printf format checking: a Setting<T> (or any wrong type) passed for a
+// %d/%f is a compile warning instead of garbage in the log - varargs never
+// apply Setting's conversion to T.
+void netLog(const char *format, ...) __attribute__((format(printf, 1, 2)));
 void netLog(const char *format, ...)
 {
   char loc_res[256];

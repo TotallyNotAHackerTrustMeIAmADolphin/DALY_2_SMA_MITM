@@ -60,7 +60,7 @@ private:
     // (not as the format string itself) since _debugCb is itself variadic
     // and a log line containing a literal '%' must not be reinterpreted as
     // a format specifier by netLog's own vsnprintf.
-    void debugLog(const char *format, ...);
+    void debugLog(const char *format, ...) __attribute__((format(printf, 2, 3)));
 
     // Validates the "file" request param against SDLogger::listLogFiles(). On
     // success returns true with outName/outSize populated. On failure it sends

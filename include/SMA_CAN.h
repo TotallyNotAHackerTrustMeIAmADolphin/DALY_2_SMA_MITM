@@ -34,6 +34,6 @@ private:
     gpio_num_t _rxPin;
     gpio_num_t _sePin; // Added
 
-    void debugLog(const char *format, ...);
+    void debugLog(const char *format, ...) __attribute__((format(printf, 2, 3)));
     void sendFrame(uint32_t id, uint8_t dlc, const uint8_t *data);
 };

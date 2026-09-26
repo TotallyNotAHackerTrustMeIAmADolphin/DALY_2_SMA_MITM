@@ -423,6 +423,143 @@ static void test_derating_started_once_ended_only_after_hysteresis(void)
     TEST_ASSERT_FALSE(d5.events.deratingStarted);
 }
 
+// --- #71: raw/smoothed and min/max split, driven through decide() ---
+// Mirrors the equivalent test_glideslope cases, but through decide() so a
+// future change that mixes up which Snapshot field feeds which
+// calculateCCL()/calculateDCL() argument (or which freshness flag gates
+// which BMS reading) fails here too, not just at the pure-math layer.
+
+static void test_raw_spike_reaches_ccl_through_decide(void)
+{
+    // smoothedMaxV=3.35V (taper region) but rawMaxV=3.50V == cvMaxCharge ->
+    // hard cutoff fires on the raw reading regardless of the smoothed one.
+    ControlState ctrl;
+    Snapshot s = freshSnapshot(1000);
+    s.maxCellSmoothedV = 3.35f;
+    s.maxCellRawV = 3.50f;
+    Decision d = decide(cfg, s, ctrl);
+    TEST_ASSERT_EQUAL(0, d.values.ccl);
+    // DCL is untouched: minCellSmoothedV/RawV=3.3V (freshSnapshot default)
+    // is above cvStartDTaper(3.2) -> full-current: 200A * 1.0 -> 2000.
+    TEST_ASSERT_EQUAL(2000, d.values.dcl);
+}
+
+static void test_raw_spike_at_gate_gives_trickle_through_decide(void)
+{
+    // smoothedMaxV=3.35V (taper region), rawMaxV=3.45V: at/above
+    // cvHighAlarmGate(3.4V) but below cvMaxCharge(3.5V) -> trickle on the
+    // raw reading, not the taper's smoothed-value slope.
+    ControlState ctrl;
+    Snapshot s = freshSnapshot(1000);
+    s.maxCellSmoothedV = 3.35f;
+    s.maxCellRawV = 3.45f;
+    Decision d = decide(cfg, s, ctrl);
+    TEST_ASSERT_EQUAL(50, d.values.ccl); // trickleA(5A) -> 50 (0.1A units)
+}
+
+static void test_raw_sag_reaches_dcl_through_decide(void)
+{
+    // smoothedMinV=3.15V (taper region) but rawMinV=3.00V == cvMinDischarge
+    // -> hard cutoff fires on the raw reading.
+    ControlState ctrl;
+    Snapshot s = freshSnapshot(1000);
+    s.minCellSmoothedV = 3.15f;
+    s.minCellRawV = 3.00f;
+    Decision d = decide(cfg, s, ctrl);
+    TEST_ASSERT_EQUAL(0, d.values.dcl);
+    // CCL is untouched: maxCellSmoothedV/RawV=3.0V (freshSnapshot default)
+    // is below cvStartTaper(3.3) -> full-current: 100A * 1.0 -> 1000.
+    TEST_ASSERT_EQUAL(1000, d.values.ccl);
+}
+
+static void test_raw_sag_at_gate_gives_limp_through_decide(void)
+{
+    // smoothedMinV=3.15V (taper region), rawMinV=3.05V: at/below
+    // cvLowAlarmGate(3.1V), above cvMinDischarge(3.0V) -> limp on the raw
+    // reading.
+    ControlState ctrl;
+    Snapshot s = freshSnapshot(1000);
+    s.minCellSmoothedV = 3.15f;
+    s.minCellRawV = 3.05f;
+    Decision d = decide(cfg, s, ctrl);
+    TEST_ASSERT_EQUAL(150, d.values.dcl); // limpDischargeA(15A) -> 150
+}
+
+static void test_ccl_trickle_when_smoothed_at_gate_but_raw_below_through_decide(void)
+{
+    // smoothedMaxV=3.42V is at/above cvHighAlarmGate(3.4V), but
+    // rawMaxV=3.35V is below it (and below cvMaxCharge) -> the taper's
+    // slope clamps to 0, so target == trickleA even though the raw
+    // reading alone wouldn't have gated anything (Glideslope.h's
+    // documented "intentional, not a bug" consequence of the raw/smoothed
+    // split).
+    ControlState ctrl;
+    Snapshot s = freshSnapshot(1000);
+    s.maxCellSmoothedV = 3.42f;
+    s.maxCellRawV = 3.35f;
+    Decision d = decide(cfg, s, ctrl);
+    TEST_ASSERT_EQUAL(50, d.values.ccl); // trickleA(5A) -> 50
+}
+
+static void test_dcl_limp_when_smoothed_at_gate_but_raw_above_through_decide(void)
+{
+    // Mirror of the CCL case above: smoothedMinV=3.08V is at/below
+    // cvLowAlarmGate(3.1V), but rawMinV=3.15V is above it (and above
+    // cvMinDischarge) -> the taper's slope clamps to 0, target ==
+    // limpDischargeA.
+    ControlState ctrl;
+    Snapshot s = freshSnapshot(1000);
+    s.minCellSmoothedV = 3.08f;
+    s.minCellRawV = 3.15f;
+    Decision d = decide(cfg, s, ctrl);
+    TEST_ASSERT_EQUAL(150, d.values.dcl); // limpDischargeA(15A) -> 150
+}
+
+static void test_dcl_derated_by_spread_through_decide(void)
+{
+    // spreadMv=105 is the midpoint of the default 60..150 span -> factor
+    // 0.5. minCellSmoothedV/RawV=3.3V (freshSnapshot default) is above
+    // cvStartDTaper(3.2) -> full-current branch: 200A * 0.5 = 100A -> 1000.
+    // CCL gets the same factor via the freshSnapshot default max cell
+    // (3.0V, full-current): 100A * 0.5 = 50A -> 500. Same spreadMv as
+    // test_derate_factor_applied_once_ccl_at_spread_midpoint_is_half, just
+    // asserting the DCL side too.
+    ControlState ctrl;
+    Snapshot s = freshSnapshot(1000);
+    s.cellSpreadMv = 105;
+    Decision d = decide(cfg, s, ctrl);
+    TEST_ASSERT_EQUAL(500, d.values.ccl);
+    TEST_ASSERT_EQUAL(1000, d.values.dcl);
+    TEST_ASSERT_EQUAL_FLOAT(0.5f, d.derateFactor);
+}
+
+static void test_half_stale_cells_stale_basic_info_fresh_forces_zero(void)
+{
+    // haveBasicInfo fresh, haveCellData stale (last read further back than
+    // cfg.bmsTimeout(60s)=60000ms) -> decide()'s `fresh` is the AND of
+    // both, so both limits go to 0.
+    ControlState ctrl;
+    Snapshot s = freshSnapshot(100000);
+    s.lastCellReadMs = 100000 - 70000; // 70s ago, > 60s timeout
+    Decision d = decide(cfg, s, ctrl);
+    TEST_ASSERT_EQUAL(0, d.values.ccl);
+    TEST_ASSERT_EQUAL(0, d.values.dcl);
+    TEST_ASSERT_FALSE(d.fresh);
+}
+
+static void test_half_stale_basic_info_stale_cells_fresh_forces_zero(void)
+{
+    // Reverse of the above: haveCellData fresh, haveBasicInfo stale ->
+    // same AND, same result.
+    ControlState ctrl;
+    Snapshot s = freshSnapshot(100000);
+    s.lastBasicInfoReadMs = 100000 - 70000; // 70s ago, > 60s timeout
+    Decision d = decide(cfg, s, ctrl);
+    TEST_ASSERT_EQUAL(0, d.values.ccl);
+    TEST_ASSERT_EQUAL(0, d.values.dcl);
+    TEST_ASSERT_FALSE(d.fresh);
+}
+
 int main(int, char **)
 {
     UNITY_BEGIN();
@@ -442,5 +579,14 @@ int main(int, char **)
     RUN_TEST(test_maintenance_cvl_is_fixed_560_not_cvmaxcharge);
     RUN_TEST(test_derate_factor_applied_once_ccl_at_spread_midpoint_is_half);
     RUN_TEST(test_derating_started_once_ended_only_after_hysteresis);
+    RUN_TEST(test_raw_spike_reaches_ccl_through_decide);
+    RUN_TEST(test_raw_spike_at_gate_gives_trickle_through_decide);
+    RUN_TEST(test_raw_sag_reaches_dcl_through_decide);
+    RUN_TEST(test_raw_sag_at_gate_gives_limp_through_decide);
+    RUN_TEST(test_ccl_trickle_when_smoothed_at_gate_but_raw_below_through_decide);
+    RUN_TEST(test_dcl_limp_when_smoothed_at_gate_but_raw_above_through_decide);
+    RUN_TEST(test_dcl_derated_by_spread_through_decide);
+    RUN_TEST(test_half_stale_cells_stale_basic_info_fresh_forces_zero);
+    RUN_TEST(test_half_stale_basic_info_stale_cells_fresh_forces_zero);
     return UNITY_END();
 }

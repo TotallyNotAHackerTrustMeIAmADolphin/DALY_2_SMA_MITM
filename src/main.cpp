@@ -15,6 +15,7 @@
 #include "WebDashboard.h"
 #include "SDLogger.h"
 #include "Diagnostics.h"
+#include "WifiEvents.h"
 
 // Bring in your Wi-Fi credentials AND network config (static IP, gateway,
 // subnet, DNS) - all of it lives in this one gitignored file now, so a
@@ -312,99 +313,57 @@ void bmsTask(void *pvParameters)
 // Arduino's auto-reconnect handles the actual recovery silently; this just
 // makes drops/recoveries visible in the SD log, edge-triggered like the
 // Daly MOSFET/alarm logging (one line per transition, not per retry while
-// the AP is unreachable).
-const char *wifiDisconnectReasonName(uint8_t reason)
-{
-  switch (reason)
-  {
-  case WIFI_REASON_UNSPECIFIED: return "unspecified";
-  case WIFI_REASON_AUTH_EXPIRE: return "auth expired";
-  case WIFI_REASON_ASSOC_EXPIRE: return "association expired";
-  case WIFI_REASON_ASSOC_LEAVE: return "we disconnected (assoc leave)";
-  case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT: return "4-way handshake timeout (wrong password?)";
-  case WIFI_REASON_AUTH_FAIL: return "auth failed";
-  case WIFI_REASON_NO_AP_FOUND: return "AP not found (out of range / AP down?)";
-  case WIFI_REASON_BEACON_TIMEOUT: return "beacon timeout (weak signal / interference)";
-  case WIFI_REASON_MIC_FAILURE: return "MIC failure";
-  case WIFI_REASON_AP_INITIATED: return "kicked by AP";
-  case WIFI_REASON_STA_LEAVING: return "we disconnected (leaving)";
-  default: return "see reason code";
-  }
-}
-
-// Written only by the WiFi event task (arduino_events, 4KB stack), read only
-// by loop() via drainWifiEvents() below - exactly one writer and one reader,
-// never touched by bmsTask/canTask, so no dataMutex is needed; volatile is
-// enough to keep the compiler from caching stale values across that
-// producer/consumer boundary. The event handler itself must stay allocation-
-// and lock-free (no netLog(), no WiFi.localIP()) - it runs on the WiFi
-// event task, and netLog() takes netOutMutex and can push to SSE.
-volatile bool wifiConnected = false;
-volatile bool wifiEverConnected = false;
-volatile uint32_t wifiDownSince = 0;
-volatile bool wifiPendingDisconnect = false;
-volatile bool wifiPendingReconnect = false;
-volatile bool wifiPendingFirstConnect = false; // connect that arrived after setupNetwork() gave up waiting
-volatile bool wifiPendingLostIp = false;
-volatile uint8_t wifiLastDisconnectReason = 0;
+// the AP is unreachable). The actual state machine (#69) lives in
+// include/WifiEvents.h, pure and natively testable; main.cpp is a thin
+// adapter: map ESP events into the latch, and turn drain() results into the
+// same [WIFI] lines as before.
+WifiEvents::WifiEventLatch wifiEvents;
 
 void wifiEventHandler(WiFiEvent_t event, WiFiEventInfo_t info)
 {
+  // Runs on the WiFi event task (arduino_events, 4KB stack) - must stay
+  // allocation- and lock-free (no netLog(), no WiFi.localIP()); netLog()
+  // takes netOutMutex and can push to SSE.
   if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED)
   {
-    if (wifiConnected)
-    {
-      wifiConnected = false;
-      wifiDownSince = millis();
-      wifiLastDisconnectReason = info.wifi_sta_disconnected.reason;
-      wifiPendingDisconnect = true;
-    }
-    // else: still trying to (re)connect - don't log every retry.
+    wifiEvents.onEvent(WifiEvents::Kind::Disconnected, info.wifi_sta_disconnected.reason, millis());
   }
   else if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP)
   {
-    if (wifiEverConnected && !wifiConnected)
-      wifiPendingReconnect = true;
-    else if (!wifiEverConnected)
-      wifiPendingFirstConnect = true; // cleared by setupNetwork() if it logged the connect itself
-    wifiConnected = true;
-    wifiEverConnected = true;
+    wifiEvents.onEvent(WifiEvents::Kind::Connected, 0, millis());
   }
   else if (event == ARDUINO_EVENT_WIFI_STA_LOST_IP)
   {
-    wifiPendingLostIp = true;
+    wifiEvents.onEvent(WifiEvents::Kind::LostIp, 0, millis());
   }
 }
 
-// Emits the [WIFI] log lines wifiEventHandler() could only flag, from
-// loop() instead of the WiFi event task. Order: disconnect, lost-IP,
+// Emits the [WIFI] log lines the latch could only flag, from loop() instead
+// of the WiFi event task. Order: disconnect, lost-IP, first-connect,
 // reconnect - matches the order those conditions actually occur in.
 void drainWifiEvents()
 {
-  if (wifiPendingDisconnect)
+  WifiEvents::Pending pending = wifiEvents.drain(millis());
+
+  if (pending.disconnect)
   {
-    wifiPendingDisconnect = false;
-    uint8_t reason = wifiLastDisconnectReason;
-    netLog("[WIFI] Disconnected (reason %u: %s)\n", (unsigned)reason, wifiDisconnectReasonName(reason));
+    netLog("[WIFI] Disconnected (reason %u: %s)\n", (unsigned)pending.disconnectReason,
+           WifiEvents::reasonName(pending.disconnectReason));
   }
 
-  if (wifiPendingLostIp)
+  if (pending.lostIp)
   {
-    wifiPendingLostIp = false;
     netLog("[WIFI] Lost IP address (still associated)\n");
   }
 
-  if (wifiPendingFirstConnect)
+  if (pending.firstConnect)
   {
-    wifiPendingFirstConnect = false;
     netLog("[WIFI] Connected, IP %s\n", WiFi.localIP().toString().c_str());
   }
-  if (wifiPendingReconnect)
+  if (pending.reconnect)
   {
-    wifiPendingReconnect = false;
-    unsigned long downMs = millis() - wifiDownSince;
     netLog("[WIFI] Reconnected (%s), RSSI %d dBm, was down for %lus\n",
-           WiFi.localIP().toString().c_str(), (int)WiFi.RSSI(), downMs / 1000);
+           WiFi.localIP().toString().c_str(), (int)WiFi.RSSI(), (unsigned long)(pending.downForMs / 1000));
   }
 }
 
@@ -426,7 +385,7 @@ void setupNetwork()
 
   if (WiFi.status() == WL_CONNECTED)
   {
-    wifiPendingFirstConnect = false; // logged here, don't repeat it from drainWifiEvents()
+    wifiEvents.suppressFirstConnect(); // logged here, don't repeat it from drainWifiEvents()
     netLog("[WIFI] Connected, IP %s\n", WiFi.localIP().toString().c_str());
 
     configTzTime(kTimeZone, "pool.ntp.org", "ptbtime1.ptb.de");

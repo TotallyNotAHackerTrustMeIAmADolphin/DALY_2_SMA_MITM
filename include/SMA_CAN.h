@@ -28,12 +28,17 @@ private:
     SMADebugCallback _debugCb;
     uint8_t _ticker35E;
 
-    bool _wasBusOff;
+    // Driver uninstalled (bus-off) or never started: checkBusHealth()
+    // retries startDriver() every second while set.
+    bool _driverDown;
+    bool _startFailed; // last startDriver() failed; mutes repeat log lines
     unsigned long _recoveryTimer;
     gpio_num_t _txPin;
     gpio_num_t _rxPin;
     gpio_num_t _sePin; // Added
 
     void debugLog(const char *format, ...) __attribute__((format(printf, 2, 3)));
+    bool startDriver();
+    void markDriverDown();
     void sendFrame(uint32_t id, uint8_t dlc, const uint8_t *data);
 };

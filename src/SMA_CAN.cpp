@@ -3,7 +3,7 @@
 #include <cstdio>
 
 SMA_CAN::SMA_CAN() : _debugCb(nullptr), _ticker35E(0),
-                     _wasBusOff(false), _recoveryTimer(0) {}
+                     _driverDown(false), _startFailed(false), _recoveryTimer(0) {}
 
 void SMA_CAN::setDebugCallback(SMADebugCallback cb)
 {
@@ -35,41 +35,65 @@ bool SMA_CAN::begin(gpio_num_t txPin, gpio_num_t rxPin, gpio_num_t sePin)
         digitalWrite(_sePin, LOW); // LOW = High Speed TX Mode. HIGH = Sleep Mode.
     }
 
+    // A failed boot start is retried by checkBusHealth() like a bus-off
+    // recovery (#64) - the SMA must not be left without frames until the
+    // next reboot.
+    bool ok = startDriver();
+    if (!ok)
+        markDriverDown();
+    return ok;
+}
+
+bool SMA_CAN::startDriver()
+{
     // Set back to NORMAL mode!
-    twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(txPin, rxPin, TWAI_MODE_NORMAL);
+    twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(_txPin, _rxPin, TWAI_MODE_NORMAL);
     g_config.tx_queue_len = 10;
     g_config.rx_queue_len = 10;
 
     twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS();
     twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
 
+    bool ok = false;
     if (twai_driver_install(&g_config, &t_config, &f_config) == ESP_OK)
     {
         if (twai_start() == ESP_OK)
-        {
-            debugLog("[CAN] TWAI Driver installed and running at 500kbps.\n");
-            return true;
-        }
+            ok = true;
+        else
+            // Installed but not started: uninstall, or every later
+            // twai_driver_install() fails with ESP_ERR_INVALID_STATE and
+            // recovery can never succeed (#64).
+            twai_driver_uninstall();
     }
-    debugLog("[CAN] Failed to initialize TWAI Driver.\n");
-    return false;
+
+    // Edge-triggered: a driver that keeps failing is retried every second,
+    // one failure line per streak is enough.
+    if (ok)
+        debugLog("[CAN] TWAI Driver installed and running at 500kbps.\n");
+    else if (!_startFailed)
+        debugLog("[CAN] Failed to initialize TWAI Driver - retrying every second.\n");
+    _startFailed = !ok;
+    return ok;
+}
+
+void SMA_CAN::markDriverDown()
+{
+    _driverDown = true;
+    _recoveryTimer = millis();
 }
 
 void SMA_CAN::checkBusHealth()
 {
-    if (_wasBusOff)
+    if (_driverDown)
     {
-        if (SMAFrames::shouldRetryBusRecovery(millis(), _wasBusOff, _recoveryTimer))
+        if (SMAFrames::shouldRetryBusRecovery(millis(), _driverDown, _recoveryTimer))
         {
-            debugLog("[CAN] Reinstalling TWAI Driver...\n");
-            if (begin(_txPin, _rxPin, _sePin))
-            {
-                _wasBusOff = false;
-            }
+            if (!_startFailed)
+                debugLog("[CAN] Reinstalling TWAI Driver...\n");
+            if (startDriver())
+                _driverDown = false;
             else
-            {
                 _recoveryTimer = millis();
-            }
         }
         return;
     }
@@ -80,8 +104,7 @@ void SMA_CAN::checkBusHealth()
 
     if (twai_stat.state == TWAI_STATE_BUS_OFF)
     {
-        _wasBusOff = true;
-        _recoveryTimer = millis();
+        markDriverDown();
         debugLog("[CAN] Bus-Off! Bypassing ESP-IDF bug with a nuclear driver reset...\n");
         twai_driver_uninstall();
     }
@@ -89,7 +112,7 @@ void SMA_CAN::checkBusHealth()
 
 void SMA_CAN::sendFrame(uint32_t id, uint8_t dlc, const uint8_t *data)
 {
-    if (_wasBusOff)
+    if (_driverDown)
         return;
 
     twai_status_info_t twai_stat;
@@ -113,7 +136,7 @@ void SMA_CAN::sendFrame(uint32_t id, uint8_t dlc, const uint8_t *data)
 
 void SMA_CAN::sendStatus(const SMATxData &data)
 {
-    if (_wasBusOff)
+    if (_driverDown)
         return;
 
     uint8_t nextTicker;
@@ -129,13 +152,15 @@ void SMA_CAN::sendStatus(const SMATxData &data)
 
 void SMA_CAN::readMessages(DashboardData &dashboardOut)
 {
-    if (_wasBusOff)
+    if (_driverDown)
         return;
 
     twai_message_t in_msg;
     int msgCount = 0;
 
-    while (twai_receive(&in_msg, 0) == ESP_OK && msgCount < 10)
+    // Count first: checked after twai_receive(), the 11th frame was
+    // dequeued and then dropped unread (#65).
+    while (msgCount < 10 && twai_receive(&in_msg, 0) == ESP_OK)
     {
         msgCount++;
 

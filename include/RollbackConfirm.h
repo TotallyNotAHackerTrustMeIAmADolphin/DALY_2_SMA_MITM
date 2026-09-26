@@ -55,6 +55,15 @@ namespace RollbackConfirm
         return !state.imageConfirmed && nowMs > kConfirmAfterMs;
     }
 
+    // True exactly when decide() with the same arguments would read
+    // imagePendingVerify, so the caller can skip the OTA partition query
+    // everywhere else without re-implementing decide()'s branches (#105).
+    inline bool needsPendingVerify(const State &state, bool wifiUp, bool bmsUp, unsigned long nowMs)
+    {
+        return !state.imageConfirmed && nowMs > kConfirmAfterMs &&
+               !(wifiUp && bmsUp) && !state.unconfirmedWarned;
+    }
+
     inline Action decide(State &state, bool wifiUp, bool bmsUp,
                           unsigned long nowMs, bool imagePendingVerify)
     {

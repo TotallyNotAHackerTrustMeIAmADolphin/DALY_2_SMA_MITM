@@ -194,14 +194,9 @@ void Diagnostics::confirmImageIfReady(bool wifiUp, bool bmsUp)
     // imagePendingVerify=false), silently swallowing the one-shot warning.
     const unsigned long nowMs = millis();
 
-    // Only query the OTA partition state when the answer could actually
-    // change the outcome: decide() is a no-op once imageConfirmed or before
-    // kConfirmAfterMs, and it only consults imagePendingVerify on the
-    // not-yet-warned, not-ready branch - so skip the ESP-IDF call everywhere
-    // else instead of doing it unconditionally on every loop() iteration.
+    // Only query the OTA partition state when decide() will read it.
     bool imagePendingVerify = false;
-    if (!st.imageConfirmed && !st.unconfirmedWarned && !(wifiUp && bmsUp) &&
-        nowMs > RollbackConfirm::kConfirmAfterMs)
+    if (RollbackConfirm::needsPendingVerify(st, wifiUp, bmsUp, nowMs))
     {
         esp_ota_img_states_t otaState = ESP_OTA_IMG_UNDEFINED;
         esp_ota_get_state_partition(esp_ota_get_running_partition(), &otaState);

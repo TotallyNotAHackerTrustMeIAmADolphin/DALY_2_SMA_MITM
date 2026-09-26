@@ -105,15 +105,11 @@ struct SystemConfig {
             !(cfg.cvStartDTaper > cfg.cvLowAlarmGate && cfg.cvLowAlarmGate > cfg.cvMinDischarge);
         r.maintHysteresisBad = cfg.cvMaintStart >= cfg.cvMaintStop;
 
-        // Deliberate tolerance (#54): the live deployed config uses
-        // cvMaxCharge = 3.55V exactly, the documented 3.550V practical
-        // ceiling, which is kDalyOvervoltageV - kMinChargeMarginV in exact
-        // decimal arithmetic but NOT bit-identical to it in float (3.65f -
-        // 0.10f != 3.55f in IEEE 754 single precision). Comparing directly
-        // would reject the very value this margin was chosen to allow, so a
-        // small tolerance is added on the accept side. 3.550f must pass,
-        // 3.551f must fail.
-        r.chargeHeadroomBad = cfg.cvMaxCharge > (kDalyOvervoltageV - kMinChargeMarginV) + 0.0005f;
+        // No tolerance on purpose: in IEEE binary32, 3.65f - 0.10f is
+        // 3.5500002 and 3.55f is 3.5499999, so the live 3.550 V ceiling
+        // passes a plain comparison and anything above it (e.g. 3.5505)
+        // fails. Adding slack here would only raise the safety ceiling.
+        r.chargeHeadroomBad = cfg.cvMaxCharge > (kDalyOvervoltageV - kMinChargeMarginV);
 
         r.hasNegativeCurrent = cfg.trickleA < 0 || cfg.limpDischargeA < 0 ||
                                 cfg.maintAmps < 0 || cfg.maxChargeA < 0 || cfg.maxDischargeA < 0;

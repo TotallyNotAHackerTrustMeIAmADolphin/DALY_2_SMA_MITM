@@ -568,12 +568,17 @@ void setup()
   // which need the setpoints (and a place to log) right away.
   webUI.setActionCallback(handleUIAction);
   webUI.setDebugCallback(netLog);
-  webUI.loadConfig(cfg);
 
   SDLogger::setDebugCallback(libraryLogger);
   bool sdOk = SDLogger::begin();
   netLog(sdOk ? "[SYS] SD card logging initialized.\n"
               : "[SYS] SD card logging unavailable (no card or mount failed).\n");
+
+  // After SDLogger::begin(), not before: loadConfig() logs any
+  // "[CFG] Loaded config fails validation" lines (#56), and SDLogger drops
+  // events until it is initialised - on the headless device the SD .log is
+  // the only place those would be seen.
+  webUI.loadConfig(cfg);
 
   // Reset reason / rollback state / core dump summary, right after the SD
   // log exists to receive it - not deferred to loop(), so a reset within

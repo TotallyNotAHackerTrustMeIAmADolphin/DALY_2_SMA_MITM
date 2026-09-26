@@ -128,6 +128,9 @@ static void test_charge_headroom_boundary(void)
 
     cfg.cvMaxCharge = 3.551f;
     TEST_ASSERT_TRUE(SystemConfig::validate(cfg).chargeHeadroomBad);
+
+    cfg.cvMaxCharge = 3.5505f; // just above the ceiling, no slack
+    TEST_ASSERT_TRUE(SystemConfig::validate(cfg).chargeHeadroomBad);
 }
 
 // Negative current setpoints: 0 A allowed, any negative value rejected, one

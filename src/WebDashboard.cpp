@@ -320,9 +320,14 @@ void WebDashboard::saveConfig(AsyncWebServerRequest *request)
         for (const ValidationMessage &vm : kValidationMessages)
         {
             if (validation.*(vm.flag))
+            {
                 body += String(vm.message) + "\n";
+                // One log line per violation: debugLog's buffer is 256
+                // bytes, and one call with embedded newlines would both
+                // truncate and leave the continuation lines untimestamped.
+                debugLog("[WEB] /save refused: %s\n", vm.message);
+            }
         }
-        debugLog("[WEB] /save refused: config failed validation:\n%s", body.c_str());
         request->send(400, "text/plain", body + "Nothing saved.\n");
         return;
     }

@@ -2,6 +2,7 @@
 #include "WebPages.h"
 #include "SDLogger.h"
 #include "TelemetrySchema.h"
+#include "Diagnostics.h"
 #include <SD.h>
 #include <cstdarg>
 #include <cstddef>
@@ -545,69 +546,17 @@ void WebDashboard::setupRoutes()
     // (see AsyncWebServer::_attachHandler()).
     _server.on("/api/coredump/summary", HTTP_GET, [](AsyncWebServerRequest *request)
                {
-        esp_err_t checkErr = esp_core_dump_image_check();
-
-        static esp_core_dump_summary_t summary;
-        bool present = false;
-        if (checkErr == ESP_OK) {
-            memset(&summary, 0, sizeof(summary));
-            present = (esp_core_dump_get_summary(&summary) == ESP_OK);
-        }
+        CoreDumpInfo dump;
+        Diagnostics::readCoreDump(dump);
+        char runningSha[17];
+        Diagnostics::runningElfSha(runningSha);
+        esp_reset_reason_t reason = esp_reset_reason();
 
         char json[900];
-        size_t len = 0;
-        int n;
-
-        n = snprintf(json + len, sizeof(json) - len,
-                     "{\"check\":\"%.32s\",\"present\":%s",
-                     esp_err_to_name(checkErr), present ? "true" : "false");
-        if (n < 0 || (size_t)n >= sizeof(json) - len) {
+        if (!formatCoreDumpJson(dump, (int)reason, Diagnostics::resetReasonName(reason), runningSha, json, sizeof(json))) {
             request->send(500, "text/plain", "coredump summary too large");
             return;
         }
-        len += (size_t)n;
-
-        if (present) {
-            // Backtrace as a JSON array of "0xXXXXXXXX" strings - worst
-            // case 16 entries: 16 * strlen("\"0x12345678\",") + brackets.
-            char bt[224] = "[";
-            size_t btLen = 1;
-            for (uint32_t i = 0; i < summary.exc_bt_info.depth && i < 16; i++) {
-                int bn = snprintf(bt + btLen, sizeof(bt) - btLen, "%s\"0x%08x\"",
-                                   i ? "," : "", (unsigned)summary.exc_bt_info.bt[i]);
-                if (bn < 0 || btLen + (size_t)bn >= sizeof(bt))
-                    break;
-                btLen += (size_t)bn;
-            }
-            bt[btLen++] = ']';
-            bt[btLen] = '\0';
-
-            n = snprintf(json + len, sizeof(json) - len,
-                         ",\"task\":\"%.16s\",\"pc\":\"0x%08x\",\"cause\":%u,"
-                         "\"corrupted\":%s,\"backtrace\":%s,\"crash_elf_sha256\":\"%.16s\"",
-                         summary.exc_task, (unsigned)summary.exc_pc,
-                         (unsigned)summary.ex_info.exc_cause,
-                         summary.exc_bt_info.corrupted ? "true" : "false",
-                         bt, (const char *)summary.app_elf_sha256);
-            if (n < 0 || (size_t)n >= sizeof(json) - len) {
-                request->send(500, "text/plain", "coredump summary too large");
-                return;
-            }
-            len += (size_t)n;
-        }
-
-        char runningSha[17] = {0};
-        esp_ota_get_app_elf_sha256(runningSha, sizeof(runningSha));
-
-        n = snprintf(json + len, sizeof(json) - len,
-                     ",\"reset_reason\":%d,\"running_elf_sha256\":\"%.16s\"}",
-                     (int)esp_reset_reason(), runningSha);
-        if (n < 0 || (size_t)n >= sizeof(json) - len) {
-            request->send(500, "text/plain", "coredump summary too large");
-            return;
-        }
-        len += (size_t)n;
-
         request->send(200, "application/json", json); });
 
     // Raw core dump image from the flash "coredump" partition, written by
@@ -633,7 +582,7 @@ void WebDashboard::setupRoutes()
     _server.on("/api/coredump", HTTP_GET, [](AsyncWebServerRequest *request)
                {
         esp_err_t checkErr = esp_core_dump_image_check();
-        if (checkErr == ESP_ERR_NOT_FOUND || checkErr == ESP_ERR_INVALID_SIZE) {
+        if (Diagnostics::coreDumpAbsent(checkErr)) {
             request->send(404, "text/plain", "No core dump stored");
             return;
         }

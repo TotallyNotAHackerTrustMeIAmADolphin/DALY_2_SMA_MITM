@@ -203,10 +203,7 @@ namespace StatusFrame
 
             v.ccl = Glideslope::calculateCCL(cfg, s.maxCellSmoothedV, s.maxCellRawV, s.cellSpreadMv, fresh, maintenanceActive);
             v.dcl = Glideslope::calculateDCL(cfg, s.minCellSmoothedV, s.minCellRawV, s.cellSpreadMv, fresh, maintenanceActive);
-            // Maintenance forces the fixed absorption target, but never
-            // above the normal CVL: a lowered cvMaxCharge must not let
-            // maintenance ask for a higher pack voltage than normal
-            // operation would (#60).
+            // Maintenance: fixed absorption target, never above the normal CVL (#60).
             uint16_t normalCvl = Glideslope::toDeciVolts(cfg.cvMaxCharge * kPackCells);
             v.cvl = maintenanceActive ? std::min(kMaintCvlDeciV, normalCvl) : normalCvl;
             v.dvl = Glideslope::toDeciVolts(cfg.cvMinDischarge * kPackCells);

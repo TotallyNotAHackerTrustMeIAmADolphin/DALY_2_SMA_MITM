@@ -25,11 +25,8 @@ namespace TelemetrySchema
     struct Column
     {
         const char *csvName;
-        // snprintf-style: returns the number of characters written
-        // (excluding the NUL). A CellN slot not yet read this boot (or any
-        // other formatter with nothing to say) returns 0; formatRow() below
-        // still emits the field, empty, so every row has one entry per
-        // header column - never fewer (#66).
+        // Returns chars written; 0 = nothing to say (formatRow still emits
+        // an empty field).
         int (*format)(const DashboardData &d, char *buf, size_t len);
     };
 
@@ -75,10 +72,7 @@ namespace TelemetrySchema
     inline int formatDerate(const DashboardData &d, char *buf, size_t len) { return snprintf(buf, len, "%.2f", d.derateFactor); }
 
     // Column order is the CSV row layout - see CLAUDE.md's SDLogger bullet.
-    // Function-local static (like DalyFrames::kAlarmBitNames()/HealthLog::
-    // taskNames()) rather than an inline namespace-scope array: this table
-    // is referenced from the inline functions below, and the device build
-    // predates C++17 inline variables (-std=gnu++11).
+    // Function-local static: the device build is gnu++11 (no inline variables).
     inline const Column (&columns())[38]
     {
         static const Column table[] = {
@@ -126,11 +120,8 @@ namespace TelemetrySchema
 
     inline int count() { return (int)(sizeof(columns()) / sizeof(columns()[0])); }
 
-    // The columns the Graphs page (#93) plots - one ordered name list
-    // shared by readGraphSeries() (resolves each into a columns() index,
-    // builds the CSV header from it, and sizes its Accumulator off it) and
-    // graphs_html's JS (reads the served header row to map name -> column),
-    // instead of each of those writing out the same seven names separately.
+    // The columns the Graphs page (#93) plots - shared by readGraphSeries()
+    // and graphs_html's JS instead of each writing out its own copy.
     // Same function-local-static reasoning as columns() above.
     inline const char *const (&graphColumns())[7]
     {
@@ -152,15 +143,8 @@ namespace TelemetrySchema
         return -1;
     }
 
-    // Builds one CSV data row - everything after Timestamp, which the
-    // logger prepends itself from the row's write time - by joining every
-    // column's formatted text with commas, in table order. Every column
-    // gets a field, blank if its formatter had nothing to write (a CellN
-    // slot beyond how many cells have been read this boot, or a real
-    // formatter error): the header lists every column regardless, so
-    // dropping a field here would shift every later one under the wrong
-    // header (#66). Returns the number of characters written into buf
-    // (excluding the NUL).
+    // Joins every column with commas; an empty field keeps later columns
+    // under their header (#66). Returns chars written into buf.
     inline int formatRow(const DashboardData &d, char *buf, size_t len)
     {
         int written = 0;

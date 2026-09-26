@@ -165,10 +165,6 @@ void handleUIAction(const char *action)
       netLog("[USER] %s ignored: state busy\n", action);
     }
   }
-  else if (strcmp(action, "configSaved") == 0)
-  {
-    netLog("[CONFIG] Settings updated and saved to NVS.\n");
-  }
 }
 
 // --- CORE 0: BMS BACKGROUND TASK ---

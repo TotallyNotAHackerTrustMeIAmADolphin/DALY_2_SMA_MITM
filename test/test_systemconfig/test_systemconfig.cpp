@@ -359,6 +359,90 @@ static void test_changed_mask_refused_set_leaves_mask_zero(void)
     TEST_ASSERT_EQUAL(0u, SystemConfig::changedMask(a, b));
 }
 
+// --- formatSettingValue(): the post-save change-log formatter ---
+
+static void test_format_setting_value_float_precision(void)
+{
+    SystemConfig cfg;
+    char buf[24];
+
+    formatSettingValue(cfg.maxChargeA, 250.0, buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_STRING("250", buf);
+
+    formatSettingValue(cfg.maxChargeA, 252.5, buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_STRING("252.5", buf);
+
+    formatSettingValue(cfg.maxChargeA, 252.0625, buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_STRING("252.0625", buf);
+
+    formatSettingValue(cfg.trickleA, (double)2.0004f, buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_STRING("2.0004", buf);
+
+    formatSettingValue(cfg.cvMaxCharge, (double)3.55f, buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_STRING("3.55", buf);
+
+    formatSettingValue(cfg.cvMaxCharge, (double)3.425f, buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_STRING("3.425", buf);
+
+    formatSettingValue(cfg.maxChargeA, 0.0, buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_STRING("0", buf);
+
+    formatSettingValue(cfg.maxChargeA, 1000.0, buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_STRING("1000", buf);
+
+    formatSettingValue(cfg.trickleA, (double)0.001f, buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_STRING("0.001", buf);
+}
+
+static void test_format_setting_value_integer_kind(void)
+{
+    SystemConfig cfg;
+    char buf[24];
+
+    formatSettingValue(cfg.bmsTimeout, 60.0, buf, sizeof(buf));
+    TEST_ASSERT_EQUAL_STRING("60", buf);
+}
+
+static void test_changed_mask_same_stored_float_is_not_a_change(void)
+{
+    // 3.55 and 3.55000005 both round to the same binary32 value, so this
+    // must not register as a change (a real change must differ once
+    // stored, not merely in the double the caller happened to pass).
+    SystemConfig a;
+    SystemConfig b;
+    TEST_ASSERT_TRUE(a.cvMaxCharge.set(3.55));
+    TEST_ASSERT_TRUE(b.cvMaxCharge.set(3.55000005));
+    TEST_ASSERT_EQUAL_FLOAT((float)a.cvMaxCharge, (float)b.cvMaxCharge);
+    TEST_ASSERT_TRUE((float)a.cvMaxCharge == (float)b.cvMaxCharge);
+    TEST_ASSERT_EQUAL(0u, SystemConfig::changedMask(a, b));
+}
+
+static void test_changed_mask_tiny_real_change_is_a_change(void)
+{
+    // 2.0 -> 2.0004 is a real, distinguishable binary32 change: it must set
+    // the bit, and formatSettingValue() must print the two differently
+    // (the bug this whole fix is for: the old 3-decimal formatter printed
+    // both as "2").
+    SystemConfig a;
+    SystemConfig b;
+    TEST_ASSERT_TRUE(a.trickleA.set(2.0));
+    TEST_ASSERT_TRUE(b.trickleA.set(2.0004));
+    TEST_ASSERT_TRUE((float)a.trickleA != (float)b.trickleA);
+
+    size_t idx = 3; // trickleA's position in all()
+    TEST_ASSERT_TRUE(a.all()[idx] == &a.trickleA);
+    uint32_t mask = SystemConfig::changedMask(a, b);
+    TEST_ASSERT_EQUAL((uint32_t)1 << idx, mask);
+
+    char oldBuf[24];
+    char newBuf[24];
+    formatSettingValue(a.trickleA, a.trickleA.value(), oldBuf, sizeof(oldBuf));
+    formatSettingValue(b.trickleA, b.trickleA.value(), newBuf, sizeof(newBuf));
+    TEST_ASSERT_TRUE(strcmp(oldBuf, newBuf) != 0);
+    TEST_ASSERT_EQUAL_STRING("2", oldBuf);
+    TEST_ASSERT_EQUAL_STRING("2.0004", newBuf);
+}
+
 int main(int, char **)
 {
     UNITY_BEGIN();
@@ -387,5 +471,9 @@ int main(int, char **)
     RUN_TEST(test_changed_mask_one_setting_sets_only_its_bit);
     RUN_TEST(test_changed_mask_two_settings_both_bits);
     RUN_TEST(test_changed_mask_refused_set_leaves_mask_zero);
+    RUN_TEST(test_format_setting_value_float_precision);
+    RUN_TEST(test_format_setting_value_integer_kind);
+    RUN_TEST(test_changed_mask_same_stored_float_is_not_a_change);
+    RUN_TEST(test_changed_mask_tiny_real_change_is_a_change);
     return UNITY_END();
 }

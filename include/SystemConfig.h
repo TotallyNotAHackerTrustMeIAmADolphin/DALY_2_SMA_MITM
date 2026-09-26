@@ -4,6 +4,7 @@
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 
 // The Daly BMS's own cell overvoltage protection on this pack (#8, confirmed
@@ -110,6 +111,25 @@ private:
     uint8_t decimals_;
     Kind kind_;
 };
+
+// Formats v (one of s's own value/min/max/def) at full precision for the
+// post-save "[CFG] <label>: <old> -> <new> <unit>" change log - deliberately
+// NOT the setting's display decimals (formatNumber() in WebDashboard.cpp
+// rounds to those, e.g. 0 for an amps field, so 250 -> 252.5 would print as
+// "253" and a tiny real change could print as unchanged). An integer kind
+// prints as a plain integer. A float kind prints with %.7g: 7 significant
+// digits round-trips a binary32 float exactly, and every reachable value
+// here is < 10000 so %g never switches to exponential form; %g itself
+// strips trailing zeros (and a trailing '.'), so 250 -> "250",
+// 252.0625 -> "252.0625", 3.5499999 (stored 3.55f) -> "3.55". Pure,
+// snprintf-based, always NUL-terminated; out must be at least ~24 bytes.
+inline void formatSettingValue(const SettingBase &s, double v, char *out, size_t outSize)
+{
+    if (s.kind() != SettingBase::KIND_FLOAT)
+        snprintf(out, outSize, "%ld", (long)v);
+    else
+        snprintf(out, outSize, "%.7g", v);
+}
 
 template <typename T>
 struct SettingKind;

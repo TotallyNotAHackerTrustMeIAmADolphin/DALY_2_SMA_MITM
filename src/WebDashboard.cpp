@@ -47,25 +47,6 @@ namespace
         return String((long)v);
     }
 
-    // Formats a value for the "[CFG] <label>: <old> -> <new> <unit>" change
-    // log - deliberately NOT formatNumber() above, which rounds to the
-    // setting's *display* decimals (0 for an amps field), so 250 -> 252.5
-    // would print as "253". An integer kind prints as a plain integer; a
-    // float kind prints up to 3 decimals with trailing zeros (and a
-    // trailing '.') trimmed, so 250 -> "250", 3.55 -> "3.55", 3.425 ->
-    // "3.425".
-    String formatChangeNumber(const SettingBase &s, double v)
-    {
-        if (s.kind() != SettingBase::KIND_FLOAT)
-            return String((long)v);
-        String out(v, 3);
-        while (out.endsWith("0"))
-            out.remove(out.length() - 1);
-        if (out.endsWith("."))
-            out.remove(out.length() - 1);
-        return out;
-    }
-
     // "Max Charge Vpc must be between 2.500 and 3.550 V."
     String rangeMessage(const SettingBase &s)
     {
@@ -393,14 +374,14 @@ void WebDashboard::saveConfig(AsyncWebServerRequest *request)
             if (!(changed & ((uint32_t)1 << i)))
                 continue;
             const SettingBase &s = *settings[i];
-            debugLog("[CFG] %s: %s -> %s %s\n", s.label(),
-                     formatChangeNumber(*beforeSettings[i], beforeSettings[i]->value()).c_str(),
-                     formatChangeNumber(s, s.value()).c_str(), s.unit());
+            char oldBuf[24];
+            char newBuf[24];
+            formatSettingValue(*beforeSettings[i], beforeSettings[i]->value(), oldBuf, sizeof(oldBuf));
+            formatSettingValue(s, s.value(), newBuf, sizeof(newBuf));
+            debugLog("[CFG] %s: %s -> %s %s\n", s.label(), oldBuf, newBuf, s.unit());
         }
     }
 
-    if (_actionCb)
-        _actionCb("configSaved");
     request->redirect("/");
 }
 

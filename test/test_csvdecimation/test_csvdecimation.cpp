@@ -132,6 +132,36 @@ static void test_final_line_without_newline_flushed_by_finish(void)
     TEST_ASSERT_EQUAL_MEMORY(expected.data(), out, expected.size());
 }
 
+// --- a tiny outCap exhausted mid-line (#112): flushCurrentLine()/
+// appendField() are bounds-checked against outCap, so the caller's buffer
+// is never overflowed - confirmed below. But nothing resumes a line whose
+// output was cut short: the line's own remaining bytes (any field past the
+// point outCap ran out, and its trailing '\n') are silently dropped rather
+// than deferred to the next feed() call, so the output is NOT guaranteed
+// to end on a complete line. Documented as a real gap, not fixed here per
+// the ticket - readGraphSeries()'s outBuf (2048 B) makes it unlikely in
+// practice, but nothing in this class enforces that margin. ---
+
+static void test_tiny_outcap_never_overflows_but_can_truncate_mid_line(void)
+{
+    const std::string input = "1,2,3\n4,5,6\n7,8,9\n";
+    const size_t fields[3] = {0, 1, 2};
+    Accumulator accum(fields, 3, /*skip=*/1);
+
+    char out[3]; // smaller than even the first decimated line ("1,2,3\n")
+    size_t outLen = 0;
+    accum.feed((const uint8_t *)input.data(), input.size(), out, sizeof(out), &outLen);
+    accum.finish(out, sizeof(out), &outLen);
+
+    // Never overflows the caller's buffer.
+    TEST_ASSERT_LESS_OR_EQUAL(sizeof(out), outLen);
+    // But the emitted bytes stop mid-line: "1,2" with no third field and no
+    // trailing '\n', and every line after it is silently lost (the
+    // accumulator has no way to retry a line once its output was cut).
+    TEST_ASSERT_EQUAL_UINT32(3, outLen);
+    TEST_ASSERT_EQUAL_MEMORY("1,2", out, 3);
+}
+
 // finish() on an accumulator that never saw any input must not write anything.
 
 static void test_finish_with_no_input_writes_nothing(void)
@@ -208,6 +238,7 @@ int main(int, char **)
     RUN_TEST(test_chunk_boundary_mid_line);
     RUN_TEST(test_oversized_line_safely_truncated);
     RUN_TEST(test_final_line_without_newline_flushed_by_finish);
+    RUN_TEST(test_tiny_outcap_never_overflows_but_can_truncate_mid_line);
     RUN_TEST(test_finish_with_no_input_writes_nothing);
     RUN_TEST(test_estimateskip_zero_sample_lines_is_skip_one);
     RUN_TEST(test_estimateskip_tiny_file_clamped_to_one_line);

@@ -92,23 +92,40 @@ static void test_finish_drops_leading_partial_line_only_when_truncated(void)
     }
 }
 
-// A retained tail that happens to end exactly on a newline must not be
-// wiped out entirely by finish() (same guard as the pre-refactor code:
-// only drop the leading newline if it isn't the very last byte).
-static void test_finish_keeps_content_when_only_newline_is_last_byte(void)
+// finish() drops a single leading bare newline (the retained tail's first
+// byte, with more content after it) the same way it drops a leading
+// partial line up to and including its newline.
+static void test_finish_drops_leading_bare_newline(void)
 {
-    // maxBytes chosen so the retained tail is exactly "\nZZZZZZZZZZ" ...
-    // construct content so that after trimming, the buffer is a single
-    // line with no newline except possibly at the very end.
+    // Retained 11-byte tail (last 11 bytes of content) is "\nYYYYYYYYYY":
+    // the leading '\n' is not the last byte, so finish() strips it.
     const std::string content = "XXXXXXXXXX\nYYYYYYYYYY"; // 21 bytes, no trailing newline
-    Trimmer trimmer(11);                                  // retains only "YYYYYYYYYY" + nothing else - no newline in the tail at all
+    Trimmer trimmer(11);
     feedInChunks(trimmer, content, 5);
 
     TEST_ASSERT_TRUE(trimmer.truncated());
     trimmer.finish();
 
-    // No '\n' present in the retained buffer at all, so finish() must leave it as-is.
     const std::string expected = "YYYYYYYYYY";
+    TEST_ASSERT_EQUAL_UINT32(expected.size(), trimmer.length());
+    TEST_ASSERT_EQUAL_MEMORY(expected.data(), trimmer.data(), expected.size());
+}
+
+// The actual last-byte guard (#112): when the retained tail's only '\n' IS
+// its very last byte, finish() must leave it alone rather than erasing the
+// whole buffer (erasing up to and including index 0 there would empty a
+// non-empty, truncated tail).
+static void test_finish_keeps_tail_when_newline_is_last_byte(void)
+{
+    // Retained 5-byte tail (last 5 bytes of content) is "ZZZZ\n".
+    const std::string content = "XXXXXXXXXXZZZZ\n"; // 15 bytes, longer than maxBytes below
+    Trimmer trimmer(5);
+    feedInChunks(trimmer, content, 4);
+
+    TEST_ASSERT_TRUE(trimmer.truncated());
+    trimmer.finish();
+
+    const std::string expected = "ZZZZ\n";
     TEST_ASSERT_EQUAL_UINT32(expected.size(), trimmer.length());
     TEST_ASSERT_EQUAL_MEMORY(expected.data(), trimmer.data(), expected.size());
 }
@@ -160,7 +177,8 @@ int main(int, char **)
     RUN_TEST(test_content_shorter_than_maxbytes_untouched);
     RUN_TEST(test_content_exceeding_maxbytes_trims_to_last_n_bytes);
     RUN_TEST(test_finish_drops_leading_partial_line_only_when_truncated);
-    RUN_TEST(test_finish_keeps_content_when_only_newline_is_last_byte);
+    RUN_TEST(test_finish_drops_leading_bare_newline);
+    RUN_TEST(test_finish_keeps_tail_when_newline_is_last_byte);
     RUN_TEST(test_matching_chunk_size_never_reallocates);
     return UNITY_END();
 }

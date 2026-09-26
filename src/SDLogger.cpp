@@ -111,28 +111,39 @@ namespace
         bool held_;
     };
 
+    // What openBounded() found, distinguishing "couldn't open it at all"
+    // from "opened, but over the size cap" (#98) so readTail()/
+    // readGraphSeries() can report the right SDLogger::ReadResult instead
+    // of one generic failure.
+    enum class OpenBoundedResult
+    {
+        Opened,
+        NotFound,
+        TooLarge,
+    };
+
     // Opens path for reading and checks its size against maxBytes in one
     // open (#96), replacing the pre-refactor pattern of a throwaway
     // size-check open+close followed by a second, real open. On success
     // outFile is left open and positioned at byte 0, ready to read; on
     // failure (can't open, or over maxBytes) outFile is closed (if it was
-    // opened) and false is returned - the caller doesn't need to check or
-    // close outFile itself in that case.
-    bool openBounded(const String &path, uint32_t maxBytes, File &outFile, uint32_t &outSize)
+    // opened) - the caller doesn't need to check or close outFile itself
+    // in that case.
+    OpenBoundedResult openBounded(const String &path, uint32_t maxBytes, File &outFile, uint32_t &outSize)
     {
         outFile = SD.open(path, FILE_READ);
         if (!outFile)
-            return false;
+            return OpenBoundedResult::NotFound;
 
         uint32_t size = outFile.size();
         if (size > maxBytes)
         {
             outFile.close();
-            return false;
+            return OpenBoundedResult::TooLarge;
         }
 
         outSize = size;
-        return true;
+        return OpenBoundedResult::Opened;
     }
 
     // Reads file in kSdReadChunkBytes chunks, calling onChunk(data, len) for
@@ -217,9 +228,9 @@ bool SDLogger::begin()
     return true;
 }
 
-SemaphoreHandle_t SDLogger::sdMutex()
+String SDLogger::pathFor(const String &bareName)
 {
-    return sdMutex_;
+    return "/" + bareName;
 }
 
 void SDLogger::logTelemetry(const DashboardData &data)
@@ -389,18 +400,18 @@ bool SDLogger::listLogFiles(std::vector<LogFileInfo> &outFiles)
     return true;
 }
 
-bool SDLogger::readTail(const String &fileName, String &outContent, size_t maxBytes)
+SDLogger::ReadResult SDLogger::readTail(const String &fileName, String &outContent, size_t maxBytes)
 {
     outContent = "";
 
     if (!initialized)
-        return false;
+        return ReadResult::Busy;
 
     // RAII: released exactly once, on every return path below, whether the
     // file opens or not (#96).
     SdLock lock(sdMutex_, SdTuning::kTailLockTimeoutMs);
     if (!lock.held())
-        return false;
+        return ReadResult::Busy;
 
     // openBounded() rejects (and closes) anything over kMaxTailSourceBytes
     // before any read happens - readTail can't seek to near the end (see
@@ -410,8 +421,15 @@ bool SDLogger::readTail(const String &fileName, String &outContent, size_t maxBy
     // holding the mutex for) however large the file has grown.
     File file;
     uint32_t sourceSize = 0;
-    if (!openBounded("/" + fileName, kMaxTailSourceBytes, file, sourceSize))
-        return false;
+    switch (openBounded(pathFor(fileName), kMaxTailSourceBytes, file, sourceSize))
+    {
+    case OpenBoundedResult::NotFound:
+        return ReadResult::NotFound;
+    case OpenBoundedResult::TooLarge:
+        return ReadResult::TooLarge;
+    case OpenBoundedResult::Opened:
+        break;
+    }
 
     // Read sequentially from the start rather than file.seek()-ing near the
     // end - live-tested against a file that's been reopened for
@@ -420,7 +438,8 @@ bool SDLogger::readTail(const String &fileName, String &outContent, size_t maxBy
     // return 0 bytes immediately (empty tail, silently "successful").
     // Sequential reads from 0 are the one access pattern proven reliable
     // everywhere else in this file (readGraphSeries() below, and the
-    // /api/logs/download route), so use that here too. The rolling
+    // /api/logs/download route, now via beginDownload()), so use that here
+    // too. The rolling
     // trim-to-last-maxBytes and leading-partial-line-drop logic itself now
     // lives in TailTrim::Trimmer (#43), pure and natively tested - this is
     // just the SD I/O, via streamChunks() (#96).
@@ -430,15 +449,15 @@ bool SDLogger::readTail(const String &fileName, String &outContent, size_t maxBy
     trimmer.finish();
     outContent = String(trimmer.data(), (unsigned int)trimmer.length());
     file.close();
-    return true;
+    return ReadResult::Ok;
 }
 
-bool SDLogger::readGraphSeries(const String &fileName, size_t targetPoints, String &outCSV)
+SDLogger::ReadResult SDLogger::readGraphSeries(const String &fileName, size_t targetPoints, String &outCSV)
 {
     outCSV = "Timestamp,PackV,PackI,SOC,MinCellV,MaxCellV,ReqI\n";
 
     if (!initialized)
-        return false;
+        return ReadResult::Busy;
 
     // Column positions in a full telemetry row, looked up by name once
     // (#32) instead of hardcoding 0-6 - these happen to still be 0-6 today
@@ -462,9 +481,9 @@ bool SDLogger::readGraphSeries(const String &fileName, size_t targetPoints, Stri
     // RAII: released exactly once, on every return path below (#96).
     SdLock lock(sdMutex_, SdTuning::kGraphLockTimeoutMs);
     if (!lock.held())
-        return false;
+        return ReadResult::Busy;
 
-    String path = "/" + fileName;
+    String path = pathFor(fileName);
 
     // Cheap check (just a directory-entry size, no read) before committing
     // to a two-pass scan of the whole file - bounds the mutex hold time
@@ -474,10 +493,13 @@ bool SDLogger::readGraphSeries(const String &fileName, size_t targetPoints, Stri
     // their own fresh handle).
     File sizeCheck;
     uint32_t sourceSize = 0;
-    if (!openBounded(path, kMaxGraphSourceBytes, sizeCheck, sourceSize))
     {
-        outCSV = "";
-        return false;
+        OpenBoundedResult r = openBounded(path, kMaxGraphSourceBytes, sizeCheck, sourceSize);
+        if (r != OpenBoundedResult::Opened)
+        {
+            outCSV = "";
+            return (r == OpenBoundedResult::TooLarge) ? ReadResult::TooLarge : ReadResult::NotFound;
+        }
     }
     sizeCheck.close();
 
@@ -498,8 +520,11 @@ bool SDLogger::readGraphSeries(const String &fileName, size_t targetPoints, Stri
         File f = SD.open(path, FILE_READ);
         if (!f)
         {
+            // Race: the size-check above just opened this file - a failure
+            // here means it was removed in between, not that it was ever
+            // too large (that's already been ruled out).
             outCSV = "";
-            return false;
+            return ReadResult::NotFound;
         }
         String header = f.readStringUntil('\n');
         uint32_t headerBytes = (uint32_t)header.length() + 1; // + the '\n' it consumed
@@ -537,8 +562,9 @@ bool SDLogger::readGraphSeries(const String &fileName, size_t targetPoints, Stri
     File f = SD.open(path, FILE_READ);
     if (!f)
     {
+        // Same race as the sample pass' open above.
         outCSV = "";
-        return false;
+        return ReadResult::NotFound;
     }
 
     outCSV.reserve(outCSV.length() + (targetPoints + 1) * 60);
@@ -561,5 +587,19 @@ bool SDLogger::readGraphSeries(const String &fileName, size_t targetPoints, Stri
         outCSV.concat(outBuf, (unsigned int)finalLen);
     f.close();
 
-    return true;
+    return ReadResult::Ok;
+}
+
+SDLogger::DownloadLease SDLogger::beginDownload(const String &fileName, String &outPath)
+{
+    outPath = "";
+
+    if (!initialized || sdMutex_ == NULL)
+        return DownloadLease();
+
+    if (xSemaphoreTake(sdMutex_, pdMS_TO_TICKS(SdTuning::kDownloadLockTimeoutMs)) != pdTRUE)
+        return DownloadLease();
+
+    outPath = pathFor(fileName);
+    return DownloadLease(sdMutex_);
 }

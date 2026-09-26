@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include "esp_core_dump.h"
 #include "esp_partition.h"
 #include "esp_spi_flash.h"
@@ -425,6 +426,33 @@ const char *WebDashboard::contentTypeForLogFile(const String &name)
     return name.endsWith(".csv") ? "text/csv" : "text/plain";
 }
 
+namespace
+{
+    // Maps a non-Ok SDLogger::ReadResult to the response /api/logs/content
+    // and /api/logs/graph send for it (#98): Busy/NotFound reuse the exact
+    // same bodies findLogFile() already sends for the same conditions;
+    // tooLargeBody is supplied by the caller since the two routes' caps
+    // (and so their existing "too large" wording) differ. Never called
+    // with ReadResult::Ok.
+    void sendReadFailure(AsyncWebServerRequest *request, SDLogger::ReadResult r, const char *tooLargeBody)
+    {
+        switch (r)
+        {
+        case SDLogger::ReadResult::Busy:
+            request->send(503, "text/plain", "SD card busy, try again");
+            return;
+        case SDLogger::ReadResult::NotFound:
+            request->send(404, "text/plain", "Unknown log file");
+            return;
+        case SDLogger::ReadResult::TooLarge:
+            request->send(413, "text/plain", tooLargeBody);
+            return;
+        case SDLogger::ReadResult::Ok:
+            return; // never reached - callers only invoke this for non-Ok results
+        }
+    }
+}
+
 void WebDashboard::setupRoutes()
 {
     _server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
@@ -493,8 +521,9 @@ void WebDashboard::setupRoutes()
         // tail is ever needed.
         const size_t maxBytes = 8192;
         String content;
-        if (!SDLogger::readTail(name, content, maxBytes)) {
-            request->send(500, "text/plain", "Failed to read file");
+        SDLogger::ReadResult r = SDLogger::readTail(name, content, maxBytes);
+        if (r != SDLogger::ReadResult::Ok) {
+            sendReadFailure(request, r, "File too large to view (over 512KB) - try Download instead");
             return;
         }
 
@@ -509,8 +538,13 @@ void WebDashboard::setupRoutes()
         String name; uint32_t size;
         if (!findLogFile(request, name, size)) return;
 
-        SemaphoreHandle_t mtx = SDLogger::sdMutex();
-        if (!mtx || xSemaphoreTake(mtx, pdMS_TO_TICKS(SdTuning::kDownloadLockTimeoutMs)) != pdTRUE) {
+        // beginDownload() takes sdMutex_ for the whole transfer AND resolves
+        // name (bare, from findLogFile()'s listing) to its SD path in one
+        // call (#98) - both now live inside SDLogger instead of split
+        // across this route and SDLogger's own internals.
+        String sdPath;
+        auto lease = std::make_shared<SDLogger::DownloadLease>(SDLogger::beginDownload(name, sdPath));
+        if (!lease->held()) {
             request->send(503, "text/plain", "SD card busy, try again");
             return;
         }
@@ -522,12 +556,17 @@ void WebDashboard::setupRoutes()
         // writer drops samples it can't log during that window - see PR
         // description). Explicitly (re-)set the library's ack timeout so a
         // client that stops ACKing (e.g. walks out of WiFi range) gets
-        // force-disconnected - and this mutex released - within 5s rather
-        // than relying silently on the library's own default.
+        // force-disconnected - and this lease released - within 5s rather
+        // than relying silently on the library's own default. The lease is
+        // wrapped in a shared_ptr because AsyncWebServer's onDisconnect is a
+        // std::function (must be copyable) and DownloadLease itself is
+        // move-only; release() inside the callback drops the lock exactly
+        // when onDisconnect fires, rather than whenever the shared_ptr's
+        // last reference happens to be destroyed.
         request->client()->setAckTimeout(5000);
-        request->onDisconnect([mtx]() { xSemaphoreGive(mtx); });
+        request->onDisconnect([lease]() { lease->release(); });
 
-        request->send(SD, "/" + name, contentTypeForLogFile(name), true /* download */); });
+        request->send(SD, sdPath, contentTypeForLogFile(name), true /* download */); });
 
     // JSON headline of the last stored core dump (issue #11) - task/PC/cause/
     // backtrace, for a UI or API consumer that doesn't want to pull and
@@ -716,8 +755,9 @@ void WebDashboard::setupRoutes()
         // small enough to reliably fit, and is still plenty of resolution
         // for a trend chart at typical browser widths.
         String csv;
-        if (!SDLogger::readGraphSeries(name, 300, csv)) {
-            request->send(500, "text/plain", "Failed to read file (it may be too large to graph - try Download instead)");
+        SDLogger::ReadResult r = SDLogger::readGraphSeries(name, 300, csv);
+        if (r != SDLogger::ReadResult::Ok) {
+            sendReadFailure(request, r, "Failed to read file (it may be too large to graph - try Download instead)");
             return;
         }
 

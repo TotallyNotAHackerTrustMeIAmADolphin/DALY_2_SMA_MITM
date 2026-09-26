@@ -3,6 +3,7 @@
 
 #include <unity.h>
 #include "Glideslope.h"
+#include "GlideslopeFixture.h"
 
 using Glideslope::calculateCCL;
 using Glideslope::calculateDCL;
@@ -13,21 +14,7 @@ static SystemConfig cfg;
 
 void setUp(void)
 {
-    cfg = SystemConfig{};
-    cfg.maxChargeA.setUnchecked(100.0f);
-    cfg.trickleA.setUnchecked(5.0f);
-    cfg.cvStartTaper.setUnchecked(3.3f);
-    cfg.cvHighAlarmGate.setUnchecked(3.4f);
-    cfg.cvMaxCharge.setUnchecked(3.5f);
-    cfg.maintAmps.setUnchecked(20.0f);
-
-    cfg.maxDischargeA.setUnchecked(200.0f);
-    cfg.limpDischargeA.setUnchecked(15.0f);
-    cfg.cvStartDTaper.setUnchecked(3.2f);
-    cfg.cvLowAlarmGate.setUnchecked(3.1f);
-    cfg.cvMinDischarge.setUnchecked(3.0f);
-
-    cfg.bmsTimeout.setUnchecked(60);
+    cfg = glideslopeTestConfig();
 }
 
 void tearDown(void) {}

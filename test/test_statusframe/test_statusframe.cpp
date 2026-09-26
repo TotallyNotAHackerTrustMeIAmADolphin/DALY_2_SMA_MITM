@@ -7,6 +7,7 @@
 
 #include <unity.h>
 #include "StatusFrame.h"
+#include "GlideslopeFixture.h"
 
 using StatusFrame::ControlState;
 using StatusFrame::Decision;
@@ -17,33 +18,11 @@ static SystemConfig cfg;
 
 void setUp(void)
 {
-    cfg = SystemConfig{};
-    // Same charge/discharge shape as test_glideslope's setUp(), so the CCL/
-    // DCL numbers below can be cross-checked against that file.
-    cfg.maxChargeA.setUnchecked(100.0f);
-    cfg.trickleA.setUnchecked(5.0f);
-    cfg.cvStartTaper.setUnchecked(3.3f);
-    cfg.cvHighAlarmGate.setUnchecked(3.4f);
-    cfg.cvMaxCharge.setUnchecked(3.5f);
-    cfg.maintAmps.setUnchecked(20.0f);
-
-    cfg.maxDischargeA.setUnchecked(200.0f);
-    cfg.limpDischargeA.setUnchecked(15.0f);
-    cfg.cvStartDTaper.setUnchecked(3.2f);
-    cfg.cvLowAlarmGate.setUnchecked(3.1f);
-    cfg.cvMinDischarge.setUnchecked(3.0f);
-
-    cfg.bmsTimeout.setUnchecked(60);
-
-    // Deliberately far from cvStartTaper/cvHighAlarmGate/cvMaxCharge so the
-    // maintenance-hysteresis tests don't interact with the taper thresholds.
-    // Per-cell thresholds (#12: compared directly against minCellSmoothedV,
-    // no cell count involved): start 3.0V, stop 3.2V.
-    cfg.cvMaintStart.setUnchecked(3.0f);
-    cfg.cvMaintStop.setUnchecked(3.2f);
-
-    // spreadStartMv=60, spreadMaxMv=150 - left at the SystemConfig defaults,
-    // same as test_glideslope.
+    // Same charge/discharge/maintenance shape as test_glideslope's setUp(),
+    // so the CCL/DCL numbers below can be cross-checked against that file
+    // (#73). Maintenance thresholds: start 3.05V, stop 3.2V - see
+    // GlideslopeFixture.h for why start isn't 3.0V (cvMinDischarge).
+    cfg = glideslopeTestConfig();
 }
 
 void tearDown(void) {}
@@ -242,7 +221,7 @@ static void test_reset_hold_arms_on_first_sent_frame_and_finishes_after_5500ms(v
 static void test_auto_maint_starts_below_start_stops_above_stop_no_toggle_between(void)
 {
     // Thresholds (#12: compared directly against the smoothed minimum
-    // cell voltage): start cvMaintStart=3.0V, stop cvMaintStop=3.2V.
+    // cell voltage): start cvMaintStart=3.05V, stop cvMaintStop=3.2V.
     ControlState ctrl;
 
     // 3.3V: above both -> off.
@@ -250,13 +229,13 @@ static void test_auto_maint_starts_below_start_stops_above_stop_no_toggle_betwee
     TEST_ASSERT_FALSE(d1.maintenanceActive);
 
     // 3.1V: between start and stop, autoMaint currently off -> stays off
-    // (3.1 is not < 3.0).
+    // (3.1 is not < 3.05).
     Snapshot s2 = freshSnapshot(1250);
     s2.minCellSmoothedV = 3.1f;
     Decision d2 = decide(cfg, s2, ctrl);
     TEST_ASSERT_FALSE(d2.maintenanceActive);
 
-    // 2.9V: below start(3.0) -> turns on.
+    // 2.9V: below start(3.05) -> turns on.
     Snapshot s3 = freshSnapshot(1500);
     s3.minCellSmoothedV = 2.9f;
     Decision d3 = decide(cfg, s3, ctrl);
@@ -282,10 +261,10 @@ static void test_auto_maint_starts_on_weak_cell_even_when_pack_average_is_high(v
 {
     // The exact scenario from #12: Cell 16 sags under discharge and hits
     // the discharge floor while the pack average is still well above the
-    // old pack-voltage trigger (cvMaintStart(3.0) * kCellCount(16) =
-    // 48.0V). packVoltage=49.6V > 48.0V, so the retired pack-average
+    // old pack-voltage trigger (cvMaintStart(3.05) * kCellCount(16) =
+    // 48.8V). packVoltage=49.6V > 48.8V, so the retired pack-average
     // comparison would never have started maintenance here; the minimum
-    // cell (2.99V) is what's actually below cvMaintStart(3.0V).
+    // cell (2.99V) is what's actually below cvMaintStart(3.05V).
     ControlState ctrl;
     Snapshot s = freshSnapshot(1000);
     s.packVoltage = 49.6f;
@@ -301,13 +280,13 @@ static void test_auto_maint_hysteresis_min_cell_rising_stays_on_until_above_stop
     // maintenance off; only crossing above cvMaintStop(3.2V) does.
     ControlState ctrl;
 
-    // 2.95V: below start(3.0) -> turns on.
+    // 2.95V: below start(3.05) -> turns on.
     Snapshot s1 = freshSnapshot(1000);
     s1.minCellSmoothedV = 2.95f;
     Decision d1 = decide(cfg, s1, ctrl);
     TEST_ASSERT_TRUE(d1.maintenanceActive);
 
-    // 3.1V: between start(3.0) and stop(3.2), autoMaint on -> stays on
+    // 3.1V: between start(3.05) and stop(3.2), autoMaint on -> stays on
     // (3.1 is not > 3.2).
     Snapshot s2 = freshSnapshot(1250);
     s2.minCellSmoothedV = 3.1f;

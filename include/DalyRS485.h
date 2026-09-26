@@ -21,9 +21,7 @@ public:
 
     bool readBasicInfo(DalyBasicInfo &info);
     // cellMv must have at least expectedCells entries; filled in millivolts
-    // (#70 - the Daly's own unit) on success. Left untouched on a missed-
-    // frame failure (stale data wins either way, in bmsTask), zeroed on a
-    // plausibility-gate rejection.
+    // on success, zeroed on a plausibility-gate rejection.
     bool readCellVoltages(uint8_t expectedCells, uint16_t *cellMv);
     bool readMosfetStatus(DalyMosfetStatus &status);
     bool readAlarmStatus(DalyAlarmStatus &status);

@@ -9,10 +9,8 @@
 // Glideslope.h. bmsTask: read the BMS -> update() -> take dataMutex -> store
 // the Result fields into currentData -> give -> log if reseeded.
 //
-// The window itself is kept in integer millivolts, the Daly's own native
-// unit, so a reading is never rounded going in and rounded again coming out
-// (#70): only the window average (which needs a real division) rounds, and
-// Result's volts fields are the one, final float conversion.
+// The window holds integer mV (the Daly's unit); only the average rounds,
+// and Result converts to volts once.
 class CellSmoother
 {
 public:
@@ -83,8 +81,7 @@ public:
             for (int j = 0; j < windowSize; j++)
                 cellSumMv += buf_[i][j];
 
-            // Round to nearest, not floor: a truncating division here is
-            // what used to cost the smoothed max up to ~2mV (#70).
+            // Rounded, not floored (#70).
             uint16_t smoothedMv = (uint16_t)((cellSumMv + (uint32_t)windowSize / 2) / (uint32_t)windowSize);
             r.smoothedV[i] = smoothedMv / 1000.0f;
 
@@ -111,8 +108,7 @@ public:
         r.rawMaxV = rawMaxMv / 1000.0f;
 
         // Raw spread, from the same unsmoothed read as rawMin/rawMax above -
-        // drives Glideslope::spreadFactor() in canTask. Exact integer mV
-        // subtraction now that both ends are already mV.
+        // drives Glideslope::spreadFactor().
         r.rawSpreadMv = rawMaxMv - rawMinMv;
 
         // Increment circular buffer index after processing all cells, once

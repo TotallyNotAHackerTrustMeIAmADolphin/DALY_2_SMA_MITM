@@ -332,10 +332,7 @@ void Diagnostics::registerRoutes(AsyncWebServer &server)
         // mapping/serving more than the partition actually holds must never
         // happen. Clamp once, here, and use this same value for the mmap
         // call, the filler's bound and Content-Length below, so those three
-        // can't disagree with each other (#21) - unlike the old per-chunk
-        // esp_flash_read() filler, whose only error path (a failed chunk
-        // read) returned 0 mid-stream and left the response short against
-        // an already-sent, un-clamped Content-Length.
+        // can't disagree with each other (#21).
         size_t mapSize = size < part->size ? size : part->size;
 
         const void *mapPtr = nullptr;

@@ -6,7 +6,7 @@
 
 // The plain data structs and pure byte-level parsers live in DalyFrames.h,
 // so both compile and run under `pio test -e native`. These using-
-// declarations keep the unqualified names working for existing callers.
+// declarations keep the unqualified names below working.
 using DalyFrames::DalyAlarmStatus;
 using DalyFrames::DalyBasicInfo;
 using DalyFrames::DalyMosfetStatus;
@@ -24,16 +24,6 @@ public:
     bool readCellVoltages(uint8_t expectedCells, std::vector<float> &cellVoltages);
     bool readMosfetStatus(DalyMosfetStatus &status);
     bool readAlarmStatus(DalyAlarmStatus &status);
-
-    // Reference to the table owned by DalyFrames::kAlarmBitNames(), kept as
-    // a static member here so callers keep using
-    // `DalyRS485::kAlarmBitNames[b][bit]`.
-    static const char *const (&kAlarmBitNames)[7][8];
-
-    // See DalyFrames::kCellMinPlausibleMv/kCellMaxPlausibleMv for the
-    // rationale; readCellVoltages() rejects the whole read when it fails.
-    static constexpr uint16_t kCellMinPlausibleMv = DalyFrames::kCellMinPlausibleMv;
-    static constexpr uint16_t kCellMaxPlausibleMv = DalyFrames::kCellMaxPlausibleMv;
 
 private:
     HardwareSerial *_serial;

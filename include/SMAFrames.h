@@ -162,10 +162,8 @@ namespace SMAFrames
         bool gridPresent = false;
     };
 
-    // Decodes one received CAN frame; returns true iff id/dlc matched a
-    // known frame (out is reset to defaults either way). 0x305 byte0: SMA
-    // charge-mode byte -> 1=Bulk, 2=Absorption, 3=Float, 4=Equalize, else
-    // "Unknown". 0x300 byte0 bit0: grid-present flag.
+    // 0x305 byte0: SMA charge-mode byte -> 1=Bulk, 2=Absorption, 3=Float,
+    // 4=Equalize, else "Unknown".
     inline const char *chargeModeName(uint8_t mode)
     {
         switch (mode)
@@ -183,6 +181,9 @@ namespace SMAFrames
         }
     }
 
+    // Decodes one received CAN frame; returns true iff id/dlc matched a
+    // known frame (out is reset to defaults either way). 0x300 byte0 bit0:
+    // grid-present flag.
     inline bool decodeFrame(uint32_t id, const uint8_t *data, uint8_t dlc, RxUpdate &out)
     {
         out = RxUpdate{};

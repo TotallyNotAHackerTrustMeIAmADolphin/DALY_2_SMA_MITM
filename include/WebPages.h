@@ -32,10 +32,10 @@
 #define FILE_TOOLBAR(reloadFn) "<div class=\"toolbar\"><select id=\"fileSelect\"></select><button class=\"btn\" onclick=\"" reloadFn "()\">Reload</button><a id=\"downloadLink\" class=\"btn\" style=\"text-decoration:none;\" href=\"#\" download>Download</a></div>"
 
 // Single source of truth for the "fetch a file list, filter it, optionally
-// populate a <select>, auto-select the newest" JS pasted (and drifted -
-// see #46) across index_html's loadRecentLog(), logs_html's loadList() and
-// graphs_html's loadList(); also holds fetchOk(), the fetch-then-throw-on-
-// non-2xx wrapper every page's fetch call used to repeat inline.
+// populate a <select>, auto-select the newest" JS shared by index_html's
+// loadRecentLog(), logs_html's loadList() and graphs_html's loadList();
+// also holds fetchOk(), the fetch-then-throw-on-non-2xx wrapper shared by
+// every page's fetch call (#46).
 // (a #define's raw-string value can't span real newlines with this
 // toolchain's preprocessor - unlike a raw string literal used directly in
 // one of the page bodies below - so this one is kept to a single physical

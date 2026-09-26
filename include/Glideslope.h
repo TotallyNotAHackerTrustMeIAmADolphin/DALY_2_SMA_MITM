@@ -28,10 +28,11 @@ namespace Glideslope
 
     // Converts a current in A to the 0.1A units sent in 0x351, clamped to
     // what a uint16_t can hold. A float -> uint16_t cast of a negative (or
-    // too large) value is undefined and in practice wraps: a negative
-    // trickleA/limpDischargeA/maintAmps (e.g. a /config typo) used to go
-    // out as ~6550A instead of 0A (#52). Every current-limit return below
-    // goes through here, so no branch can reintroduce the wraparound.
+    // too large) value is undefined and in practice wraps, so a negative
+    // trickleA/limpDischargeA/maintAmps (e.g. a /config typo) would go out
+    // as ~6550A instead of 0A without this (#52). Every current-limit
+    // return below goes through here, so no branch can reintroduce the
+    // wraparound.
     inline uint16_t toDeciAmps(float amps)
     {
         float deci = roundf(amps * 10.0f);

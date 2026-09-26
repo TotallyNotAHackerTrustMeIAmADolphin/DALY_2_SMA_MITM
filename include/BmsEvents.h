@@ -15,12 +15,7 @@
 // own `bms.readX()` succeeding, with a vTaskDelay and a separate
 // dataMutex-protected currentData write in between) - so decide() takes
 // each reading as an optional pointer and bmsTask calls it once per
-// successful read, passing nullptr for the other two, right where that read
-// used to update its own function-local `static`s.
-//
-// This absorbs main.cpp's old inline SOC-jump check, MOSFET edge detection,
-// and alarm-bit diff loop - their logic now lives inside decide() below,
-// unchanged.
+// successful read, passing nullptr for the other two.
 
 #include <stdint.h>
 #include <cmath>
@@ -33,11 +28,9 @@ namespace BmsEvents
     using DalyFrames::DalyBasicInfo;
     using DalyFrames::DalyMosfetStatus;
 
-    // Persistent between calls; owned by bmsTask as a local (replaces the
-    // three function-local `static`s - lastSoc, the MOSFET previous state,
-    // lastAlarmBytes/lastFaultCode - that used to live inside bmsTask, plus
-    // their own baseline flags so the first read after boot doesn't log a
-    // spurious "changed" event).
+    // Persistent between calls; owned by bmsTask as a local, with baseline
+    // flags so the first read after boot doesn't log a spurious "changed"
+    // event.
     struct State
     {
         bool haveSoc = false;

@@ -15,10 +15,6 @@ namespace
 DalyRS485::DalyRS485(HardwareSerial &serial)
     : _serial(&serial), _debugCb(nullptr) {}
 
-// Defined out-of-class (required for a non-constexpr reference static data
-// member): binds to the single table owned by DalyFrames::kAlarmBitNames().
-const char *const (&DalyRS485::kAlarmBitNames)[7][8] = DalyFrames::kAlarmBitNames();
-
 void DalyRS485::begin(int rxPin, int txPin, int sePin, int enPin, int pwr5vPin)
 {
     if (pwr5vPin >= 0)

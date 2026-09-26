@@ -11,7 +11,7 @@ This firmware controls high-power charging/discharging of a real battery pack. T
 ## Build & Run (PlatformIO)
 
 - **Build:** `pio run`
-- **Upload via USB:** `pio run -t upload` (platformio.ini defaults to OTA upload; override `--upload-port` for a USB serial port)
+- **Upload via USB:** `pio run -e lilygo-t-can485-usb -t upload` (esptool; add `--upload-port /dev/ttyUSB0` if autodetect picks the wrong port). Needed for the first flash and for a rollback-capable bootloader (see OTA rollback). The default env is OTA-only (#108).
 - **Upload via OTA:** `pio run -t upload` (`upload_port` is derived automatically from `include/secrets.h`'s `local_IP` by `scripts/extract_upload_ip.py`, a PlatformIO `pre:` build script — pass `--upload-port <DEVICE_IP>` only to override it, e.g. targeting a different device); OTA port is 3232 (after an OTA, wait for `[SYS] Firmware confirmed` before flashing again — see OTA rollback under Diagnostics)
 - **Serial monitor:** `pio run -t monitor` (115200 baud)
 - **Clean:** `pio run -t clean`

@@ -58,8 +58,8 @@ For security, Wi-Fi credentials and your network layout are intentionally exclud
 3. Open `secrets.h` and enter your Wi-Fi SSID/Password, and (optional but recommended) adjust the static IP block (`local_IP`, `gateway`, `subnet`, DNS) to match your network.
 
 ### 2. Flash the Board
-Plug the LilyGO T-CAN485 into your computer via USB. Open PlatformIO and hit **Upload**.
-*(Note: Subsequent updates can be flashed Over-The-Air (OTA) without plugging in the device — `upload_port` is derived automatically from the `local_IP` you set in `secrets.h`.)*
+Plug the LilyGO T-CAN485 into your computer via USB and flash the USB environment: `pio run -e lilygo-t-can485-usb -t upload` (in the PlatformIO sidebar: *lilygo-t-can485-usb → Upload*). The default environment uploads over the network, so the plain **Upload** button won't work for the first flash.
+*(Note: Subsequent updates can be flashed Over-The-Air (OTA) with the default environment, `pio run -t upload`, without plugging in the device — `upload_port` is derived automatically from the `local_IP` you set in `secrets.h`.)*
 
 ---
 

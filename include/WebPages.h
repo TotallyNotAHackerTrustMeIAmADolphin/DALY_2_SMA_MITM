@@ -16,22 +16,40 @@
 #define NAV_CSS ".nav { background: #1e1e1e; padding: 10px; border-bottom: 2px solid #333; margin-bottom: 10px; text-align: center; } .nav a { color: #4caf50; text-decoration: none; margin: 0 15px; font-weight: bold; }"
 #define NAV_BAR "<div class=\"nav\"><a href=\"/\">DASHBOARD</a> | <a href=\"/config\">CONFIGURATION</a> | <a href=\"/logs\">LOGS</a> | <a href=\"/graphs\">GRAPHS</a></div>"
 
+// The "<!DOCTYPE><head><title><meta viewport>" prefix every page starts
+// with; a function-like macro so each page's <title> is still its own.
+#define HTML_HEAD(title) "<!DOCTYPE HTML><html><head><title>" title "</title><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+
+// config_html/logs_html/graphs_html's body rule, byte-for-byte identical
+// (index_html's differs - centered text, a lighter font color - so it keeps its own).
+#define BASE_CSS "body { font-family: sans-serif; background: #121212; color: #eee; margin: 0; padding: 0; }"
+
+// logs_html/graphs_html's file-list toolbar styling, identical between the two.
+#define FILE_PAGE_CSS ".container { max-width: 900px; margin: auto; background: #1e1e1e; padding: 25px; border-radius: 12px; border: 1px solid #333; } .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 15px 0; } select { font-size: 1em; padding: 6px; background: #000; color: #0f0; border: 1px solid #444; border-radius: 4px; flex: 1; min-width: 180px; } .btn { border: none; padding: 10px 16px; border-radius: 5px; cursor: pointer; font-weight: bold; color: white; background: #0277bd; } .note { color: #ff9800; font-size: 0.85em; margin: 5px 0; }"
+
+// logs_html/graphs_html's toolbar markup; the only difference between the two
+// pages is which function Reload calls, so that's the macro's argument.
+#define FILE_TOOLBAR(reloadFn) "<div class=\"toolbar\"><select id=\"fileSelect\"></select><button class=\"btn\" onclick=\"" reloadFn "()\">Reload</button><a id=\"downloadLink\" class=\"btn\" style=\"text-decoration:none;\" href=\"#\" download>Download</a></div>"
+
 // Single source of truth for the "fetch a file list, filter it, optionally
 // populate a <select>, auto-select the newest" JS pasted (and drifted -
 // see #46) across index_html's loadRecentLog(), logs_html's loadList() and
-// graphs_html's loadList(). Spliced into each page's <script> the same way
-// NAV_CSS/NAV_BAR are spliced above (adjacent string-literal concatenation,
-// compile-time, zero runtime cost).
+// graphs_html's loadList(); also holds fetchOk(), the fetch-then-throw-on-
+// non-2xx wrapper every page's fetch call used to repeat inline.
 // (a #define's raw-string value can't span real newlines with this
 // toolchain's preprocessor - unlike a raw string literal used directly in
 // one of the page bodies below - so this one is kept to a single physical
 // line, and JS comments are kept out of it, since a `//` comment would run
 // to the end of that line and swallow the rest of the macro. See the doc
 // comment above for what it does.)
-#define SHARED_LIST_JS R"jssrc( async function fetchAndPopulateSelect(url, filterFn, selectEl, statusEl, labelFn) { const res = await fetch(url); if (!res.ok) throw new Error('HTTP ' + res.status); let files = await res.json(); if (filterFn) files = files.filter(filterFn); if (statusEl) statusEl.innerText = ''; if (selectEl) { selectEl.innerHTML = ''; files.forEach(f => { const opt = document.createElement('option'); opt.value = f.name; opt.text = labelFn ? labelFn(f) : f.name; selectEl.appendChild(opt); }); if (files.length) selectEl.selectedIndex = files.length - 1; } return files; } )jssrc"
+#define SHARED_LIST_JS R"jssrc( async function fetchOk(url) { const res = await fetch(url); if (!res.ok) throw new Error('HTTP ' + res.status); return res; } async function fetchAndPopulateSelect(url, filterFn, selectEl, statusEl, labelFn) { let files = await (await fetchOk(url)).json(); if (filterFn) files = files.filter(filterFn); if (statusEl) statusEl.innerText = ''; if (selectEl) { selectEl.innerHTML = ''; files.forEach(f => { const opt = document.createElement('option'); opt.value = f.name; opt.text = labelFn ? labelFn(f) : f.name; selectEl.appendChild(opt); }); if (files.length) selectEl.selectedIndex = files.length - 1; } return files; } )jssrc"
 
-const char index_html[] PROGMEM = R"rawliteral(
-<!DOCTYPE HTML><html><head><title>BMS Bridge Pro</title><meta name="viewport" content="width=device-width, initial-scale=1">
+// logs_html/graphs_html only: armDownload() is their repeated "bail if
+// nothing's selected, else point #downloadLink at it" guard; initFilePage()
+// replaces their structurally-identical loadList(), differing only in options.
+#define FILE_PAGE_JS R"jssrc( function armDownload(sel) { if (!sel.value) return false; document.getElementById('downloadLink').href = '/api/logs/download?file=' + encodeURIComponent(sel.value); return true; } async function initFilePage(o) { const sel = document.getElementById('fileSelect'); const status = document.getElementById('status'); try { const files = await fetchAndPopulateSelect('/api/logs/list', o.filterFn, sel, status, o.labelFn); if (!files.length) { o.emptyEl().innerText = o.emptyMsg; return; } o.onLoaded(); } catch (e) { status.innerText = 'Failed to list log files: ' + e.message; } } )jssrc"
+
+const char index_html[] PROGMEM = HTML_HEAD("BMS Bridge Pro") R"rawliteral(
 <style>
   body { font-family: sans-serif; text-align: center; background: #121212; color: #e0e0e0; margin: 0; }
   )rawliteral" NAV_CSS R"rawliteral(
@@ -102,8 +120,7 @@ const char index_html[] PROGMEM = R"rawliteral(
       const files = await fetchAndPopulateSelect('/api/logs/list', f => f.name.endsWith('.log'), null, null);
       if (!files.length) { conReset('Log Active... (no SD log file yet)'); return; }
       const latest = files[files.length - 1].name; // listLogFiles sorts ascending -> last = newest
-      const res = await fetch('/api/logs/content?file=' + encodeURIComponent(latest));
-      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const res = await fetchOk('/api/logs/content?file=' + encodeURIComponent(latest));
       const lines = (await res.text()).split('\n').filter(l => l.length > 0);
       con.textContent = '';
       lines.forEach(conAppend);
@@ -171,11 +188,9 @@ const char index_html[] PROGMEM = R"rawliteral(
   }, false);
 </script></body></html>)rawliteral";
 
-const char config_html[] PROGMEM = R"rawliteral(
-<!DOCTYPE HTML><html><head><title>Settings</title><meta name="viewport" content="width=device-width, initial-scale=1">
+const char config_html[] PROGMEM = HTML_HEAD("Settings") R"rawliteral(
 <style>
-  body { font-family: sans-serif; background: #121212; color: #eee; margin: 0; padding: 0; }
-  )rawliteral" NAV_CSS R"rawliteral(
+  )rawliteral" BASE_CSS NAV_CSS R"rawliteral(
   .container { max-width: 650px; margin: auto; background: #1e1e1e; padding: 25px; border-radius: 12px; border: 1px solid #333; }
   .row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 1px solid #2a2a2a; padding-bottom: 8px; }
   .text-group { text-align: left; padding-right: 15px; }
@@ -239,57 +254,29 @@ const char config_html[] PROGMEM = R"rawliteral(
   </form>
 </div></body></html>)rawliteral";
 
-const char logs_html[] PROGMEM = R"rawliteral(
-<!DOCTYPE HTML><html><head><title>Logs</title><meta name="viewport" content="width=device-width, initial-scale=1">
+const char logs_html[] PROGMEM = HTML_HEAD("Logs") R"rawliteral(
 <style>
-  body { font-family: sans-serif; background: #121212; color: #eee; margin: 0; padding: 0; }
-  )rawliteral" NAV_CSS R"rawliteral(
-  .container { max-width: 900px; margin: auto; background: #1e1e1e; padding: 25px; border-radius: 12px; border: 1px solid #333; }
-  .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 15px 0; }
-  select { font-size: 1em; padding: 6px; background: #000; color: #0f0; border: 1px solid #444; border-radius: 4px; flex: 1; min-width: 180px; }
-  .btn { border: none; padding: 10px 16px; border-radius: 5px; cursor: pointer; font-weight: bold; color: white; background: #0277bd; }
-  .note { color: #ff9800; font-size: 0.85em; margin: 5px 0; }
+  )rawliteral" BASE_CSS NAV_CSS FILE_PAGE_CSS R"rawliteral(
   #content { background: #000; color: #0f0; font-family: monospace; font-size: 0.85em; white-space: pre-wrap; word-break: break-all; padding: 15px; border-radius: 8px; border: 1px solid #444; height: 500px; overflow-y: scroll; }
 </style></head><body>
 )rawliteral" NAV_BAR R"rawliteral(
 <div class="container">
   <h2 style="color:#4caf50;">SD Card Logs</h2>
-  <div class="toolbar">
-    <select id="fileSelect"></select>
-    <button class="btn" onclick="loadFile()">Reload</button>
-    <a id="downloadLink" class="btn" style="text-decoration:none;" href="#" download>Download</a>
-  </div>
+  )rawliteral" FILE_TOOLBAR("loadFile") R"rawliteral(
   <div id="status" class="note"></div>
   <div id="content">Loading file list...</div>
 </div>
 <script>
-)rawliteral" SHARED_LIST_JS R"rawliteral(
-  async function loadList() {
-    const sel = document.getElementById('fileSelect');
-    const status = document.getElementById('status');
-    try {
-      const files = await fetchAndPopulateSelect('/api/logs/list', null, sel, status, f => f.name + ' (' + Math.round(f.size / 1024) + ' KB)');
-      if (!files.length) {
-        document.getElementById('content').innerText = 'No log files found (SD card missing or empty).';
-        return;
-      }
-      loadFile();
-    } catch (e) {
-      status.innerText = 'Failed to list log files: ' + e.message;
-    }
-  }
-
+)rawliteral" SHARED_LIST_JS FILE_PAGE_JS R"rawliteral(
   async function loadFile() {
     const sel = document.getElementById('fileSelect');
     const content = document.getElementById('content');
     const status = document.getElementById('status');
-    if (!sel.value) return;
-    document.getElementById('downloadLink').href = '/api/logs/download?file=' + encodeURIComponent(sel.value);
+    if (!armDownload(sel)) return;
     status.innerText = '';
     content.innerText = 'Loading...';
     try {
-      const res = await fetch('/api/logs/content?file=' + encodeURIComponent(sel.value));
-      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const res = await fetchOk('/api/logs/content?file=' + encodeURIComponent(sel.value));
       const text = await res.text();
       content.innerText = text;
       content.scrollTop = content.scrollHeight;
@@ -301,31 +288,26 @@ const char logs_html[] PROGMEM = R"rawliteral(
     }
   }
 
-  loadList();
+  initFilePage({
+    filterFn: null,
+    labelFn: f => f.name + ' (' + Math.round(f.size / 1024) + ' KB)',
+    emptyEl: () => document.getElementById('content'),
+    emptyMsg: 'No log files found (SD card missing or empty).',
+    onLoaded: loadFile
+  });
 </script></body></html>)rawliteral";
 
-const char graphs_html[] PROGMEM = R"rawliteral(
-<!DOCTYPE HTML><html><head><title>Graphs</title><meta name="viewport" content="width=device-width, initial-scale=1">
+const char graphs_html[] PROGMEM = HTML_HEAD("Graphs") R"rawliteral(
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
-  body { font-family: sans-serif; background: #121212; color: #eee; margin: 0; padding: 0; }
-  )rawliteral" NAV_CSS R"rawliteral(
-  .container { max-width: 900px; margin: auto; background: #1e1e1e; padding: 25px; border-radius: 12px; border: 1px solid #333; }
-  .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 15px 0; }
-  select { font-size: 1em; padding: 6px; background: #000; color: #0f0; border: 1px solid #444; border-radius: 4px; flex: 1; min-width: 180px; }
-  .btn { border: none; padding: 10px 16px; border-radius: 5px; cursor: pointer; font-weight: bold; color: white; background: #0277bd; }
-  .note { color: #ff9800; font-size: 0.85em; margin: 5px 0; }
+  )rawliteral" BASE_CSS NAV_CSS FILE_PAGE_CSS R"rawliteral(
   .chart-box { background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 10px; margin: 15px 0; }
   h3 { color: #4caf50; margin: 5px 0 10px 0; font-size: 1em; }
 </style></head><body>
 )rawliteral" NAV_BAR R"rawliteral(
 <div class="container">
   <h2 style="color:#4caf50;">Trend Graphs</h2>
-  <div class="toolbar">
-    <select id="fileSelect"></select>
-    <button class="btn" onclick="loadGraph()">Reload</button>
-    <a id="downloadLink" class="btn" style="text-decoration:none;" href="#" download>Download</a>
-  </div>
+  )rawliteral" FILE_TOOLBAR("loadGraph") R"rawliteral(
   <div id="status" class="note"></div>
 
   <div class="chart-box"><h3>Pack Voltage</h3><canvas id="chartV"></canvas></div>
@@ -334,7 +316,7 @@ const char graphs_html[] PROGMEM = R"rawliteral(
   <div class="chart-box"><h3>Min / Max Cell Voltage</h3><canvas id="chartCell"></canvas></div>
 </div>
 <script>
-)rawliteral" SHARED_LIST_JS R"rawliteral(
+)rawliteral" SHARED_LIST_JS FILE_PAGE_JS R"rawliteral(
   let charts = {};
 
   function darkChart(canvasId, datasets, extraScales) {
@@ -376,30 +358,13 @@ const char graphs_html[] PROGMEM = R"rawliteral(
     return { labels, packV, soc, packI, reqI, minC, maxC };
   }
 
-  async function loadList() {
-    const sel = document.getElementById('fileSelect');
-    const status = document.getElementById('status');
-    try {
-      const files = await fetchAndPopulateSelect('/api/logs/list', f => f.name.endsWith('.csv'), sel, status);
-      if (!files.length) {
-        status.innerText = 'No telemetry CSV files found (SD card missing or empty).';
-        return;
-      }
-      loadGraph();
-    } catch (e) {
-      status.innerText = 'Failed to list log files: ' + e.message;
-    }
-  }
-
   async function loadGraph() {
     const sel = document.getElementById('fileSelect');
     const status = document.getElementById('status');
-    if (!sel.value) return;
-    document.getElementById('downloadLink').href = '/api/logs/download?file=' + encodeURIComponent(sel.value);
+    if (!armDownload(sel)) return;
     status.innerText = 'Loading...';
     try {
-      const res = await fetch('/api/logs/graph?file=' + encodeURIComponent(sel.value));
-      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const res = await fetchOk('/api/logs/graph?file=' + encodeURIComponent(sel.value));
       const data = parseCSV(await res.text());
       status.innerText = data.labels.length + ' points shown (downsampled for display).';
 
@@ -437,5 +402,11 @@ const char graphs_html[] PROGMEM = R"rawliteral(
     }
   }
 
-  loadList();
+  initFilePage({
+    filterFn: f => f.name.endsWith('.csv'),
+    labelFn: undefined,
+    emptyEl: () => document.getElementById('status'),
+    emptyMsg: 'No telemetry CSV files found (SD card missing or empty).',
+    onLoaded: loadGraph
+  });
 </script></body></html>)rawliteral";

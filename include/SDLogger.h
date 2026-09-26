@@ -87,7 +87,10 @@ public:
 
 private:
     static void loggingTask(void *parameter);
-    static String currentLogPath(const char *extension);
+    // timeinfo/haveClock: the caller's own single clock read (LocalClock::
+    // localNow()), so the log path and the row's own timestamp always
+    // agree, even right at a day boundary.
+    static String currentLogPath(const tm &timeinfo, bool haveClock, const char *extension);
     static void writeCSVHeaderIfMissing(const String &path);
     static void logFailure(const char *msg);
 

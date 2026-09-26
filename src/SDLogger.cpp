@@ -9,6 +9,7 @@
 #include "CsvDecimation.h"
 #include "TailTrim.h"
 #include "LogFileOrder.h"
+#include "LocalClock.h"
 
 bool SDLogger::initialized = false;
 QueueHandle_t SDLogger::logQueue = NULL;
@@ -199,15 +200,10 @@ void SDLogger::logEvent(const char *msg_text)
         droppedQueueFull_.fetch_add(1, std::memory_order_relaxed);
 }
 
-String SDLogger::currentLogPath(const char *extension)
+String SDLogger::currentLogPath(const tm &timeinfo, bool haveClock, const char *extension)
 {
-    time_t now;
-    struct tm timeinfo;
-    time(&now);
-    localtime_r(&now, &timeinfo);
-
     char fileName[32];
-    if (timeinfo.tm_year > 70)
+    if (haveClock)
     {
         strftime(fileName, sizeof(fileName), "/%Y-%m-%d", &timeinfo);
     }
@@ -249,13 +245,11 @@ void SDLogger::loggingTask(void *parameter)
         if (xQueueReceive(logQueue, &msg, portMAX_DELAY) != pdTRUE)
             continue;
 
-        time_t now;
         struct tm timeinfo;
-        time(&now);
-        localtime_r(&now, &timeinfo);
+        bool haveClock = LocalClock::localNow(timeinfo);
 
         char timeStr[32];
-        if (timeinfo.tm_year > 70)
+        if (haveClock)
         {
             strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M:%S", &timeinfo);
         }
@@ -273,7 +267,7 @@ void SDLogger::loggingTask(void *parameter)
 
         if (msg.type == MsgType::Telemetry)
         {
-            String path = currentLogPath(".csv");
+            String path = currentLogPath(timeinfo, haveClock, ".csv");
             writeCSVHeaderIfMissing(path);
             File file = SD.open(path, FILE_APPEND);
             if (file)
@@ -288,7 +282,7 @@ void SDLogger::loggingTask(void *parameter)
         }
         else if (msg.type == MsgType::Event)
         {
-            File file = SD.open(currentLogPath(".log"), FILE_APPEND);
+            File file = SD.open(currentLogPath(timeinfo, haveClock, ".log"), FILE_APPEND);
             if (file)
             {
                 file.printf("[%s] %s", timeStr, msg.data);

@@ -18,6 +18,7 @@
 #include "WifiEvents.h"
 #include "MutexLock.h"
 #include "Interval.h"
+#include "LocalClock.h"
 
 static_assert(kPackCells <= DalyFrames::kMaxCollectorCells, "DalyRS485 can't collect every cell of the pack");
 
@@ -85,13 +86,11 @@ void netLog(const char *format, ...)
   vsnprintf(loc_res, sizeof(loc_res), format, arg);
   va_end(arg);
 
-  time_t now;
   struct tm timeinfo;
-  time(&now);
-  localtime_r(&now, &timeinfo);
+  bool haveClock = LocalClock::localNow(timeinfo);
 
   char final_res[350];
-  if (timeinfo.tm_year > 70)
+  if (haveClock)
   {
     char timeStr[64];
     strftime(timeStr, sizeof(timeStr), "[%d.%m.%Y %H:%M:%S] ", &timeinfo);
@@ -449,10 +448,10 @@ void setupNetwork()
     // Wait for NTP sync (up to 5 seconds)
     netLog("[SYS] Waiting for NTP sync...\n");
     startAttempt = millis();
-    while (time(nullptr) < 1000000000L && millis() - startAttempt < 5000) {
+    while (!LocalClock::clockValid(time(nullptr)) && millis() - startAttempt < 5000) {
       delay(500);
     }
-    netLog(time(nullptr) > 1000000000L ? "[SYS] NTP sync OK\n" : "[SYS] NTP sync timed out\n");
+    netLog(LocalClock::clockValid(time(nullptr)) ? "[SYS] NTP sync OK\n" : "[SYS] NTP sync timed out\n");
   }
   else
   {
@@ -621,7 +620,7 @@ void loop()
   // One logHealth() sample once the clock/BMS data settle, ahead of the
   // regular 10-minute cadence below.
   static bool firstHealthDone = false;
-  if (!firstHealthDone && (time(nullptr) > 1000000000L || millis() > kFirstHealthDeadlineMs))
+  if (!firstHealthDone && (LocalClock::clockValid(time(nullptr)) || millis() > kFirstHealthDeadlineMs))
   {
     firstHealthDone = true;
     Diagnostics::logHealth();

@@ -131,9 +131,112 @@ namespace StatusFrame
         } events;
     };
 
-    // Reproduces the old canTask SMA-TX block exactly - see the retired
-    // block this replaced (main.cpp, canTask, the `if (now - lastSmaTx >
-    // 250)` section) for the byte-for-byte behaviour this must match.
+    constexpr uint32_t kResetHoldMs = 5500;     // cluster reset: DVL 0 this long
+    constexpr uint16_t kMaintCvlDeciV = 560;    // 56.0 V absorption target in maintenance
+    constexpr int kDerateEndHysteresisMv = 10;  // "derating ended" needs spread this far below start
+
+    namespace detail
+    {
+        // Advances the reset hold. Measured from the first frame actually
+        // sent with the reset (DVL 0, #63), not from the click:
+        // handleUIAction() arms it with resetHoldStartMs = 0, so a request
+        // made while no frames go out still gets its full hold on the bus
+        // once frames start. Returns true on the tick the hold ends.
+        inline bool advanceResetHold(bool &resetting, uint32_t &holdStartMs, uint32_t nowMs)
+        {
+            if (!resetting)
+                return false;
+            if (holdStartMs == 0)
+                holdStartMs = nowMs ? nowMs : 1;
+            else if (nowMs - holdStartMs > kResetHoldMs)
+            {
+                resetting = false;
+                return true;
+            }
+            return false;
+        }
+
+        // Auto-maintenance hysteresis on the smoothed MINIMUM cell voltage
+        // (#12): starts as soon as any one weak cell sags below
+        // cvMaintStart, not the pack average, which under discharge stays
+        // well above it while one cell hits the floor. Smoothed, not raw:
+        // maintenance is a slow decision and must not chatter on per-read
+        // noise.
+        inline void updateAutoMaint(bool &autoMaint, float minCellSmoothedV, const SystemConfig &cfg)
+        {
+            if (!autoMaint && minCellSmoothedV > 0 && minCellSmoothedV < cfg.cvMaintStart)
+                autoMaint = true;
+            else if (autoMaint && minCellSmoothedV > cfg.cvMaintStop)
+                autoMaint = false;
+        }
+
+        // Both read stamps within cfg.bmsTimeout; "never read" is stale.
+        inline bool bmsFresh(const SystemConfig &cfg, const Snapshot &s)
+        {
+            return Glideslope::isFresh(s.haveBasicInfo, s.nowMs, s.lastBasicInfoReadMs, cfg.bmsTimeout) &&
+                   Glideslope::isFresh(s.haveCellData, s.nowMs, s.lastCellReadMs, cfg.bmsTimeout);
+        }
+
+        inline Values buildValues(const SystemConfig &cfg, const Snapshot &s, bool fresh,
+                                  bool maintenanceActive, bool isResetting)
+        {
+            Values v;
+            v.packVoltage = s.packVoltage;
+            v.packCurrent = s.packCurrent;
+            v.packTemp = s.packTemp;
+            v.packSOC = s.packSOC;
+            v.maintenanceActive = maintenanceActive;
+            v.forceCharge = maintenanceActive;
+            v.isResetting = isResetting;
+
+            v.ccl = Glideslope::calculateCCL(cfg, s.maxCellSmoothedV, s.maxCellRawV, s.cellSpreadMv, fresh, maintenanceActive);
+            v.dcl = Glideslope::calculateDCL(cfg, s.minCellSmoothedV, s.minCellRawV, s.cellSpreadMv, fresh, maintenanceActive);
+            // Maintenance forces the fixed absorption target; otherwise the
+            // configured per-cell limits x cell count.
+            v.cvl = maintenanceActive ? kMaintCvlDeciV : Glideslope::toDeciVolts(cfg.cvMaxCharge * kCellCount);
+            v.dvl = Glideslope::toDeciVolts(cfg.cvMinDischarge * kCellCount);
+            return v;
+        }
+
+        // Edge-triggered stale/fresh events. staleBaseline keeps the very
+        // first fresh reading from being reported as a recovery.
+        inline void trackFreshness(ControlState &st, bool fresh, bool &wentStale, bool &freshAgain)
+        {
+            if (st.wasFresh && !fresh)
+            {
+                wentStale = true;
+                st.staleBaseline = true;
+            }
+            else if (!st.wasFresh && fresh && st.staleBaseline)
+            {
+                freshAgain = true;
+            }
+            st.wasFresh = fresh;
+        }
+
+        // Edge-triggered spread derating events (#24), with hysteresis on
+        // the "ended" side so it doesn't chatter at the boundary: ended only
+        // once the factor is back at 1.0 AND the spread is at least
+        // kDerateEndHysteresisMv below spreadStartMv.
+        inline void trackDerating(ControlState &st, float derateFactor, uint16_t spreadMv,
+                                  const SystemConfig &cfg, bool &started, bool &ended)
+        {
+            if (!st.derating && derateFactor < 1.0f)
+            {
+                started = true;
+                st.derating = true;
+            }
+            else if (st.derating && derateFactor >= 1.0f &&
+                     (int)spreadMv <= (int)cfg.spreadStartMv - kDerateEndHysteresisMv)
+            {
+                ended = true;
+                st.derating = false;
+            }
+        }
+    }
+
+    // Everything canTask decides per 250 ms tick. Byte-for-byte the
+    // behaviour test/test_statusframe pins down.
     inline Decision decide(const SystemConfig &cfg, const Snapshot &s, ControlState &st)
     {
         Decision d;
@@ -141,79 +244,28 @@ namespace StatusFrame
         d.resetHoldStartMs = s.resetHoldStartMs;
 
         // Send nothing until the BMS has delivered basic info AND cell
-        // voltages once - currentData holds no real values before that,
-        // and the SMA already rides through a few seconds of CAN silence
-        // on every reboot, which is better than made-up SOC/voltage/limits
-        // going out. ControlState and the reset hold are left untouched.
+        // voltages once - there are no real values before that, and the SMA
+        // already rides through a few seconds of CAN silence on every
+        // reboot, which is better than made-up SOC/voltage/limits going
+        // out. ControlState and the reset hold are left untouched.
         if (!(s.haveBasicInfo && s.haveCellData))
             return d;
 
-        // The reset hold is measured from the first frame actually sent
-        // with the reset (DVL 0, #63) - handleUIAction() arms it with
-        // resetHoldStartTime = 0 under the same mutex as this whole
-        // block), not from the click, so a request made while no frames go
-        // out still gets its full 5.5s on the bus once frames start.
         bool isResetting = s.resetRequested;
         uint32_t resetHoldStartMs = s.resetHoldStartMs;
-        if (isResetting)
-        {
-            if (resetHoldStartMs == 0)
-                resetHoldStartMs = s.nowMs ? s.nowMs : 1;
-            else if (s.nowMs - resetHoldStartMs > 5500)
-            {
-                isResetting = false;
-                d.events.resetFinished = true;
-            }
-        }
+        d.events.resetFinished = detail::advanceResetHold(isResetting, resetHoldStartMs, s.nowMs);
 
-        // Auto-maintenance hysteresis on the smoothed MINIMUM cell voltage
-        // vs cvMaintStart/cvMaintStop (#12), matching the config page's
-        // "any cell" wording instead of the pack average: under discharge
-        // one weak cell can hit the discharge floor while the pack
-        // average is still well above cvMaintStart * kCellCount, so the
-        // old pack-voltage comparison never fired. Smoothed, not raw,
-        // because maintenance is a slow decision and must not chatter on
-        // per-read noise (same smoothed/raw split Glideslope.h uses for
-        // the taper vs. the hard cutoff).
-        if (!st.autoMaint && s.minCellSmoothedV > 0 && s.minCellSmoothedV < cfg.cvMaintStart)
-            st.autoMaint = true;
-        else if (st.autoMaint && s.minCellSmoothedV > cfg.cvMaintStop)
-            st.autoMaint = false;
-
+        detail::updateAutoMaint(st.autoMaint, s.minCellSmoothedV, cfg);
         bool maintenanceActive = s.manualMaintForce || st.autoMaint;
 
-        // Same freshness check the old calculateCCL()/calculateDCL()
-        // wrappers derived via bmsDataFresh() - both read stamps must be
-        // within cfg.bmsTimeout, "never read" counts as stale.
-        bool fresh = Glideslope::isFresh(s.haveBasicInfo, s.nowMs, s.lastBasicInfoReadMs, cfg.bmsTimeout) &&
-                     Glideslope::isFresh(s.haveCellData, s.nowMs, s.lastCellReadMs, cfg.bmsTimeout);
+        bool fresh = detail::bmsFresh(cfg, s);
 
-        Values v;
-        v.packVoltage = s.packVoltage;
-        v.packCurrent = s.packCurrent;
-        v.packTemp = s.packTemp;
-        v.packSOC = s.packSOC;
-        v.maintenanceActive = maintenanceActive;
-        v.forceCharge = maintenanceActive;
-        v.isResetting = isResetting;
-
-        v.ccl = Glideslope::calculateCCL(cfg, s.maxCellSmoothedV, s.maxCellRawV, s.cellSpreadMv, fresh, maintenanceActive);
-        v.dcl = Glideslope::calculateDCL(cfg, s.minCellSmoothedV, s.minCellRawV, s.cellSpreadMv, fresh, maintenanceActive);
-        // Force-charge / maintenance CVL override (560 = 56.0V, the fixed
-        // absorption target used while maintenanceActive); otherwise the
-        // configured hard max x cell count, in 0.1V units like the rest of
-        // SMATxData.
-        v.cvl = maintenanceActive ? 560 : (uint16_t)(cfg.cvMaxCharge * kCellCount * 10);
-        v.dvl = (uint16_t)(cfg.cvMinDischarge * kCellCount * 10);
-
-        // Spread factor (#24), computed once and reused for CCL, DCL (both
-        // inside calculateCCL/DCL above) and mirrored here as
-        // derateFactor purely for the dashboard - not consumed a second
-        // time by anything in this function.
+        // Also computed inside calculateCCL/DCL; mirrored here for the
+        // dashboard and the derating events only.
         float derateFactor = Glideslope::spreadFactor(s.cellSpreadMv, cfg.spreadStartMv, cfg.spreadMaxMv);
 
         d.sendFrames = true;
-        d.values = v;
+        d.values = detail::buildValues(cfg, s, fresh, maintenanceActive, isResetting);
         d.derateFactor = derateFactor;
         d.fresh = fresh;
         d.maintenanceActive = maintenanceActive;
@@ -226,43 +278,9 @@ namespace StatusFrame
             d.events.firstFrames = true;
         }
 
-        // Edge-triggered, and only meaningful once real BMS data has
-        // started flowing (framesEnabled, just possibly set above on this
-        // very tick) - staleBaseline gates the "fresh again" event so the
-        // very first-ever fresh reading isn't reported as a recovery.
-        if (st.framesEnabled)
-        {
-            if (st.wasFresh && !fresh)
-            {
-                d.events.wentStale = true;
-                st.staleBaseline = true;
-            }
-            else if (!st.wasFresh && fresh && st.staleBaseline)
-            {
-                d.events.freshAgain = true;
-            }
-            st.wasFresh = fresh;
-        }
-
-        // Edge-triggered cell-spread derating event (#24), with hysteresis
-        // on the "ended" side so it doesn't chatter right at the boundary:
-        // only reported once derateFactor is back at 1.0 AND the spread
-        // has fallen at least 10mV below spreadStartMv, not merely back
-        // under it.
-        if (st.framesEnabled)
-        {
-            if (!st.derating && derateFactor < 1.0f)
-            {
-                d.events.deratingStarted = true;
-                st.derating = true;
-            }
-            else if (st.derating && derateFactor >= 1.0f &&
-                     (int)s.cellSpreadMv <= (int)cfg.spreadStartMv - 10)
-            {
-                d.events.deratingEnded = true;
-                st.derating = false;
-            }
-        }
+        detail::trackFreshness(st, fresh, d.events.wentStale, d.events.freshAgain);
+        detail::trackDerating(st, derateFactor, s.cellSpreadMv, cfg,
+                              d.events.deratingStarted, d.events.deratingEnded);
 
         d.events.spreadMv = s.cellSpreadMv;
         d.events.deratePercent = (uint8_t)round(derateFactor * 100.0f);

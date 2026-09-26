@@ -560,6 +560,29 @@ static void test_half_stale_basic_info_stale_cells_fresh_forces_zero(void)
     TEST_ASSERT_FALSE(d.fresh);
 }
 
+// Two full stale/fresh cycles: each transition fires its event exactly
+// once, and the second recovery is reported like the first (#87).
+static void test_stale_fresh_cycles_each_event_once(void)
+{
+    ControlState ctrl;
+    uint32_t t = 100000;
+    int wentStale = 0, freshAgain = 0;
+    // fresh (5 ticks), stale (5), fresh (5), stale (5), fresh (5)
+    for (int phase = 0; phase < 5; phase++)
+        for (int i = 0; i < 5; i++, t += 250)
+        {
+            Snapshot s = freshSnapshot(t);
+            if (phase % 2 == 1)
+                s.lastCellReadMs = t - 70000; // > 60 s bmsTimeout
+            Decision d = decide(cfg, s, ctrl);
+            wentStale += d.events.wentStale;
+            freshAgain += d.events.freshAgain;
+            TEST_ASSERT_EQUAL(phase % 2 == 0, d.fresh);
+        }
+    TEST_ASSERT_EQUAL(2, wentStale);
+    TEST_ASSERT_EQUAL(2, freshAgain);
+}
+
 int main(int, char **)
 {
     UNITY_BEGIN();
@@ -588,5 +611,6 @@ int main(int, char **)
     RUN_TEST(test_dcl_derated_by_spread_through_decide);
     RUN_TEST(test_half_stale_cells_stale_basic_info_fresh_forces_zero);
     RUN_TEST(test_half_stale_basic_info_stale_cells_fresh_forces_zero);
+    RUN_TEST(test_stale_fresh_cycles_each_event_once);
     return UNITY_END();
 }

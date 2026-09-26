@@ -42,6 +42,20 @@ namespace Glideslope
         return (uint16_t)deci;
     }
 
+    // Converts a voltage in V to the 0.1 V units sent in 0x351 (CVL/DVL).
+    // Truncates, as the bare (uint16_t) cast it replaces did, but a NaN or
+    // negative value gives 0 and a huge one saturates instead of being
+    // undefined behaviour.
+    inline uint16_t toDeciVolts(float volts)
+    {
+        float deci = volts * 10.0f;
+        if (!(deci > 0.0f))
+            return 0;
+        if (deci >= 65535.0f)
+            return 65535;
+        return (uint16_t)deci;
+    }
+
     // Derating factor from the raw (max-min) cell spread (#24). A weak
     // cell's IR drop is proportional to current, not state of charge, so a
     // voltage threshold alone reacts late (see #8 - Cell 16's offset grows

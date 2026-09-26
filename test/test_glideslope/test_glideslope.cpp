@@ -536,6 +536,25 @@ static void test_ccl_and_dcl_are_mirror_images(void)
             }
 }
 
+// --- toDeciVolts (CVL/DVL, #87): truncates like the cast it replaced,
+// but NaN/negative -> 0 and saturates instead of undefined behaviour ---
+
+static void test_to_deci_volts_truncates(void)
+{
+    TEST_ASSERT_EQUAL_UINT16(568, Glideslope::toDeciVolts(3.55f * 16)); // 56.8 V
+    TEST_ASSERT_EQUAL_UINT16(480, Glideslope::toDeciVolts(3.0f * 16));
+    TEST_ASSERT_EQUAL_UINT16(12, Glideslope::toDeciVolts(1.29f));        // 12.9 -> 12
+}
+
+static void test_to_deci_volts_nan_negative_huge(void)
+{
+    TEST_ASSERT_EQUAL_UINT16(0, Glideslope::toDeciVolts(NAN));
+    TEST_ASSERT_EQUAL_UINT16(0, Glideslope::toDeciVolts(-3.0f));
+    TEST_ASSERT_EQUAL_UINT16(0, Glideslope::toDeciVolts(-INFINITY));
+    TEST_ASSERT_EQUAL_UINT16(65535, Glideslope::toDeciVolts(1e6f));
+    TEST_ASSERT_EQUAL_UINT16(65535, Glideslope::toDeciVolts(INFINITY));
+}
+
 int main(int, char **)
 {
     UNITY_BEGIN();
@@ -604,5 +623,7 @@ int main(int, char **)
     RUN_TEST(test_fresh_within_timeout);
     RUN_TEST(test_fresh_across_millis_wraparound);
     RUN_TEST(test_ccl_and_dcl_are_mirror_images);
+    RUN_TEST(test_to_deci_volts_truncates);
+    RUN_TEST(test_to_deci_volts_nan_negative_huge);
     return UNITY_END();
 }

@@ -17,46 +17,46 @@ using RollbackConfirm::State;
 void setUp(void) {}
 void tearDown(void) {}
 
-// --- Boundary: nowMs == kConfirmAfterMs is a no-op for every input combo ---
+// --- Up to and including kConfirmAfterMs, decide() is a no-op for every
+// input combination ---
 
-static void test_boundary_at_deadline_is_noop_wifi_and_bms_up(void)
+static void test_noop_until_deadline_for_every_input(void)
 {
-    State st;
-    Action a = decide(st, true, true, kConfirmAfterMs, false);
-    TEST_ASSERT_FALSE(a.confirmNow);
-    TEST_ASSERT_FALSE(a.logNotConfirmed);
-    TEST_ASSERT_FALSE(st.imageConfirmed);
-    TEST_ASSERT_FALSE(st.unconfirmedWarned);
+    const unsigned long times[] = {0, kConfirmAfterMs - 1, kConfirmAfterMs};
+    for (unsigned long nowMs : times)
+        for (int in = 0; in < 8; in++)
+        {
+            bool wifiUp = in & 1, bmsUp = in & 2, pending = in & 4;
+            State st;
+            Action a = decide(st, wifiUp, bmsUp, nowMs, pending);
+            TEST_ASSERT_FALSE(a.confirmNow);
+            TEST_ASSERT_FALSE(a.logNotConfirmed);
+            TEST_ASSERT_FALSE(st.imageConfirmed);
+            TEST_ASSERT_FALSE(st.unconfirmedWarned);
+        }
 }
 
-static void test_boundary_at_deadline_is_noop_wifi_down(void)
-{
-    State st;
-    Action a = decide(st, false, true, kConfirmAfterMs, true);
-    TEST_ASSERT_FALSE(a.confirmNow);
-    TEST_ASSERT_FALSE(a.logNotConfirmed);
-    TEST_ASSERT_FALSE(st.imageConfirmed);
-    TEST_ASSERT_FALSE(st.unconfirmedWarned);
-}
+// --- needsPendingVerify() is true exactly when decide() reads
+// imagePendingVerify, i.e. when its answer changes the Action (#105) ---
 
-static void test_boundary_at_deadline_is_noop_bms_down(void)
+static void test_needs_pending_verify_matches_decide(void)
 {
-    State st;
-    Action a = decide(st, true, false, kConfirmAfterMs, true);
-    TEST_ASSERT_FALSE(a.confirmNow);
-    TEST_ASSERT_FALSE(a.logNotConfirmed);
-    TEST_ASSERT_FALSE(st.imageConfirmed);
-    TEST_ASSERT_FALSE(st.unconfirmedWarned);
-}
+    const unsigned long times[] = {0, kConfirmAfterMs, kConfirmAfterMs + 1, kConfirmAfterMs + 60000};
+    for (unsigned long nowMs : times)
+        for (int in = 0; in < 16; in++)
+        {
+            State st;
+            st.imageConfirmed = in & 1;
+            st.unconfirmedWarned = in & 2;
+            bool wifiUp = in & 4, bmsUp = in & 8;
 
-static void test_boundary_at_deadline_is_noop_both_down(void)
-{
-    State st;
-    Action a = decide(st, false, false, kConfirmAfterMs, true);
-    TEST_ASSERT_FALSE(a.confirmNow);
-    TEST_ASSERT_FALSE(a.logNotConfirmed);
-    TEST_ASSERT_FALSE(st.imageConfirmed);
-    TEST_ASSERT_FALSE(st.unconfirmedWarned);
+            State withPending = st, withoutPending = st;
+            Action aTrue = decide(withPending, wifiUp, bmsUp, nowMs, true);
+            Action aFalse = decide(withoutPending, wifiUp, bmsUp, nowMs, false);
+            bool readsIt = aTrue.logNotConfirmed != aFalse.logNotConfirmed;
+
+            TEST_ASSERT_EQUAL(readsIt, RollbackConfirm::needsPendingVerify(st, wifiUp, bmsUp, nowMs));
+        }
 }
 
 // --- Confirm path + idempotent second call ---
@@ -174,10 +174,8 @@ int main(int, char **)
 {
     UNITY_BEGIN();
 
-    RUN_TEST(test_boundary_at_deadline_is_noop_wifi_and_bms_up);
-    RUN_TEST(test_boundary_at_deadline_is_noop_wifi_down);
-    RUN_TEST(test_boundary_at_deadline_is_noop_bms_down);
-    RUN_TEST(test_boundary_at_deadline_is_noop_both_down);
+    RUN_TEST(test_noop_until_deadline_for_every_input);
+    RUN_TEST(test_needs_pending_verify_matches_decide);
 
     RUN_TEST(test_confirm_when_wifi_and_bms_up_past_deadline);
     RUN_TEST(test_confirm_is_idempotent_on_second_call);

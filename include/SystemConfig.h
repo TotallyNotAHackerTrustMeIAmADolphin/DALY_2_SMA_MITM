@@ -34,9 +34,11 @@ constexpr float kMinCellThresholdV = 2.50f;
 // Upper bound for every current setpoint: catches "2500" for "250"; well
 // above anything this pack/inverter uses.
 constexpr float kMaxCurrentA = 1000.0f;
-// Moving-average window; must match CellSmoother::MAX_SAMPLES
-// (static_assert in main.cpp).
+// Moving-average window upper bound; also CellSmoother's ring-buffer depth.
 constexpr int kMaxVSamples = 20;
+// Cells in series in this pack: how many cells the BMS read expects, and
+// the factor from per-cell limits to the pack CVL/DVL sent to the SMA.
+constexpr int kPackCells = 16;
 
 enum ParseResult
 {

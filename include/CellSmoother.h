@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdint.h>
+#include "SystemConfig.h"
 
 // Per-cell moving-average smoother for Daly BMS cell voltages (#31),
 // extracted out of bmsTask (src/main.cpp) so the reseed-on-window-change
@@ -13,8 +14,10 @@
 class CellSmoother
 {
 public:
+    // Buffer capacities, not the pack's cell count (kPackCells).
     static constexpr int MAX_CELLS = 16;
-    static constexpr int MAX_SAMPLES = 20;
+    static constexpr int MAX_SAMPLES = kMaxVSamples;
+    static_assert(MAX_CELLS >= kPackCells, "CellSmoother can't hold every cell of the pack");
 
     struct Result
     {

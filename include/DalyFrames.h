@@ -12,6 +12,23 @@
 
 namespace DalyFrames
 {
+    // Daly UART frame envelope (#103): every request/response frame is
+    // kFrameLen bytes: kStartByte, kHostAddr, a command byte, kPayloadLen,
+    // kPayloadLen data bytes, then a trailing checksum byte.
+    constexpr uint8_t kStartByte = 0xA5;
+    constexpr uint8_t kHostAddr = 0x40;
+    constexpr uint8_t kPayloadLen = 8;
+    constexpr uint8_t kFrameLen = 13; // 4-byte header + kPayloadLen + 1 checksum byte
+
+    // Command bytes for the four frame types this firmware sends/parses.
+    enum Cmd : uint8_t
+    {
+        BasicInfo = 0x90,
+        MosfetStatus = 0x93,
+        CellVoltages = 0x95,
+        AlarmStatus = 0x98,
+    };
+
     struct DalyBasicInfo
     {
         float packVoltage;
@@ -103,16 +120,122 @@ namespace DalyFrames
         return table;
     }
 
-    // Daly UART frame checksum: low byte of the sum of the first 12 bytes
-    // of the 13-byte frame (0xA5, address, command, length, 8 data bytes),
-    // compared against byte 12.
-    inline bool checksumOk(const uint8_t frame[13])
+    // Daly UART frame checksum: low byte of the sum of the first
+    // kFrameLen-1 bytes of the frame (0xA5, address, command, length, 8
+    // data bytes).
+    inline uint8_t checksum(const uint8_t frame[kFrameLen])
     {
-        uint8_t checksum = 0;
-        for (int i = 0; i < 12; i++)
-            checksum += frame[i];
-        return checksum == frame[12];
+        uint8_t sum = 0;
+        for (int i = 0; i < kFrameLen - 1; i++)
+            sum += frame[i];
+        return sum;
     }
+
+    // checksumOk compares checksum(frame) against the frame's trailing byte.
+    inline bool checksumOk(const uint8_t frame[kFrameLen])
+    {
+        return checksum(frame) == frame[kFrameLen - 1];
+    }
+
+    // Builds a well-formed request frame for `cmd`: no payload (all-zero
+    // data bytes) and a correct trailing checksum. `out` must be kFrameLen
+    // bytes. Every Daly request this firmware sends has an all-zero
+    // payload, so buildRequest() takes no payload argument.
+    inline void buildRequest(Cmd cmd, uint8_t out[kFrameLen])
+    {
+        out[0] = kStartByte;
+        out[1] = kHostAddr;
+        out[2] = static_cast<uint8_t>(cmd);
+        out[3] = kPayloadLen;
+        for (int i = 0; i < kPayloadLen; i++)
+            out[4 + i] = 0;
+        out[kFrameLen - 1] = checksum(out);
+    }
+
+    // Pure byte-stream framer (#101). Feed it one incoming UART byte at a
+    // time via feed(); it returns true, and fills frameOut, exactly when a
+    // checksum-valid kFrameLen-byte frame completes. It only resyncs on
+    // kStartByte and validates the checksum - it does not look at the
+    // command byte or address, since a legitimate frame for a different
+    // command is complete and correct, just not the one the caller wanted;
+    // DalyRS485::receiveFrame() is the one that decides what to do with an
+    // unwanted-but-valid frame (see its comment).
+    //
+    // On a checksum failure, the old byte-sync loops this replaces
+    // (DalyRS485::receiveSingleFrame(), and the inner loop of
+    // readCellVoltages()) threw away the whole kFrameLen-byte window and
+    // restarted synchronization from the next byte off the wire. A stray
+    // kStartByte anywhere in that window started a false frame and cost
+    // the real frame behind it. feed() instead discards only the leading
+    // byte and rescans the rest of the window for the next kStartByte, so
+    // a real frame that started inside a bad window is still found. This
+    // is a deliberate behaviour change (#101) - the byte lost to a false
+    // sync no longer takes a real frame down with it.
+    class FrameAssembler
+    {
+    public:
+        void reset()
+        {
+            idx_ = 0;
+            checksumFailedOnLastFeed_ = false;
+        }
+
+        bool feed(uint8_t byte, uint8_t frameOut[kFrameLen])
+        {
+            checksumFailedOnLastFeed_ = false;
+
+            if (idx_ == 0 && byte != kStartByte)
+                return false;
+
+            buf_[idx_++] = byte;
+            if (idx_ < kFrameLen)
+                return false;
+
+            if (checksumOk(buf_))
+            {
+                for (int i = 0; i < kFrameLen; i++)
+                    frameOut[i] = buf_[i];
+                idx_ = 0;
+                return true;
+            }
+
+            checksumFailedOnLastFeed_ = true;
+            rescan();
+            return false;
+        }
+
+        // True for exactly one feed() call: the one whose completed
+        // kFrameLen-byte window failed its checksum. Lets a caller log the
+        // same way the pre-#101 readCellVoltages() loop did, without the
+        // assembler itself doing any logging.
+        bool checksumFailedOnLastFeed() const { return checksumFailedOnLastFeed_; }
+
+    private:
+        // A checksum just failed on buf_[0..kFrameLen-1]. Drop buf_[0] (the
+        // byte that started this bad window) and look for the next
+        // kStartByte among buf_[1..kFrameLen-1], sliding it (and whatever
+        // follows it) down to index 0. If none is found the window really
+        // was noise; start clean from the next byte off the wire.
+        void rescan()
+        {
+            for (int i = 1; i < kFrameLen; i++)
+            {
+                if (buf_[i] == kStartByte)
+                {
+                    int remaining = kFrameLen - i;
+                    for (int j = 0; j < remaining; j++)
+                        buf_[j] = buf_[i + j];
+                    idx_ = remaining;
+                    return;
+                }
+            }
+            idx_ = 0;
+        }
+
+        uint8_t buf_[kFrameLen] = {};
+        int idx_ = 0;
+        bool checksumFailedOnLastFeed_ = false;
+    };
 
     // Daly UART "Basic Info" (cmd 0x90) 8-byte payload:
     //   [0..1] pack voltage, 0.1V units
@@ -136,8 +259,8 @@ namespace DalyFrames
     //   [3..4] cell voltage N+1, mV, big-endian
     //   [5..6] cell voltage N+2, mV, big-endian
     //   [7]    unused by this firmware (not decoded)
-    // Frame-number range/dedup checking and cellIdx bounds against
-    // expectedCells stay in DalyRS485::readCellVoltages(), since they
+    // Frame-number range/dedup checking and cellIdx mapping against
+    // expectedCells now live in CellFrameCollector below, since they
     // depend on the pack's configured cell count, not the frame itself.
     inline bool parseCellFrame(const uint8_t data[8], uint8_t &frameNo, uint16_t mv[3])
     {
@@ -147,6 +270,94 @@ namespace DalyFrames
         mv[2] = (data[5] << 8) | data[6];
         return true;
     }
+
+    // Upper bound on the cell count CellFrameCollector will collect
+    // (#102). Generously above CellSmoother::MAX_CELLS (16, the actual
+    // pack size this firmware supports) rather than importing that
+    // constant, so DalyFrames.h stays free of a dependency on
+    // CellSmoother.h; reset() clamps to this rather than trusting an
+    // out-of-range expectedCells. A uint32_t frame mask (below) safely
+    // covers every frame number this bound can produce.
+    constexpr int kMaxCollectorCells = 32;
+
+    // Collects the 0x95 "Cell Voltages" stream into per-cell millivolt
+    // values (#102): reset(cells) for a fresh read, accept() once per
+    // received payload, complete() once every frame has arrived. Replaces
+    // the frame-number range check, dedup (framesMask), and frame->cell
+    // mapping ((frameNo-1)*3+i) that used to live inline in
+    // DalyRS485::readCellVoltages() - same logic, now pure and native-
+    // testable. framesMask_ is uint32_t, not the uint8_t the inline
+    // version used, which silently truncated (1 << frameNum wrapped) for
+    // more than ~21 cells; not reachable with today's 16-cell pack, but a
+    // real latent bug the old shape couldn't express.
+    class CellFrameCollector
+    {
+    public:
+        void reset(int cells)
+        {
+            if (cells < 0)
+                cells = 0;
+            if (cells > kMaxCollectorCells)
+                cells = kMaxCollectorCells;
+            cells_ = cells;
+            expectedFrames_ = (cells_ + 2) / 3;
+            framesMask_ = 0;
+            framesReceived_ = 0;
+            for (int i = 0; i < kMaxCollectorCells; i++)
+                mv_[i] = 0;
+        }
+
+        // Feeds one 8-byte cell-voltage payload. Out-of-range frame
+        // numbers (0, or beyond expectedFrames_) are rejected; a frame
+        // number already seen is a duplicate and is ignored (its mv
+        // values were already stored). The last frame is partial when
+        // cells_ isn't a multiple of 3 (e.g. 16 cells -> frame 6 carries
+        // only 1 cell); its unused mv slots are never written, matching
+        // the `if (cellIdx < cells_)` bound the old inline code had.
+        // Returns true iff this payload's frame number was newly
+        // accepted (false for out-of-range or duplicate).
+        bool accept(const uint8_t payload[kPayloadLen])
+        {
+            uint8_t frameNo;
+            uint16_t mv[3];
+            parseCellFrame(payload, frameNo, mv);
+
+            if (frameNo == 0 || frameNo > expectedFrames_)
+                return false;
+
+            uint32_t bit = 1u << frameNo;
+            if (framesMask_ & bit)
+                return false; // duplicate - already counted and stored
+
+            framesMask_ |= bit;
+            framesReceived_++;
+
+            for (int i = 0; i < 3; i++)
+            {
+                int cellIdx = (frameNo - 1) * 3 + i;
+                if (cellIdx < cells_)
+                    mv_[cellIdx] = mv[i];
+            }
+            return true;
+        }
+
+        bool complete() const { return framesReceived_ == expectedFrames_; }
+
+        // Per-cell millivolt values, indexed [0, cells_). Only valid past
+        // an index once its frame has been accept()-ed; unset slots stay
+        // at the 0 reset() left them.
+        const uint16_t *mv() const { return mv_; }
+
+        int framesReceived() const { return framesReceived_; }
+        int expectedFrames() const { return expectedFrames_; }
+
+    private:
+        int cells_ = 0;
+        int expectedFrames_ = 0;
+        uint32_t framesMask_ = 0;
+        int framesReceived_ = 0;
+        uint16_t mv_[kMaxCollectorCells] = {};
+    };
 
     // Daly UART "Status Info 2" (cmd 0x93) payload layout, from the same
     // community-documented protocol family as the 0x90/0x95 frames above

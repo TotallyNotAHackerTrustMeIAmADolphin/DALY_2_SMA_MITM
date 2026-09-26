@@ -1,6 +1,7 @@
 #include "Diagnostics.h"
 #include <cstdarg>
 #include <cstdio>
+#include <cstring>
 #include <WiFi.h>
 #include "esp_core_dump.h"
 #include "rom/rtc.h"
@@ -132,8 +133,8 @@ void Diagnostics::logBootDiagnostics()
              resetReasonName(reason), (int)reason,
              (int)rtc_get_reset_reason(0), (int)rtc_get_reset_reason(1));
 
-    char elfSha[17] = {0};
-    esp_ota_get_app_elf_sha256(elfSha, sizeof(elfSha));
+    char elfSha[17];
+    runningElfSha(elfSha);
     const esp_partition_t *running = esp_ota_get_running_partition();
     esp_ota_img_states_t otaState = ESP_OTA_IMG_UNDEFINED;
     esp_ota_get_state_partition(running, &otaState);
@@ -154,31 +155,70 @@ void Diagnostics::logBootDiagnostics()
     // A dump stays in flash until the next crash overwrites it, so it can be
     // from an earlier crash than the one that caused this boot - compare its
     // ELF sha with the running one, and the reset reason above.
-    static esp_core_dump_summary_t summary;
-    esp_err_t chk = esp_core_dump_image_check();
-    if (chk == ESP_OK && esp_core_dump_get_summary(&summary) == ESP_OK)
+    CoreDumpInfo dump;
+    readCoreDump(dump);
+    switch (dump.status)
+    {
+    case CoreDumpInfo::Present:
     {
         debugLog("[DIAG] Stored core dump: task '%s', PC 0x%08x, cause %u, vaddr 0x%08x, ELF %s\n",
-                 summary.exc_task, (unsigned)summary.exc_pc,
-                 (unsigned)summary.ex_info.exc_cause, (unsigned)summary.ex_info.exc_vaddr,
-                 (const char *)summary.app_elf_sha256);
+                 dump.task, (unsigned)dump.pc, (unsigned)dump.cause, (unsigned)dump.vaddr, dump.elfSha);
 
         char bt[200];
-        size_t len = 0;
-        bt[0] = '\0';
-        for (uint32_t i = 0; i < summary.exc_bt_info.depth && i < 16 && len < sizeof(bt); i++)
-            len += snprintf(bt + len, sizeof(bt) - len, " 0x%08x", (unsigned)summary.exc_bt_info.bt[i]);
-        debugLog("[DIAG] Backtrace%s:%s\n", summary.exc_bt_info.corrupted ? " (corrupted)" : "", bt);
+        BoundedWriter w(bt, sizeof(bt));
+        for (int i = 0; i < dump.backtraceDepth; i++)
+            w.append(" 0x%08x", (unsigned)dump.backtrace[i]);
+        debugLog("[DIAG] Backtrace%s:%s\n", dump.corrupted ? " (corrupted)" : "", bt);
         debugLog("[DIAG] Full dump: GET /api/coredump\n");
+        break;
     }
-    else if (chk == ESP_ERR_NOT_FOUND || chk == ESP_ERR_INVALID_SIZE)
-    {
+    case CoreDumpInfo::None:
         debugLog("[DIAG] No core dump stored.\n");
+        break;
+    case CoreDumpInfo::Unreadable:
+        debugLog("[DIAG] Core dump present but unreadable (%s).\n", dump.checkName);
+        break;
     }
-    else
+}
+
+void Diagnostics::readCoreDump(CoreDumpInfo &out)
+{
+    out = CoreDumpInfo{};
+    esp_err_t chk = esp_core_dump_image_check();
+    out.checkName = esp_err_to_name(chk);
+    if (coreDumpAbsent(chk))
     {
-        debugLog("[DIAG] Core dump present but unreadable (%s).\n", esp_err_to_name(chk));
+        out.status = CoreDumpInfo::None;
+        return;
     }
+
+    // Static: the summary struct is large for a task stack.
+    static esp_core_dump_summary_t summary;
+    memset(&summary, 0, sizeof(summary));
+    if (chk != ESP_OK || esp_core_dump_get_summary(&summary) != ESP_OK)
+    {
+        out.status = CoreDumpInfo::Unreadable;
+        return;
+    }
+
+    out.status = CoreDumpInfo::Present;
+    snprintf(out.task, sizeof(out.task), "%.16s", summary.exc_task);
+    out.pc = summary.exc_pc;
+    out.cause = summary.ex_info.exc_cause;
+    out.vaddr = summary.ex_info.exc_vaddr;
+    out.corrupted = summary.exc_bt_info.corrupted;
+    out.backtraceDepth = summary.exc_bt_info.depth < (uint32_t)CoreDumpInfo::kMaxBacktrace
+                             ? (int)summary.exc_bt_info.depth
+                             : CoreDumpInfo::kMaxBacktrace;
+    for (int i = 0; i < out.backtraceDepth; i++)
+        out.backtrace[i] = summary.exc_bt_info.bt[i];
+    snprintf(out.elfSha, sizeof(out.elfSha), "%.16s", (const char *)summary.app_elf_sha256);
+}
+
+void Diagnostics::runningElfSha(char (&out)[17])
+{
+    out[0] = '\0';
+    esp_ota_get_app_elf_sha256(out, sizeof(out));
 }
 
 // File scope (was a function-local static in confirmImageIfReady()) so
@@ -200,14 +240,9 @@ void Diagnostics::confirmImageIfReady(bool wifiUp, bool bmsUp)
     // imagePendingVerify=false), silently swallowing the one-shot warning.
     const unsigned long nowMs = millis();
 
-    // Only query the OTA partition state when the answer could actually
-    // change the outcome: decide() is a no-op once imageConfirmed or before
-    // kConfirmAfterMs, and it only consults imagePendingVerify on the
-    // not-yet-warned, not-ready branch - so skip the ESP-IDF call everywhere
-    // else instead of doing it unconditionally on every loop() iteration.
+    // Only query the OTA partition state when decide() will read it.
     bool imagePendingVerify = false;
-    if (!st.imageConfirmed && !st.unconfirmedWarned && !(wifiUp && bmsUp) &&
-        nowMs > RollbackConfirm::kConfirmAfterMs)
+    if (RollbackConfirm::needsPendingVerify(st, wifiUp, bmsUp, nowMs))
     {
         esp_ota_img_states_t otaState = ESP_OTA_IMG_UNDEFINED;
         esp_ota_get_state_partition(esp_ota_get_running_partition(), &otaState);

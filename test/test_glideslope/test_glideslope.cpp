@@ -493,6 +493,68 @@ static void test_fresh_across_millis_wraparound(void)
     TEST_ASSERT_TRUE(isFresh(true, 2000, 0xFFFFFFFFu - 999u, 60));
 }
 
+// --- CCL/DCL mirror symmetry (#86) ---
+// calculateDCL is calculateCCL with the voltage axis reflected. With both
+// sides' thresholds placed symmetrically around kMirrorCenterV and the same
+// currents, CCL(v) must equal DCL(2c - v) for every smoothed/raw pair and
+// spread. All thresholds and sample voltages are exact binary fractions,
+// so the reflection is exact in float and the results must match bit for
+// bit - any asymmetric edit to one side fails here.
+
+static const float kMirrorCenterV = 3.25f;
+
+static SystemConfig mirrorConfig()
+{
+    SystemConfig c = glideslopeTestConfig();
+    TEST_ASSERT_TRUE(c.cvStartTaper.set(3.375f));    // c + 0.125
+    TEST_ASSERT_TRUE(c.cvHighAlarmGate.set(3.4375f)); // c + 0.1875
+    TEST_ASSERT_TRUE(c.cvMaxCharge.set(3.5f));        // c + 0.25
+    TEST_ASSERT_TRUE(c.cvStartDTaper.set(3.125f));    // c - 0.125
+    TEST_ASSERT_TRUE(c.cvLowAlarmGate.set(3.0625f));  // c - 0.1875
+    TEST_ASSERT_TRUE(c.cvMinDischarge.set(3.0f));     // c - 0.25
+    TEST_ASSERT_TRUE(c.maxChargeA.set(150.0f));
+    TEST_ASSERT_TRUE(c.maxDischargeA.set(150.0f));
+    TEST_ASSERT_TRUE(c.trickleA.set(7.0f));
+    TEST_ASSERT_TRUE(c.limpDischargeA.set(7.0f));
+    return c;
+}
+
+static void test_ccl_and_dcl_are_mirror_images(void)
+{
+    SystemConfig c = mirrorConfig();
+    const uint16_t spreads[] = {0, 60, 90, 105, 149, 150, 400};
+    // c .. c + 0.3 V in 1/256 V steps: full current, taper, gate, cutoff.
+    for (int ks = 0; ks <= 77; ks++)
+        for (int kr = 0; kr <= 77; kr += 4) // hits the gate (48) and cutoff (64)
+            for (uint16_t spread : spreads)
+            {
+                float smoothed = kMirrorCenterV + ks / 256.0f;
+                float raw = kMirrorCenterV + kr / 256.0f;
+                uint16_t ccl = calculateCCL(c, smoothed, raw, spread, true, false);
+                uint16_t dcl = calculateDCL(c, 2 * kMirrorCenterV - smoothed, 2 * kMirrorCenterV - raw, spread, true, false);
+                TEST_ASSERT_EQUAL_UINT16(ccl, dcl);
+            }
+}
+
+// --- toDeciVolts (CVL/DVL, #87): truncates like the cast it replaced,
+// but NaN/negative -> 0 and saturates instead of undefined behaviour ---
+
+static void test_to_deci_volts_truncates(void)
+{
+    TEST_ASSERT_EQUAL_UINT16(568, Glideslope::toDeciVolts(3.55f * 16)); // 56.8 V
+    TEST_ASSERT_EQUAL_UINT16(480, Glideslope::toDeciVolts(3.0f * 16));
+    TEST_ASSERT_EQUAL_UINT16(12, Glideslope::toDeciVolts(1.29f));        // 12.9 -> 12
+}
+
+static void test_to_deci_volts_nan_negative_huge(void)
+{
+    TEST_ASSERT_EQUAL_UINT16(0, Glideslope::toDeciVolts(NAN));
+    TEST_ASSERT_EQUAL_UINT16(0, Glideslope::toDeciVolts(-3.0f));
+    TEST_ASSERT_EQUAL_UINT16(0, Glideslope::toDeciVolts(-INFINITY));
+    TEST_ASSERT_EQUAL_UINT16(65535, Glideslope::toDeciVolts(1e6f));
+    TEST_ASSERT_EQUAL_UINT16(65535, Glideslope::toDeciVolts(INFINITY));
+}
+
 int main(int, char **)
 {
     UNITY_BEGIN();
@@ -560,5 +622,8 @@ int main(int, char **)
     RUN_TEST(test_never_read_is_stale_right_after_boot);
     RUN_TEST(test_fresh_within_timeout);
     RUN_TEST(test_fresh_across_millis_wraparound);
+    RUN_TEST(test_ccl_and_dcl_are_mirror_images);
+    RUN_TEST(test_to_deci_volts_truncates);
+    RUN_TEST(test_to_deci_volts_nan_negative_huge);
     return UNITY_END();
 }

@@ -2,6 +2,15 @@
 #include <cstdarg>
 #include <cstdio>
 
+namespace
+{
+    // Both TWAI queues. TX: one encodeStatus() call is at most 6 frames.
+    constexpr uint32_t kTwaiQueueLen = 10;
+    // Frames drained per readMessages() call (every ~50 ms), so a flooded
+    // bus can't starve canTask's status TX; the rest wait in the queue.
+    constexpr int kRxBatchMax = 10;
+}
+
 SMA_CAN::SMA_CAN() : _debugCb(nullptr), _ticker35E(0),
                      _driverDown(false), _startFailed(false), _recoveryTimer(0) {}
 
@@ -48,8 +57,8 @@ bool SMA_CAN::startDriver()
 {
     // Set back to NORMAL mode!
     twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(_txPin, _rxPin, TWAI_MODE_NORMAL);
-    g_config.tx_queue_len = 10;
-    g_config.rx_queue_len = 10;
+    g_config.tx_queue_len = kTwaiQueueLen;
+    g_config.rx_queue_len = kTwaiQueueLen;
 
     twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS();
     twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
@@ -160,7 +169,7 @@ void SMA_CAN::readMessages(DashboardData &dashboardOut)
 
     // Count first: checked after twai_receive(), the 11th frame was
     // dequeued and then dropped unread (#65).
-    while (msgCount < 10 && twai_receive(&in_msg, 0) == ESP_OK)
+    while (msgCount < kRxBatchMax && twai_receive(&in_msg, 0) == ESP_OK)
     {
         msgCount++;
 

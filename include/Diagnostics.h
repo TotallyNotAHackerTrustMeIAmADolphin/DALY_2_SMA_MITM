@@ -2,6 +2,7 @@
 #include <Arduino.h>
 #include "esp_system.h"
 #include "esp_ota_ops.h"
+#include "CoreDumpInfo.h"
 
 // Debug/diagnostics callback, matching netLog()'s own variadic signature
 // (src/main.cpp) - same pattern as WebDashboard's WebDebugCallback, so it
@@ -29,6 +30,17 @@ public:
     // first 60s of a cold boot (or a crash loop) still gets logged - it
     // does not wait for loop()'s clock-ready gate.
     static void logBootDiagnostics();
+
+    // The one core-dump reader (#91), shared by the boot log and
+    // /api/coredump/summary. Callers: setup() (before the web server
+    // starts) and the async_tcp task, never concurrently.
+    static void readCoreDump(CoreDumpInfo &out);
+
+    // esp_core_dump_image_check()'s "nothing stored" results.
+    static bool coreDumpAbsent(esp_err_t check) { return check == ESP_ERR_NOT_FOUND || check == ESP_ERR_INVALID_SIZE; }
+
+    // The running image's ELF sha256, first 16 hex chars.
+    static void runningElfSha(char (&out)[17]);
 
     // Heap free/min/max-block, per-task stack high-water marks and WiFi
     // RSSI. Looks up every task (including BMS_Task/CAN_Task) by name via

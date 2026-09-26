@@ -204,6 +204,19 @@ static void test_missing_cells_are_omitted_not_padded(void)
     TEST_ASSERT_NOT_NULL(strstr(row, "3.340,1,0,0,0,0,0,0,3.195"));
 }
 
+// A default-constructed DashboardData (#80) formats deterministically: the
+// pre-BMS state, no cells yet, no derating.
+static void test_default_constructed_row(void)
+{
+    DashboardData d;
+    char row[480];
+    TEST_ASSERT_TRUE(formatRow(d, row, sizeof(row)) > 0);
+    TEST_ASSERT_EQUAL_STRING("0.00,0.00,0.0,0.000,0.000,0.0,Unknown,0,0,0,"
+                             "0,0,0,0,0,0,0,"
+                             "0.000,0.000,0,1.00",
+                             row);
+}
+
 int main(int, char **)
 {
     UNITY_BEGIN();
@@ -217,5 +230,6 @@ int main(int, char **)
     RUN_TEST(test_row_field_count_matches_header_field_count);
     RUN_TEST(test_sample_formats_to_known_row);
     RUN_TEST(test_missing_cells_are_omitted_not_padded);
+    RUN_TEST(test_default_constructed_row);
     return UNITY_END();
 }

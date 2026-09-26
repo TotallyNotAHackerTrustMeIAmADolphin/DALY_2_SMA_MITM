@@ -3,11 +3,9 @@
 #include "SDLogger.h"
 #include "TelemetrySchema.h"
 #include <SD.h>
-#include <cerrno>
 #include <cstdarg>
 #include <cstddef>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include "esp_core_dump.h"
 #include "esp_partition.h"
@@ -37,13 +35,11 @@ namespace
         {&SystemConfig::ValidationResult::maintStartBelowMinDischarge,
          "Maint. Start Vpc must be above Min Discharge Vpc (#12)."},
         {&SystemConfig::ValidationResult::chargeTaperOrderBad,
-         "Charge thresholds must be ordered: Start Taper Vpc < High Alarm Gate Vpc < Max Charge Vpc."},
+         "Charge thresholds must be ordered: Start Taper Vpc < Target Trickle Vpc < Max Charge Vpc."},
         {&SystemConfig::ValidationResult::dischargeTaperOrderBad,
-         "Discharge thresholds must be ordered: Start D-Taper Vpc > Low Alarm Gate Vpc > Min Discharge Vpc."},
+         "Discharge thresholds must be ordered: Start Taper Vpc (D) > Target Limp Vpc > Min Discharge Vpc."},
         {&SystemConfig::ValidationResult::maintHysteresisBad,
          "Maint. Stop Vpc must be above Maint. Start Vpc (#12)."},
-        {&SystemConfig::ValidationResult::spreadOrderBad,
-         "Cell spread: start derating must be below full derating (#24)."},
     };
 
     // A number formatted with the field's precision (limits and values).
@@ -75,62 +71,19 @@ namespace
                 emit(String(vm.message));
     }
 
-    // The field's <input>, generated from its table row so the browser
-    // enforces the same min/max/step validate() does. A coarse step without
+    // The field's <input> plus a "min-max unit, default" line under it, all
+    // generated from its table row so the browser enforces the same
+    // min/max/step as parseConfigField() and the page can't state a range
+    // or default the firmware doesn't use. A coarse step without
     // a min used to make the browser count steps from the stored value
     // (stored 51, step 5: typing 60 was refused).
     String inputTag(const ConfigField &f, const SystemConfig &cfg)
     {
-        return String("<input type=\"number\" name=\"") + f.key + "\" step=\"" + f.step +
+        return String("<div class=\"field\"><input type=\"number\" name=\"") + f.key + "\" step=\"" + f.step +
                "\" min=\"" + formatNumber(f, f.min) + "\" max=\"" + formatNumber(f, f.max) +
-               "\" value=\"" + formatNumber(f, configFieldValue(cfg, f)) + "\">";
-    }
-
-    enum ParseResult
-    {
-        PARSE_OK,
-        PARSE_NOT_A_NUMBER,
-        PARSE_OUT_OF_RANGE
-    };
-
-    // Strict parsing for /save (#61). String::toInt()/toFloat() return 0
-    // for garbage or an empty field, and toInt() into a uint16_t wrapped
-    // (-60 -> 65476, which switched spread derating off). strtol/strtof
-    // must consume the whole string; integers are range-checked against the
-    // field's min/max before they are narrowed, so nothing can wrap. Floats
-    // are stored as parsed - validate() range-checks them (NaN/inf too).
-    ParseResult parseField(const ConfigField &f, const String &val, SystemConfig &cfg)
-    {
-        const char *str = val.c_str();
-        char *end = nullptr;
-        while (*str == ' ')
-            str++;
-        if (*str == '\0')
-            return PARSE_NOT_A_NUMBER;
-        uint8_t *member = reinterpret_cast<uint8_t *>(&cfg) + f.offset;
-        if (f.kind == ConfigField::KIND_FLOAT)
-        {
-            float v = strtof(str, &end);
-            while (*end == ' ')
-                end++;
-            if (end == str || *end != '\0')
-                return PARSE_NOT_A_NUMBER;
-            *reinterpret_cast<float *>(member) = v;
-            return PARSE_OK;
-        }
-        errno = 0;
-        long v = strtol(str, &end, 10);
-        while (*end == ' ')
-            end++;
-        if (end == str || *end != '\0')
-            return PARSE_NOT_A_NUMBER;
-        if (errno == ERANGE || v < (long)f.min || v > (long)f.max)
-            return PARSE_OUT_OF_RANGE;
-        if (f.kind == ConfigField::KIND_UINT16)
-            *reinterpret_cast<uint16_t *>(member) = (uint16_t)v;
-        else
-            *reinterpret_cast<int *>(member) = (int)v;
-        return PARSE_OK;
+               "\" value=\"" + formatNumber(f, configFieldValue(cfg, f)) + "\"><span class=\"range\">" +
+               formatNumber(f, f.min) + "&ndash;" + formatNumber(f, f.max) + " " + f.unit +
+               " &middot; default " + formatNumber(f, f.def) + "</span></div>";
     }
 }
 
@@ -255,29 +208,41 @@ void WebDashboard::loadConfig(SystemConfig &configOut)
     // or canTask exist, so there is no concurrent reader yet.
     _prefs.begin("bms-bridge", false);
 
-    // Read from NVS or set defaults (kConfigFields in SystemConfig.h).
+    // Read from NVS or set defaults (kConfigFields in SystemConfig.h). A
+    // stored value outside its row's range (NaN from corrupted flash, or one
+    // saved before #61 such as a spread threshold that wrapped to 65476) is
+    // replaced by the default and logged, instead of running with it:
+    // several of these (bmsTimeout, spread) switch a safety mechanism off.
+    // Integers are read at full width and range-checked before narrowing.
     for (const ConfigField &f : kConfigFields)
     {
-        uint8_t *member = reinterpret_cast<uint8_t *>(_cfg) + f.offset;
+        double v;
         switch (f.kind)
         {
-        case ConfigField::KIND_FLOAT:
-            *reinterpret_cast<float *>(member) = _prefs.getFloat(f.key, f.def);
-            break;
         case ConfigField::KIND_INT:
-            *reinterpret_cast<int *>(member) = _prefs.getInt(f.key, (int)f.def);
+            v = _prefs.getInt(f.key, (int)f.def);
             break;
         case ConfigField::KIND_UINT16:
-            *reinterpret_cast<uint16_t *>(member) = (uint16_t)_prefs.getUInt(f.key, (uint32_t)f.def);
+            v = _prefs.getUInt(f.key, (uint32_t)f.def);
             break;
+        default:
+            v = _prefs.getFloat(f.key, f.def);
+            break;
+        }
+        if (!storeConfigField(*_cfg, f, v))
+        {
+            storeConfigField(*_cfg, f, f.def);
+            debugLog("[CFG] Stored %s (%s) is outside %s-%s %s - using the default %s\n",
+                     f.label, String(v, 3).c_str(), formatNumber(f, f.min).c_str(),
+                     formatNumber(f, f.max).c_str(), f.unit, formatNumber(f, f.def).c_str());
         }
     }
 
     _prefs.end();
 
-    // #56: sanity-check whatever just got loaded (defaults or NVS content)
-    // and log it - never blocks boot, just surfaces a corrupted/inconsistent
-    // NVS setpoint set for a human to notice and fix via /config or /save.
+    // #56: every field is in range now (see above); what can still fail
+    // are the rules relating two fields. Logged only - never blocks boot,
+    // and there's no single safe default to fall back to for an ordering.
     SystemConfig::ValidationResult validation = SystemConfig::validate(*_cfg);
     forEachViolation(validation, [this](const String &msg)
                      { debugLog("[CFG] Loaded config fails validation: %s\n", msg.c_str()); });
@@ -285,31 +250,17 @@ void WebDashboard::loadConfig(SystemConfig &configOut)
 
 void WebDashboard::saveConfig(AsyncWebServerRequest *request)
 {
-    // calculateCCL()/calculateDCL() in main.cpp's loop() read these same
-    // _cfg fields while holding dataMutex. Taking the same mutex here makes
-    // the whole set of field updates atomic from loop()'s point of view,
-    // instead of a reader potentially seeing a mix of old and new setpoints
-    // mid-save.
-    //
-    // The NVS write itself (Preferences - flash erase/write, tens of ms) is
-    // deliberately done AFTER dataMutex is released (#21): canTask only
-    // takes dataMutex for up to 20ms per 250ms SMA-frame cycle, and used to
-    // time out and skip a frame if a save's flash write was still running
-    // under the same lock. So: parse every submitted field into a local
-    // SystemConfig copy (starting from *_cfg, so untouched fields keep
-    // their current value) under the lock, publish it to *_cfg, release the
-    // lock, then write only the submitted fields to NVS from that copy -
-    // `present[]` (parallel to kConfigFields, by index) remembers which
-    // fields were actually in the request, since a value in `copy` alone
-    // can't distinguish "submitted, same as before" from "not submitted".
+    // canTask reads *_cfg under dataMutex and only waits 20 ms for it per
+    // 250 ms SMA frame, so this holds the lock for nothing but the publish
+    // (`*_cfg = copy`): parsing, validation and building the error text
+    // (heap allocations) run unlocked, on a local copy. That's safe because
+    // this handler is the only writer of *_cfg and always runs on the
+    // async_tcp task, so *_cfg can't change between the copy and the
+    // publish, and reading it here without the lock races no writer. The
+    // NVS write (flash erase/write, tens of ms) also runs after the lock is
+    // released (#21). `present[]` (parallel to kConfigFields) remembers
+    // which fields were in the request, so only those are written to NVS.
     bool present[kNumConfigFields] = {false};
-
-    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(300)) != pdTRUE)
-    {
-        debugLog("[WEB] /save refused: config busy\n");
-        request->send(503, "text/plain", "Device busy, please try Save again");
-        return;
-    }
 
     SystemConfig copy = *_cfg;
     std::vector<String> errors;
@@ -324,7 +275,7 @@ void WebDashboard::saveConfig(AsyncWebServerRequest *request)
         present[i] = true;
 
         const String &val = request->getParam(f.key)->value();
-        switch (parseField(f, val, copy))
+        switch (parseConfigField(copy, f, val.c_str()))
         {
         case PARSE_OK:
             break;
@@ -337,10 +288,10 @@ void WebDashboard::saveConfig(AsyncWebServerRequest *request)
         }
     }
 
-    // #53/#55/#61: every field against its own min/max (kConfigFields) plus
-    // the rules relating two fields. Skipped when a field didn't parse: the
-    // copy still holds the old value there, so the result would be about a
-    // config nobody submitted. Collect-all either way.
+    // #53/#55: the rules relating two fields (each field's own range was
+    // checked while parsing). Only once every field parsed: otherwise the
+    // copy still holds the old value of a rejected field, and a rule about
+    // it would describe a config nobody submitted.
     if (errors.empty())
     {
         SystemConfig::ValidationResult validation = SystemConfig::validate(copy);
@@ -350,7 +301,6 @@ void WebDashboard::saveConfig(AsyncWebServerRequest *request)
 
     if (!errors.empty())
     {
-        xSemaphoreGive(dataMutex);
         String body;
         for (const String &msg : errors)
         {
@@ -361,6 +311,12 @@ void WebDashboard::saveConfig(AsyncWebServerRequest *request)
             debugLog("[WEB] /save refused: %s\n", msg.c_str());
         }
         request->send(400, "text/plain", body + "Nothing saved.\n");
+        return;
+    }
+    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(300)) != pdTRUE)
+    {
+        debugLog("[WEB] /save refused: config busy\n");
+        request->send(503, "text/plain", "Device busy, please try Save again");
         return;
     }
     *_cfg = copy;
@@ -453,10 +409,13 @@ void WebDashboard::setupRoutes()
     _server.on("/config", HTTP_GET, [this](AsyncWebServerRequest *request)
                {
         String h = String(config_html);
-        // Each setting's whole <input> comes from its kConfigFields row
-        // (value, min, max, step), via its !!IN_<key>!! placeholder.
-        for (const ConfigField &f : kConfigFields)
+        // Each setting's label and <input> (value, min, max, step, range
+        // line) come from its kConfigFields row, via !!LABEL_<key>!! and
+        // !!IN_<key>!!.
+        for (const ConfigField &f : kConfigFields) {
+            h.replace(String("!!LABEL_") + f.key + "!!", f.label);
             h.replace(String("!!IN_") + f.key + "!!", inputTag(f, *_cfg));
+        }
         request->send(200, "text/html", h); });
 
     _server.on("/save", HTTP_GET, [this](AsyncWebServerRequest *request)

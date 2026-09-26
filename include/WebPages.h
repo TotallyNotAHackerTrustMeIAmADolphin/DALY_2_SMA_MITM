@@ -166,6 +166,8 @@ const char config_html[] PROGMEM = R"rawliteral(
   .container { max-width: 650px; margin: auto; background: #1e1e1e; padding: 25px; border-radius: 12px; border: 1px solid #333; }
   .row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 1px solid #2a2a2a; padding-bottom: 8px; }
   .text-group { text-align: left; padding-right: 15px; }
+  .field { display: flex; flex-direction: column; align-items: flex-end; flex-shrink: 0; }
+  .range { font-size: 0.7em; color: #666; margin-top: 3px; white-space: nowrap; }
   .desc { font-size: 0.8em; color: #888; display: block; margin-top: 2px; }
   .hint { font-size: 0.75em; color: #666; display: block; margin-top: 2px; font-style: italic; }
   h2 { color: #4caf50; border-bottom: 2px solid #4caf50; padding-bottom: 5px; margin-top: 25px; }
@@ -177,47 +179,47 @@ const char config_html[] PROGMEM = R"rawliteral(
 <div class="container">
   <form action="/save" method="GET">
     <h2>Charging Profile (16S)</h2>
-    <div class="row"><div class="text-group"><strong>Max Charge Amps</strong><span class="desc">Global bulk charging limit.</span></div>
+    <div class="row"><div class="text-group"><strong>!!LABEL_ca!!</strong><span class="desc">Global bulk charging limit.</span></div>
       !!IN_ca!!</div>
-    <div class="row"><div class="text-group"><strong>Start Taper Vpc</strong><span class="desc">Current begins to slow at this cell voltage.</span></div>
+    <div class="row"><div class="text-group"><strong>!!LABEL_cvt!!</strong><span class="desc">Current begins to slow at this cell voltage.</span></div>
       !!IN_cvt!!</div>
-    <div class="row"><div class="text-group"><strong>Target Trickle Vpc</strong><span class="desc">Voltage where balancing floor is reached.</span></div>
+    <div class="row"><div class="text-group"><strong>!!LABEL_cag!!</strong><span class="desc">Voltage where balancing floor is reached.</span></div>
       !!IN_cag!!</div>
-    <div class="row"><div class="text-group"><strong>Trickle Amps</strong><span class="desc">Constant current floor for balancing.</span></div>
+    <div class="row"><div class="text-group"><strong>!!LABEL_ta!!</strong><span class="desc">Constant current floor for balancing.</span></div>
       !!IN_ta!!</div>
-    <div class="row"><div class="text-group"><strong>Max Charge Vpc</strong><span class="desc">Absolute cell safety cutoff (Hard Floor).</span><span class="hint">ceiling 3.550 (Daly OV 3.65 minus 100 mV margin, #8)</span></div>
+    <div class="row"><div class="text-group"><strong>!!LABEL_cmv!!</strong><span class="desc">Absolute cell safety cutoff (Hard Floor).</span><span class="hint">max = Daly OV protection minus a 100 mV margin (#8)</span></div>
       !!IN_cmv!!</div>
 
     <h2 class="winter-h">Winter Force Charge</h2>
-    <div class="row"><div class="text-group"><strong>Maint. Start Vpc</strong><span class="desc">Trigger grid charge if any cell (smoothed) falls below this. Must be above Min Discharge Vpc, or the top-up can only start after discharge is already cut.</span></div>
+    <div class="row"><div class="text-group"><strong>!!LABEL_cmsv!!</strong><span class="desc">Trigger grid charge if any cell (smoothed) falls below this. Must be above Min Discharge Vpc, or the top-up can only start after discharge is already cut.</span></div>
       !!IN_cmsv!!</div>
-    <div class="row"><div class="text-group"><strong>Maint. Stop Vpc</strong><span class="desc">Stop grid charge when cells reach this.</span></div>
+    <div class="row"><div class="text-group"><strong>!!LABEL_cmpp!!</strong><span class="desc">Stop grid charge when cells reach this.</span></div>
       !!IN_cmpp!!</div>
-    <div class="row"><div class="text-group"><strong>Maintenance Amps</strong><span class="desc">Constant current drawn from grid.</span></div>
+    <div class="row"><div class="text-group"><strong>!!LABEL_mam!!</strong><span class="desc">Constant current drawn from grid.</span></div>
       !!IN_mam!!</div>
 
     <h2>Discharging Profile</h2>
-    <div class="row"><div class="text-group"><strong>Max Discharge Amps</strong><span class="desc">Peak household load limit.</span></div>
+    <div class="row"><div class="text-group"><strong>!!LABEL_da!!</strong><span class="desc">Peak household load limit.</span></div>
       !!IN_da!!</div>
-    <div class="row"><div class="text-group"><strong>Start Taper Vpc (D)</strong><span class="desc">Voltage where discharge current is restricted.</span></div>
+    <div class="row"><div class="text-group"><strong>!!LABEL_cdvt!!</strong><span class="desc">Voltage where discharge current is restricted.</span></div>
       !!IN_cdvt!!</div>
-    <div class="row"><div class="text-group"><strong>Target Limp Vpc</strong><span class="desc">Entry point for keeping-alive mode.</span></div>
+    <div class="row"><div class="text-group"><strong>!!LABEL_clag!!</strong><span class="desc">Entry point for keeping-alive mode.</span></div>
       !!IN_clag!!</div>
-    <div class="row"><div class="text-group"><strong>Limp Amps</strong><span class="desc">Minimum keeping-alive current floor.</span></div>
+    <div class="row"><div class="text-group"><strong>!!LABEL_ld_v2!!</strong><span class="desc">Minimum keeping-alive current floor.</span></div>
       !!IN_ld_v2!!</div>
-    <div class="row"><div class="text-group"><strong>Min Discharge Vpc</strong><span class="desc">Absolute floor to prevent cell reversal.</span></div>
+    <div class="row"><div class="text-group"><strong>!!LABEL_cmdv!!</strong><span class="desc">Absolute floor to prevent cell reversal.</span></div>
       !!IN_cmdv!!</div>
 
     <h2>System Tuning</h2>
-    <div class="row"><div class="text-group"><strong>Voltage Window</strong><span class="desc">Number of moving average samples (1-20).</span></div>
+    <div class="row"><div class="text-group"><strong>!!LABEL_vs!!</strong><span class="desc">Number of moving average samples.</span></div>
       !!IN_vs!!</div>
-    <div class="row"><div class="text-group"><strong>BMS timeout (s)</strong><span class="desc">Seconds without a complete BMS read (basic info and cell voltages) before the charge and discharge limits drop to 0 A. Counts from the older of the two reads.</span><span class="hint">default 60, typical 30&ndash;120</span></div>
+    <div class="row"><div class="text-group"><strong>!!LABEL_to!!</strong><span class="desc">Seconds without a complete BMS read (basic info and cell voltages) before the charge and discharge limits drop to 0 A. Counts from the older of the two reads.</span><span class="hint">typical 30&ndash;120</span></div>
       !!IN_to!!</div>
 
     <h2>Cell Spread Derating (#24)</h2>
-    <div class="row"><div class="text-group"><strong>Cell spread: start derating (mV)</strong><span class="desc">Below this spread the current limits are untouched. Above it they are reduced linearly, reaching trickle/limp current at the 'full derating' value below. Spread = highest raw cell voltage minus lowest.</span><span class="hint">default 60, typical 40&ndash;100</span></div>
+    <div class="row"><div class="text-group"><strong>!!LABEL_sps!!</strong><span class="desc">Below this spread the current limits are untouched. Above it they are reduced linearly, reaching trickle/limp current at the 'full derating' value below. Spread = highest raw cell voltage minus lowest.</span><span class="hint">typical 40&ndash;100</span></div>
       !!IN_sps!!</div>
-    <div class="row"><div class="text-group"><strong>Cell spread: full derating (mV)</strong><span class="desc">At or above this spread the current limits are held at trickle/limp current, same floor as the voltage alarm gate. Below it, derating eases back off toward the 'start derating' value above. Spread = highest raw cell voltage minus lowest.</span><span class="hint">default 150, typical 120&ndash;200</span></div>
+    <div class="row"><div class="text-group"><strong>!!LABEL_spm!!</strong><span class="desc">At or above this spread the current limits are held at trickle/limp current, same floor as the voltage alarm gate. Below it, derating eases back off toward the 'start derating' value above. Spread = highest raw cell voltage minus lowest.</span><span class="hint">typical 120&ndash;200</span></div>
       !!IN_spm!!</div>
 
     <button type="submit" class="save">SAVE & APPLY ALL CHANGES</button>

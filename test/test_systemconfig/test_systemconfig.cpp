@@ -80,22 +80,26 @@ static void test_table_rows_are_sane(void)
     }
 }
 
-static void test_every_field_has_exactly_one_input_on_config_page(void)
+static void test_every_field_has_exactly_one_label_and_input_on_config_page(void)
 {
-    // /config builds each <input> from its table row by replacing
-    // !!IN_<key>!!. A row without a placeholder would be unsettable; a
-    // stray placeholder would show up literally on the page.
+    // /config fills !!LABEL_<key>!! and !!IN_<key>!! from each table row.
+    // A row without them would be unsettable or unlabelled; a stray one
+    // would show up literally on the page.
     std::string html(config_html);
-    size_t placeholders = 0;
-    for (size_t pos = html.find("!!IN_"); pos != std::string::npos; pos = html.find("!!IN_", pos + 1))
-        placeholders++;
-    TEST_ASSERT_EQUAL(kNumConfigFields, placeholders);
-    for (const ConfigField &f : kConfigFields)
+    const char *kinds[] = {"!!LABEL_", "!!IN_"};
+    for (const char *kind : kinds)
     {
-        std::string ph = std::string("!!IN_") + f.key + "!!";
-        size_t first = html.find(ph);
-        TEST_ASSERT_TRUE_MESSAGE(first != std::string::npos, f.key);
-        TEST_ASSERT_TRUE_MESSAGE(html.find(ph, first + 1) == std::string::npos, f.key);
+        size_t placeholders = 0;
+        for (size_t pos = html.find(kind); pos != std::string::npos; pos = html.find(kind, pos + 1))
+            placeholders++;
+        TEST_ASSERT_EQUAL_MESSAGE(kNumConfigFields, placeholders, kind);
+        for (const ConfigField &f : kConfigFields)
+        {
+            std::string ph = std::string(kind) + f.key + "!!";
+            size_t first = html.find(ph);
+            TEST_ASSERT_TRUE_MESSAGE(first != std::string::npos, ph.c_str());
+            TEST_ASSERT_TRUE_MESSAGE(html.find(ph, first + 1) == std::string::npos, ph.c_str());
+        }
     }
     TEST_ASSERT_TRUE(html.find("type=\"number\"") == std::string::npos); // no hand-written inputs left
 }
@@ -231,13 +235,84 @@ static void test_maint_hysteresis_boundary(void)
     TEST_ASSERT_FALSE(SystemConfig::validate(cfg).maintHysteresisBad);
 }
 
-static void test_spread_order_boundary(void)
+static void test_equal_spread_thresholds_allowed(void)
+{
+    // Glideslope::spreadFactor() treats start >= full as a deliberate step
+    // (test_spread_factor_degenerate_config), so it is not a violation.
+    SystemConfig cfg = baseline();
+    cfg.spreadStartMv = cfg.spreadMaxMv = 100;
+    TEST_ASSERT_TRUE(SystemConfig::validate(cfg).ok());
+}
+
+// --- parseConfigField(): what /save stores ---
+
+static void test_parse_rejects_garbage_and_leaves_field_untouched(void)
+{
+    const ConfigField &f = kConfigFields[fieldIndex("ca")];
+    const char *bad[] = {"", "   ", "abc", "25o", "250A", "1,5", "--1"};
+    for (const char *in : bad)
+    {
+        SystemConfig cfg = baseline();
+        TEST_ASSERT_EQUAL_MESSAGE(PARSE_NOT_A_NUMBER, parseConfigField(cfg, f, in), in);
+        TEST_ASSERT_EQUAL_FLOAT(250.0f, cfg.maxChargeA);
+    }
+}
+
+static void test_parse_accepts_numbers_with_spaces(void)
 {
     SystemConfig cfg = baseline();
-    cfg.spreadStartMv = cfg.spreadMaxMv;
-    TEST_ASSERT_TRUE(SystemConfig::validate(cfg).spreadOrderBad);
-    cfg.spreadStartMv = cfg.spreadMaxMv - 1;
-    TEST_ASSERT_FALSE(SystemConfig::validate(cfg).spreadOrderBad);
+    TEST_ASSERT_EQUAL(PARSE_OK, parseConfigField(cfg, kConfigFields[fieldIndex("ca")], " 252.5 "));
+    TEST_ASSERT_EQUAL_FLOAT(252.5f, cfg.maxChargeA);
+    TEST_ASSERT_EQUAL(PARSE_OK, parseConfigField(cfg, kConfigFields[fieldIndex("sps")], "60"));
+    TEST_ASSERT_EQUAL(60, cfg.spreadStartMv);
+    TEST_ASSERT_EQUAL(PARSE_OK, parseConfigField(cfg, kConfigFields[fieldIndex("cmv")], "3.550"));
+    TEST_ASSERT_EQUAL_FLOAT(3.55f, cfg.cvMaxCharge);
+}
+
+static void test_parse_never_wraps(void)
+{
+    // 2026-09-26: "-60" for the spread start was stored as 65476.
+    SystemConfig cfg = baseline();
+    const ConfigField &sps = kConfigFields[fieldIndex("sps")];
+    TEST_ASSERT_EQUAL(PARSE_OUT_OF_RANGE, parseConfigField(cfg, sps, "-60"));
+    TEST_ASSERT_EQUAL(PARSE_OUT_OF_RANGE, parseConfigField(cfg, sps, "65596")); // would wrap to 60
+    TEST_ASSERT_EQUAL(PARSE_OUT_OF_RANGE, parseConfigField(cfg, sps, "99999999999999999999"));
+    TEST_ASSERT_EQUAL(60, cfg.spreadStartMv);
+    TEST_ASSERT_EQUAL(PARSE_OUT_OF_RANGE, parseConfigField(cfg, kConfigFields[fieldIndex("to")], "-1"));
+    TEST_ASSERT_EQUAL(60, cfg.bmsTimeout);
+}
+
+static void test_parse_integer_field_rejects_fraction(void)
+{
+    SystemConfig cfg = baseline();
+    TEST_ASSERT_EQUAL(PARSE_NOT_A_NUMBER, parseConfigField(cfg, kConfigFields[fieldIndex("vs")], "12.5"));
+    TEST_ASSERT_EQUAL(12, cfg.vSamples);
+}
+
+static void test_parse_range_and_nonfinite(void)
+{
+    SystemConfig cfg = baseline();
+    const ConfigField &cmv = kConfigFields[fieldIndex("cmv")];
+    TEST_ASSERT_EQUAL(PARSE_OUT_OF_RANGE, parseConfigField(cfg, cmv, "3.5505"));
+    TEST_ASSERT_EQUAL(PARSE_OUT_OF_RANGE, parseConfigField(cfg, cmv, "3.5501"));
+    TEST_ASSERT_EQUAL(PARSE_OUT_OF_RANGE, parseConfigField(cfg, cmv, "nan"));
+    TEST_ASSERT_EQUAL(PARSE_OUT_OF_RANGE, parseConfigField(cfg, cmv, "1e39"));
+    TEST_ASSERT_EQUAL_FLOAT(3.55f, cfg.cvMaxCharge);
+}
+
+// --- storeConfigField(): what loadConfig() keeps from NVS ---
+
+static void test_store_checks_before_narrowing(void)
+{
+    // A stored uint32 of 65596 must not become 60 by truncation.
+    SystemConfig cfg = baseline();
+    TEST_ASSERT_FALSE(storeConfigField(cfg, kConfigFields[fieldIndex("sps")], 65596.0));
+    TEST_ASSERT_FALSE(storeConfigField(cfg, kConfigFields[fieldIndex("sps")], 65476.0));
+    TEST_ASSERT_EQUAL(60, cfg.spreadStartMv);
+    TEST_ASSERT_FALSE(storeConfigField(cfg, kConfigFields[fieldIndex("ca")], NAN));
+    TEST_ASSERT_EQUAL_FLOAT(250.0f, cfg.maxChargeA);
+    TEST_ASSERT_TRUE(storeConfigField(cfg, kConfigFields[fieldIndex("ca")], 300.0));
+    TEST_ASSERT_EQUAL_FLOAT(300.0f, cfg.maxChargeA);
 }
 
 static void test_combined_violations_all_surface(void)
@@ -264,7 +339,7 @@ int main(int, char **)
     UNITY_BEGIN();
     RUN_TEST(test_table_defaults_pass_validation);
     RUN_TEST(test_table_rows_are_sane);
-    RUN_TEST(test_every_field_has_exactly_one_input_on_config_page);
+    RUN_TEST(test_every_field_has_exactly_one_label_and_input_on_config_page);
     RUN_TEST(test_every_field_rejects_just_outside_its_range);
     RUN_TEST(test_charge_headroom_boundary);
     RUN_TEST(test_negative_current_rejected_zero_allowed);
@@ -274,7 +349,13 @@ int main(int, char **)
     RUN_TEST(test_charge_taper_order_boundary);
     RUN_TEST(test_discharge_taper_order_boundary);
     RUN_TEST(test_maint_hysteresis_boundary);
-    RUN_TEST(test_spread_order_boundary);
+    RUN_TEST(test_equal_spread_thresholds_allowed);
+    RUN_TEST(test_parse_rejects_garbage_and_leaves_field_untouched);
+    RUN_TEST(test_parse_accepts_numbers_with_spaces);
+    RUN_TEST(test_parse_never_wraps);
+    RUN_TEST(test_parse_integer_field_rejects_fraction);
+    RUN_TEST(test_parse_range_and_nonfinite);
+    RUN_TEST(test_store_checks_before_narrowing);
     RUN_TEST(test_combined_violations_all_surface);
     return UNITY_END();
 }

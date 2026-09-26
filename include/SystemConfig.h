@@ -2,6 +2,8 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <math.h>
+#include <stdlib.h>
+#include <errno.h>
 
 // The Daly BMS's own cell overvoltage protection on this pack (#8, confirmed
 // by the operator) - cvMaxCharge must stay below this with real margin, since
@@ -63,11 +65,12 @@ struct SystemConfig {
 
 // One row per setting: THE place where a setting's NVS key / form field
 // name, default, allowed range, display precision, step and label live.
-// WebDashboard uses it for loadConfig() (defaults), saveConfig() (parsing),
-// the /config page (each input is generated from its row, so the browser
-// enforces the same min/max) and validate() below checks every field
-// against it. Add a setting = add a row (plus a `!!IN_<key>!!` placeholder
-// in config_html). The ranges are sanity limits against typos and
+// WebDashboard uses it for loadConfig() (defaults, and replacing a stored
+// value outside the range), saveConfig() (parseConfigField() below) and the
+// /config page (label, and the <input> with the same min/max/step, are
+// generated from the row); validate() below checks every field against it.
+// Add a setting = add a row, plus `<strong>!!LABEL_<key>!!</strong>` and
+// `!!IN_<key>!!` in config_html (test_systemconfig fails otherwise). The ranges are sanity limits against typos and
 // rolled-over values (-60 mV stored as 65476 once switched spread derating
 // off, #61), not tuning advice.
 struct ConfigField
@@ -86,7 +89,7 @@ struct ConfigField
     float max; // inclusive
     uint8_t decimals; // /config display precision (floats)
     const char *step; // HTML step attribute
-    const char *label; // as on the /config page
+    const char *label; // the /config page shows this (<strong>!!LABEL_<key>!!</strong>)
     const char *unit;
 };
 
@@ -94,7 +97,7 @@ constexpr ConfigField kConfigFields[] = {
     // key     kind                     member                                     default  min                 max                                    dec step     label                          unit
     {"ca", ConfigField::KIND_FLOAT, offsetof(SystemConfig, maxChargeA), 250.0f, 0.0f, kMaxCurrentA, 0, "any", "Max Charge Amps", "A"},
     {"cvt", ConfigField::KIND_FLOAT, offsetof(SystemConfig, cvStartTaper), 3.375f, kMinCellThresholdV, kDalyOvervoltageV, 3, "0.001", "Start Taper Vpc", "V"},
-    {"cag", ConfigField::KIND_FLOAT, offsetof(SystemConfig, cvHighAlarmGate), 3.425f, kMinCellThresholdV, kDalyOvervoltageV, 3, "0.001", "High Alarm Gate Vpc", "V"},
+    {"cag", ConfigField::KIND_FLOAT, offsetof(SystemConfig, cvHighAlarmGate), 3.425f, kMinCellThresholdV, kDalyOvervoltageV, 3, "0.001", "Target Trickle Vpc", "V"},
     {"ta", ConfigField::KIND_FLOAT, offsetof(SystemConfig, trickleA), 2.0f, 0.0f, kMaxCurrentA, 1, "any", "Trickle Amps", "A"},
     // Max is the #8 headroom rule: Daly OVP minus the minimum margin. In
     // binary32 3.65f - 0.10f = 3.5500002 > 3.55f, so 3.550 passes and
@@ -104,9 +107,9 @@ constexpr ConfigField kConfigFields[] = {
     {"cmpp", ConfigField::KIND_FLOAT, offsetof(SystemConfig, cvMaintStop), 3.220f, kMinCellThresholdV, kDalyOvervoltageV, 3, "0.001", "Maint. Stop Vpc", "V"},
     {"mam", ConfigField::KIND_FLOAT, offsetof(SystemConfig, maintAmps), 20.0f, 0.0f, kMaxCurrentA, 0, "any", "Maintenance Amps", "A"},
     {"da", ConfigField::KIND_FLOAT, offsetof(SystemConfig, maxDischargeA), 500.0f, 0.0f, kMaxCurrentA, 0, "any", "Max Discharge Amps", "A"},
-    {"cdvt", ConfigField::KIND_FLOAT, offsetof(SystemConfig, cvStartDTaper), 3.100f, kMinCellThresholdV, kDalyOvervoltageV, 3, "0.001", "Start D-Taper Vpc", "V"},
-    {"clag", ConfigField::KIND_FLOAT, offsetof(SystemConfig, cvLowAlarmGate), 3.065f, kMinCellThresholdV, kDalyOvervoltageV, 3, "0.001", "Low Alarm Gate Vpc", "V"},
-    {"ld_v2", ConfigField::KIND_FLOAT, offsetof(SystemConfig, limpDischargeA), 15.0f, 0.0f, kMaxCurrentA, 0, "any", "Limp Discharge Amps", "A"},
+    {"cdvt", ConfigField::KIND_FLOAT, offsetof(SystemConfig, cvStartDTaper), 3.100f, kMinCellThresholdV, kDalyOvervoltageV, 3, "0.001", "Start Taper Vpc (D)", "V"},
+    {"clag", ConfigField::KIND_FLOAT, offsetof(SystemConfig, cvLowAlarmGate), 3.065f, kMinCellThresholdV, kDalyOvervoltageV, 3, "0.001", "Target Limp Vpc", "V"},
+    {"ld_v2", ConfigField::KIND_FLOAT, offsetof(SystemConfig, limpDischargeA), 15.0f, 0.0f, kMaxCurrentA, 0, "any", "Limp Amps", "A"},
     {"cmdv", ConfigField::KIND_FLOAT, offsetof(SystemConfig, cvMinDischarge), 3.000f, kMinCellThresholdV, kDalyOvervoltageV, 3, "0.001", "Min Discharge Vpc", "V"},
     {"vs", ConfigField::KIND_INT, offsetof(SystemConfig, vSamples), 12, 1, kMaxVSamples, 0, "1", "Voltage Window", "samples"},
     // A negative timeout used to become a ~49-day window in isFresh(),
@@ -157,13 +160,11 @@ struct SystemConfig::ValidationResult
     bool dischargeTaperOrderBad = false;
     // Maintenance hysteresis (#12): stop above start, or it never releases.
     bool maintHysteresisBad = false;
-    // Spread derating (#24): start below full.
-    bool spreadOrderBad = false;
 
     bool ok() const
     {
         return outOfRange == 0 && !hasNaN && !maintStartBelowMinDischarge && !chargeTaperOrderBad &&
-               !dischargeTaperOrderBad && !maintHysteresisBad && !spreadOrderBad;
+               !dischargeTaperOrderBad && !maintHysteresisBad;
     }
 };
 
@@ -188,7 +189,69 @@ inline SystemConfig::ValidationResult SystemConfig::validate(const SystemConfig 
     r.dischargeTaperOrderBad =
         !(cfg.cvStartDTaper > cfg.cvLowAlarmGate && cfg.cvLowAlarmGate > cfg.cvMinDischarge);
     r.maintHysteresisBad = cfg.cvMaintStart >= cfg.cvMaintStop;
-    r.spreadOrderBad = cfg.spreadStartMv >= cfg.spreadMaxMv;
 
     return r;
+}
+
+// Stores v into cfg's field if it is finite and within the row's
+// [min, max]; otherwise leaves the field untouched and returns false.
+// Integers are range-checked here, before they are narrowed, so nothing
+// can wrap (-60 into a uint16_t was 65476, #61).
+inline bool storeConfigField(SystemConfig &cfg, const ConfigField &f, double v)
+{
+    if (!(v >= (double)f.min && v <= (double)f.max)) // false for NaN too
+        return false;
+    uint8_t *m = reinterpret_cast<uint8_t *>(&cfg) + f.offset;
+    switch (f.kind)
+    {
+    case ConfigField::KIND_INT:
+        *reinterpret_cast<int *>(m) = (int)v;
+        break;
+    case ConfigField::KIND_UINT16:
+        *reinterpret_cast<uint16_t *>(m) = (uint16_t)v;
+        break;
+    default:
+        // min/max are floats themselves, so rounding v to float can't
+        // carry it across either limit.
+        *reinterpret_cast<float *>(m) = (float)v;
+        break;
+    }
+    return true;
+}
+
+enum ParseResult
+{
+    PARSE_OK,
+    PARSE_NOT_A_NUMBER,
+    PARSE_OUT_OF_RANGE
+};
+
+// Parses one /save form value into cfg's field (#61). The old
+// String::toInt()/toFloat() returned 0 for an empty or non-numeric field
+// and toInt() into a uint16_t wrapped. Here the whole string (surrounding
+// spaces aside) must be a number - an integer for int fields - and it must
+// be within the row's range; otherwise the field is left untouched.
+inline ParseResult parseConfigField(SystemConfig &cfg, const ConfigField &f, const char *str)
+{
+    while (*str == ' ')
+        str++;
+    if (*str == '\0')
+        return PARSE_NOT_A_NUMBER;
+    char *end = nullptr;
+    errno = 0;
+    double v;
+    if (f.kind == ConfigField::KIND_FLOAT)
+        v = strtod(str, &end);
+    else
+        v = (double)strtol(str, &end, 10);
+    bool overflow = errno == ERANGE;
+    if (end == str)
+        return PARSE_NOT_A_NUMBER;
+    while (*end == ' ')
+        end++;
+    if (*end != '\0')
+        return PARSE_NOT_A_NUMBER;
+    if (overflow || !storeConfigField(cfg, f, v))
+        return PARSE_OUT_OF_RANGE;
+    return PARSE_OK;
 }

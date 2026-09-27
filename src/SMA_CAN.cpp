@@ -75,7 +75,9 @@ void SMA_CAN::checkBusHealth()
 {
     if (_driverDown)
     {
-        if (SMAFrames::shouldRetryBusRecovery(millis(), _driverDown, _recoveryTimer))
+        // Strict >, and unsigned subtraction keeps this correct across a
+        // millis() wraparound (~49 days uptime).
+        if (millis() - _recoveryTimer > SMAFrames::kBusRecoveryBackoffMs)
         {
             if (!_startFailed)
                 logTo(_debugCb, "[CAN] Reinstalling TWAI Driver...\n");
@@ -101,9 +103,6 @@ void SMA_CAN::checkBusHealth()
 
 void SMA_CAN::sendFrame(uint32_t id, uint8_t dlc, const uint8_t *data)
 {
-    if (_driverDown)
-        return;
-
     twai_status_info_t twai_stat;
     if (twai_get_status_info(&twai_stat) != ESP_OK || twai_stat.state != TWAI_STATE_RUNNING)
     {
@@ -123,7 +122,7 @@ void SMA_CAN::sendFrame(uint32_t id, uint8_t dlc, const uint8_t *data)
     twai_transmit(&msg, 0);
 }
 
-void SMA_CAN::sendStatus(const SMATxData &data)
+void SMA_CAN::sendStatus(const SMAFrames::SMATxData &data)
 {
     if (_driverDown)
         return;

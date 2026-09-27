@@ -57,7 +57,7 @@ namespace Glideslope
         return (uint16_t)deci;
     }
 
-    // Derating factor from the raw (max-min) cell spread (#24). A weak
+    // Derating factor from the smoothed (max-min) cell spread (#24). A weak
     // cell's IR drop is proportional to current, not state of charge, so a
     // voltage threshold alone reacts late (see #8 - Cell 16's offset grows
     // with current, not SOC); this turns the spread itself into a current
@@ -65,6 +65,11 @@ namespace Glideslope
     // maxMv. maxMv <= startMv is a degenerate config (e.g. both left at 0,
     // or set the wrong way round) - treated as a step (1.0 below startMv,
     // 0.0 at/above it) rather than dividing by a non-positive span.
+    // Deliberately fed the smoothed spread, not the raw one: unlike the
+    // hard cutoff/alarm gate (which must react to a single spiking read
+    // immediately, see docs/adr/0001-...md), the spread factor only needs
+    // to track a cell's IR-drop trend, and smoothing it avoids jittering
+    // the reported CCL/DCL on ordinary per-read noise.
     inline float spreadFactor(uint16_t spreadMv, uint16_t startMv, uint16_t maxMv)
     {
         if (maxMv <= startMv)
@@ -123,10 +128,10 @@ namespace Glideslope
     // gate, the taper can't give back more than trickle even if rawMaxV
     // has since dropped below it - intentional, not a bug.
     //
-    // spreadMv (#24) derates the taper/full-current result via
-    // spreadFactor(), clamped back up to trickleA; never applied to the
-    // hard 0A/gate-trickle branches (already gated by the weak cell's own
-    // voltage) or in maintenance mode.
+    // spreadMv (#24, smoothed - see spreadFactor()'s comment) derates the
+    // taper/full-current result via spreadFactor(), clamped back up to
+    // trickleA; never applied to the hard 0A/gate-trickle branches (already
+    // gated by the weak cell's own raw voltage) or in maintenance mode.
     inline uint16_t calculateCCL(const SystemConfig &cfg, float smoothedMaxV, float rawMaxV, uint16_t spreadMv, bool bmsFresh, bool maintenanceActive)
     {
         if (!bmsFresh)
@@ -159,8 +164,8 @@ namespace Glideslope
 
     // Discharge current limit - mirror image of calculateCCL. See its
     // comment for why the cutoff/gate use rawMinV while the taper uses
-    // smoothedMinV, and for spreadMv (#24) - derates the taper/full-current
-    // result only, clamped back up to limpDischargeA.
+    // smoothedMinV, and for spreadMv (#24, smoothed) - derates the
+    // taper/full-current result only, clamped back up to limpDischargeA.
     inline uint16_t calculateDCL(const SystemConfig &cfg, float smoothedMinV, float rawMinV, uint16_t spreadMv, bool bmsFresh, bool maintenanceActive)
     {
         if (!bmsFresh)

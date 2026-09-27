@@ -29,6 +29,9 @@ static void test_first_update_returns_raw_exactly_and_reseeds(void)
     TEST_ASSERT_EQUAL_FLOAT(3.30f, r.rawMinV);
     TEST_ASSERT_EQUAL_FLOAT(3.45f, r.rawMaxV);
     TEST_ASSERT_EQUAL_UINT16(150, r.rawSpreadMv);
+    // First call reseeds the whole window from this read, so smoothed ==
+    // raw here.
+    TEST_ASSERT_EQUAL_UINT16(150, r.spreadMv);
 
     // avgV now divides by the cells actually read (16 here): sum of
     // 3300..3450 in 10mV steps = 16*3300 + 10*(0+..+15) = 52800 + 1200 =
@@ -196,6 +199,29 @@ static void test_n_less_than_max_cells_handled(void)
     TEST_ASSERT_EQUAL_FLOAT((3100 + 3200 + 3050 + 3150) / 4.0f / 1000.0f, r.avgV);
 }
 
+// --- Smoothed spread lags the raw spread during a transition (drives
+// --- Glideslope::spreadFactor(); rawSpreadMv is diagnostics-only) ---
+
+static void test_smoothed_spread_lags_raw_spread_during_transition(void)
+{
+    CellSmoother sm;
+    uint16_t seed[2] = {3000, 3000};
+    uint16_t step[2] = {3000, 3400};
+
+    CellSmoother::Result r = sm.update(seed, 2, 4);
+    TEST_ASSERT_TRUE(r.reseeded);
+    TEST_ASSERT_EQUAL_UINT16(0, r.spreadMv);
+    TEST_ASSERT_EQUAL_UINT16(0, r.rawSpreadMv);
+
+    // One slot of a 4-sample window now holds the step: cell1's smoothed
+    // value is (3400+3*3000)/4=3100, so smoothed spread is only 100mV even
+    // though this read's raw spread jumped to 400mV.
+    r = sm.update(step, 2, 4);
+    TEST_ASSERT_FALSE(r.reseeded);
+    TEST_ASSERT_EQUAL_UINT16(400, r.rawSpreadMv);
+    TEST_ASSERT_EQUAL_UINT16(100, r.spreadMv);
+}
+
 // --- n > kPackCells is clamped, not read out of bounds ---
 
 static void test_n_greater_than_max_cells_clamped(void)
@@ -241,6 +267,7 @@ int main(int, char **)
     RUN_TEST(test_shrink_then_grow_does_not_pull_stale_values_back);
     RUN_TEST(test_raw_min_max_spread_with_16_distinct_cells);
     RUN_TEST(test_n_less_than_max_cells_handled);
+    RUN_TEST(test_smoothed_spread_lags_raw_spread_during_transition);
     RUN_TEST(test_n_greater_than_max_cells_clamped);
     RUN_TEST(test_window_size_clamped_to_valid_range);
     return UNITY_END();

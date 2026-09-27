@@ -22,6 +22,7 @@ public:
         float minV = 0.0f, maxV = 0.0f, avgV = 0.0f;
         float rawMinV = 0.0f, rawMaxV = 0.0f;
         uint16_t rawSpreadMv = 0;
+        uint16_t spreadMv = 0;
         int cells = 0;
         bool reseeded = false;
     };
@@ -102,8 +103,15 @@ public:
         r.rawMaxV = rawMaxMv / 1000.0f;
 
         // Raw spread, from the same unsmoothed read as rawMin/rawMax above -
-        // drives Glideslope::spreadFactor().
+        // kept for diagnostics/telemetry only.
         r.rawSpreadMv = rawMaxMv - rawMinMv;
+
+        // Smoothed spread, from localMin/localMaxMv above - drives
+        // Glideslope::spreadFactor(). Unlike the hard cutoff/alarm gate
+        // (raw voltage, reacts to a spike immediately), the spread-derating
+        // factor is deliberately smoothed to avoid jittering the reported
+        // CCL/DCL on a single noisy read.
+        r.spreadMv = localMaxMv - localMinMv;
 
         // Increment circular buffer index after processing all cells, once
         // per update() call, not per-cell.

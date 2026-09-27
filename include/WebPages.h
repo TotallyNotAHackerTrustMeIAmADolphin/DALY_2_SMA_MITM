@@ -245,9 +245,9 @@ const char config_html[] PROGMEM = HTML_HEAD("Settings") R"rawliteral(
       !!IN_to!!</div>
 
     <h2>Cell Spread Derating (#24)</h2>
-    <div class="row"><div class="text-group"><strong>!!LABEL_sps!!</strong><span class="desc">Below this spread the current limits are untouched. Above it they are reduced linearly, reaching trickle/limp current at the 'full derating' value below. Spread = highest raw cell voltage minus lowest.</span><span class="hint">typical 40&ndash;100</span></div>
+    <div class="row"><div class="text-group"><strong>!!LABEL_sps!!</strong><span class="desc">Below this spread the current limits are untouched. Above it they are reduced linearly, reaching trickle/limp current at the 'full derating' value below. Spread = highest smoothed cell voltage minus lowest.</span><span class="hint">typical 40&ndash;100</span></div>
       !!IN_sps!!</div>
-    <div class="row"><div class="text-group"><strong>!!LABEL_spm!!</strong><span class="desc">At or above this spread the current limits are held at trickle/limp current, same floor as the voltage alarm gate. Below it, derating eases back off toward the 'start derating' value above. Spread = highest raw cell voltage minus lowest.</span><span class="hint">typical 120&ndash;200</span></div>
+    <div class="row"><div class="text-group"><strong>!!LABEL_spm!!</strong><span class="desc">At or above this spread the current limits are held at trickle/limp current, same floor as the voltage alarm gate. Below it, derating eases back off toward the 'start derating' value above. Spread = highest smoothed cell voltage minus lowest.</span><span class="hint">typical 120&ndash;200</span></div>
       !!IN_spm!!</div>
 
     <button type="submit" class="save">SAVE & APPLY ALL CHANGES</button>

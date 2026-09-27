@@ -208,7 +208,7 @@ struct SystemConfig
     // unsigned wraparound, disabling the stale-BMS 0 A fail-safe - the min
     // above guards against it.
     Setting<int> bmsTimeout{"to", "BMS timeout", "s", 5, 600, 60, 0, "1"};
-    // Raw (max-min) cell spread at which current-limit derating starts
+    // Smoothed (max-min) cell spread at which current-limit derating starts
     // (#24), and at which it bottoms out at trickle/limp current. Above
     // ~1000 mV a threshold can never be reached, which would switch the
     // derating off in effect. start >= full is allowed: spreadFactor()

@@ -19,7 +19,7 @@ namespace TelemetryJson
                   d.packVoltage, d.avgCellVoltage, d.minCellVoltage, d.maxCellVoltage,
                   d.minCellVoltageRaw, d.maxCellVoltageRaw, d.packCurrent, d.requestedCurrent, d.packSOC,
                   d.smaChargeMode, (int)d.maintenanceActive, (int)d.forceCharge, (int)d.isResetting,
-                  (unsigned)d.cellSpreadRawMv, d.derateFactor);
+                  (unsigned)d.cellSpreadMv, d.derateFactor);
 
         size_t n = d.cellVoltages.size();
         if (n > (size_t)kPackCells)

@@ -16,7 +16,7 @@ static const char *kExpectedHeader =
     "Cell1,Cell2,Cell3,Cell4,Cell5,Cell6,Cell7,Cell8,Cell9,Cell10,Cell11,"
     "Cell12,Cell13,Cell14,Cell15,Cell16,"
     "ChargeMOS,DischargeMOS,BmsProtection,CellOV1,CellOV2,PackOV1,PackOV2,"
-    "MinCellRaw,MaxCellRaw,RawSpreadMv,Derate";
+    "MinCellRaw,MaxCellRaw,RawSpreadMv,Derate,SpreadMv";
 
 static int countCommas(const char *csv)
 {
@@ -42,6 +42,7 @@ static DashboardData makeSample()
     for (int i = 0; i < 16; i++)
         d.cellVoltages.push_back(3.300f + (float)i * 0.010f);
     d.cellSpreadRawMv = 95;
+    d.cellSpreadMv = 80;
     d.derateFactor = 0.73f;
     d.packCurrent = -12.5f;
     d.packSOC = 87.5f;
@@ -122,12 +123,13 @@ static void test_index_unknown_name(void)
 // MaxCellRaw %.3f 3.360   -> "3.360"
 // RawSpreadMv %u  95      -> "95"
 // Derate      %.2f 0.73   -> "0.73"
+// SpreadMv    %u  80      -> "80"
 static const char *kExpectedRow =
     "52.35,-12.50,87.5,3.201,3.349,45.0,Bulk,1,0,1,"
     "3.300,3.310,3.320,3.330,3.340,3.350,3.360,3.370,3.380,3.390,3.400,"
     "3.410,3.420,3.430,3.440,3.450,"
     "1,0,0,0,0,0,0,"
-    "3.195,3.360,95,0.73";
+    "3.195,3.360,95,0.73,80";
 
 static void test_sample_formats_to_known_row(void)
 {
@@ -187,7 +189,7 @@ static void test_default_constructed_row(void)
     TEST_ASSERT_TRUE(formatRow(d, row, sizeof(row)) > 0);
     TEST_ASSERT_EQUAL_STRING("0.00,0.00,0.0,0.000,0.000,0.0,Unknown,0,0,0"
                              ",,,,,,,,,,,,,,,,,"
-                             "0,0,0,0,0,0,0,0.000,0.000,0,1.00",
+                             "0,0,0,0,0,0,0,0.000,0.000,0,1.00,0",
                              row);
 }
 

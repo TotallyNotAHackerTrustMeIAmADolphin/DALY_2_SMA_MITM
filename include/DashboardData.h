@@ -15,6 +15,10 @@
 constexpr int16_t kFixedPackTempDeciC = 220;
 
 struct DashboardData {
+    // Smoothed (cfg.vSamples window, via ScalarSmoother.h) pack voltage -
+    // feeds no safety decision (Glideslope only ever reads per-cell
+    // voltages), smoothed purely so the dashboard/CSV graphs aren't jittery.
+    // No raw variant is kept; see ScalarSmoother.h.
     float packVoltage = 0.0f;
     float avgCellVoltage = 0.0f;
     float minCellVoltage = 0.0f;
@@ -25,13 +29,21 @@ struct DashboardData {
     float maxCellVoltageRaw = 0.0f;
     std::vector<float> cellVoltages;
 
-    // Raw max-min cell spread in mV, from the same latest read as
-    // minCellVoltageRaw/maxCellVoltageRaw - drives Glideslope::spreadFactor().
-    // derateFactor mirrors that factor (1.0 = no derating) for the dashboard.
+    // Smoothed max-min cell spread in mV (averaged over cfg.vSamples reads,
+    // same window as minCellVoltage/maxCellVoltage) - drives
+    // Glideslope::spreadFactor(). derateFactor mirrors that factor (1.0 = no
+    // derating) for the dashboard.
+    uint16_t cellSpreadMv = 0;
+    // Raw (unsmoothed) max-min cell spread from the latest BMS read, same
+    // read as minCellVoltageRaw/maxCellVoltageRaw. Diagnostics/telemetry
+    // only - does not drive derating.
     uint16_t cellSpreadRawMv = 0;
     float derateFactor = 1.0f;
 
+    // Smoothed the same way as packVoltage above.
     float packCurrent = 0.0f;
+    // Left raw (unsmoothed) - the Daly's own SOC estimate is already smooth,
+    // and BmsEvents' SOC-jump detector needs the true reading anyway.
     float packSOC = 0.0f;
     float requestedCurrent = 0.0f;
     const char *smaChargeMode = "Unknown";

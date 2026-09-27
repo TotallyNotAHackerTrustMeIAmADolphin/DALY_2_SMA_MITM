@@ -24,7 +24,7 @@ static DashboardData sample()
     d.forceCharge = true;
     d.maintenanceActive = false;
     d.isResetting = false;
-    d.cellSpreadRawMv = 45;
+    d.cellSpreadMv = 45;
     d.derateFactor = 0.85f;
     float cells[16] = {3.201f, 3.210f, 3.215f, 3.220f, 3.225f, 3.230f, 3.235f, 3.240f,
                         3.245f, 3.250f, 3.255f, 3.260f, 3.265f, 3.270f, 3.275f, 3.350f};

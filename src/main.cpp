@@ -9,6 +9,7 @@
 #include "pin_config.h"
 #include "DashboardData.h"
 #include "CellSmoother.h"
+#include "ScalarSmoother.h"
 #include "StatusFrame.h"
 #include "BmsEvents.h"
 #include "DalyRS485.h"
@@ -52,6 +53,10 @@ volatile bool netReady = false;
 
 // Per-cell moving-average smoother (bmsTask only) - see CellSmoother.h.
 CellSmoother cellSmoother;
+// Pack voltage/current moving-average smoothers (bmsTask only) - display/
+// telemetry only, see ScalarSmoother.h for why no raw variant is kept.
+ScalarSmoother packVoltageSmoother;
+ScalarSmoother packCurrentSmoother;
 
 // Cross-task control state, guarded by dataMutex like currentData/cfg -
 // see StatusFrame::BmsLink / UiCommands for who writes what.
@@ -206,15 +211,23 @@ static void pollBasicInfo(BmsPollState &st)
 
   // A Daly BMS recalibrates SOC to 100% on a "charge full" condition (or
   // occasionally jumps for other reasons); flag that as an event so an
-  // abrupt CCL drop at the SMA can be lined up against it.
+  // abrupt CCL drop at the SMA can be lined up against it. Runs on the raw
+  // read, before the smoothing below, so a real jump can't be masked by it.
   BmsEvents::Events ev = BmsEvents::decide(st.events, &info, nullptr, nullptr);
   if (ev.socJumped)
     netLog("[BMS] SOC jumped %.1f -> %.1f %% (Daly recalibration?)\n", ev.socFrom, ev.socTo);
 
+  // Pack voltage/current feed no safety decision (Glideslope only ever
+  // reads per-cell voltages) - smoothed with the same cfg.vSamples window
+  // as the cell filter purely so the dashboard/CSV graphs aren't jittery.
+  // SOC is left raw: the Daly's own SOC estimate is already smooth.
+  float smoothedVoltage = packVoltageSmoother.update(info.packVoltage, st.vSamples);
+  float smoothedCurrent = packCurrentSmoother.update(info.packCurrent, st.vSamples);
+
   if (MutexLock lock{dataMutex, kBmsStoreLockTimeout})
   {
-    currentData.packVoltage = info.packVoltage;
-    currentData.packCurrent = info.packCurrent;
+    currentData.packVoltage = smoothedVoltage;
+    currentData.packCurrent = smoothedCurrent;
     currentData.packSOC = info.packSOC;
     bmsLink.lastBasicInfoMs = millis();
     bmsLink.haveBasicInfo = true;
@@ -245,8 +258,9 @@ static void pollCells(BmsPollState &st)
     currentData.maxCellVoltage = r.maxV;
     currentData.minCellVoltageRaw = r.rawMinV;
     currentData.maxCellVoltageRaw = r.rawMaxV;
-    // Raw spread (#24), from the same unsmoothed read as rawMin/rawMax -
-    // drives Glideslope::spreadFactor().
+    // Smoothed spread (#24) drives Glideslope::spreadFactor(); raw spread is
+    // diagnostics/telemetry only.
+    currentData.cellSpreadMv = r.spreadMv;
     currentData.cellSpreadRawMv = r.rawSpreadMv;
     currentData.cellVoltages.assign(r.smoothedV, r.smoothedV + r.cells);
     bmsLink.lastCellMs = millis();

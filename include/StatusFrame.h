@@ -130,8 +130,8 @@ namespace StatusFrame
             v.maintenanceActive = maintenanceActive;
             v.isResetting = isResetting;
 
-            v.ccl = Glideslope::calculateCCL(cfg, data.maxCellVoltage, data.maxCellVoltageRaw, data.cellSpreadRawMv, fresh, maintenanceActive);
-            v.dcl = Glideslope::calculateDCL(cfg, data.minCellVoltage, data.minCellVoltageRaw, data.cellSpreadRawMv, fresh, maintenanceActive);
+            v.ccl = Glideslope::calculateCCL(cfg, data.maxCellVoltage, data.maxCellVoltageRaw, data.cellSpreadMv, fresh, maintenanceActive);
+            v.dcl = Glideslope::calculateDCL(cfg, data.minCellVoltage, data.minCellVoltageRaw, data.cellSpreadMv, fresh, maintenanceActive);
             // Maintenance: fixed absorption target, never above the normal CVL (#60).
             uint16_t normalCvl = Glideslope::toDeciVolts(cfg.cvMaxCharge * kPackCells);
             v.cvl = maintenanceActive ? std::min(kMaintCvlDeciV, normalCvl) : normalCvl;
@@ -203,7 +203,7 @@ namespace StatusFrame
 
         // Also computed inside calculateCCL/DCL; mirrored here for the
         // dashboard and the derating events only.
-        float derateFactor = Glideslope::spreadFactor(data.cellSpreadRawMv, cfg.spreadStartMv, cfg.spreadMaxMv);
+        float derateFactor = Glideslope::spreadFactor(data.cellSpreadMv, cfg.spreadStartMv, cfg.spreadMaxMv);
 
         d.sendFrames = true;
         d.values = detail::buildValues(cfg, data, fresh, maintenanceActive, isResetting);
@@ -218,10 +218,10 @@ namespace StatusFrame
         }
 
         detail::trackFreshness(st, fresh, d.events.wentStale, d.events.freshAgain);
-        detail::trackDerating(st, derateFactor, data.cellSpreadRawMv, cfg,
+        detail::trackDerating(st, derateFactor, data.cellSpreadMv, cfg,
                               d.events.deratingStarted, d.events.deratingEnded);
 
-        d.events.spreadMv = data.cellSpreadRawMv;
+        d.events.spreadMv = data.cellSpreadMv;
         d.events.deratePercent = (uint8_t)round(derateFactor * 100.0f);
         d.events.bmsTimeoutS = cfg.bmsTimeout;
 

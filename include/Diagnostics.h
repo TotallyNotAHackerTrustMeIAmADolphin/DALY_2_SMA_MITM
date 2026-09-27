@@ -17,13 +17,8 @@ public:
     // Attach a logging sink (netLogLine). Call before any other method here.
     static void setDebugCallback(LogSink cb);
 
-    static const char *resetReasonName(esp_reset_reason_t r);
-    static const char *otaStateName(esp_ota_img_states_t s);
-
-    // Reset reason / rollback state / stored core-dump summary. Called once
-    // from setup(), right after SD init, so even a reset within the first
-    // 60s of a cold boot still gets logged - it doesn't wait for loop()'s
-    // clock-ready gate.
+    // Reset reason / rollback state / stored core-dump summary; see
+    // Diagnostics.cpp for why it's called where it is.
     static void logBootDiagnostics();
 
     // The one core-dump reader, shared by the boot log and
@@ -33,27 +28,16 @@ public:
     // esp_core_dump_image_check()'s "nothing stored" results.
     static bool coreDumpAbsent(esp_err_t check) { return check == ESP_ERR_NOT_FOUND || check == ESP_ERR_INVALID_SIZE; }
 
-    // The running image's ELF sha256, first 16 hex chars.
-    static void runningElfSha(char (&out)[17]);
-
     // Registers the two coredump routes; order matters, see the comment
     // beside the registrations in Diagnostics.cpp.
     static void registerRoutes(AsyncWebServer &server);
 
-    // Heap free/min/max-block, per-task stack high-water marks (tasks
-    // looked up by name via xTaskGetHandle) and WiFi RSSI. Called early and
-    // every 10 minutes, but only LOGS when HealthLog::decide() says
-    // something moved past a threshold, or a day has passed - see
-    // include/HealthLog.h.
+    // Heap/stack/WiFi RSSI sample; only logs when HealthLog::decide() says
+    // something moved (include/HealthLog.h).
     static void logHealth();
 
-    // True while confirmImageIfReady() can still act on wifiUp/bmsUp:
-    // after kConfirmAfterMs and until the image is confirmed. loop() only
-    // gathers bmsUp (a dataMutex take) while this is true.
-    static bool confirmCheckDue();
-
     // OTA rollback-confirmation safety net - see verifyRollbackLater()
-    // below. Call from loop() while confirmCheckDue(). Confirms the image
+    // below. Call from loop() on its 1s Interval. Confirms the image
     // once both wifiUp and bmsUp have been true for kConfirmAfterMs of
     // uptime, and otherwise logs a one-shot "not confirmed" warning the
     // first time the image is still pending-verify after that deadline.

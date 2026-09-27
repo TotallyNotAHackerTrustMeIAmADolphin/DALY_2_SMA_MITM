@@ -3,7 +3,7 @@
 #include <vector>
 #include <atomic>
 #include <memory>
-#include "SystemState.h"
+#include "DashboardData.h"
 #include "MutexLock.h"
 #include "LogSink.h"
 

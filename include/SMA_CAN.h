@@ -1,7 +1,7 @@
 #pragma once
 #include <Arduino.h>
 #include "driver/twai.h"
-#include "SystemState.h"
+#include "DashboardData.h"
 #include "SMAFrames.h"
 #include "LogSink.h"
 

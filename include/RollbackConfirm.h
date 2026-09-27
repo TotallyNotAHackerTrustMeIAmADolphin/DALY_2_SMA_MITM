@@ -31,24 +31,6 @@ namespace RollbackConfirm
         bool logNotConfirmed = false;
     };
 
-    // Whether decide() can still act on wifiUp/bmsUp: false before
-    // kConfirmAfterMs (decide() returns early) and forever once confirmed.
-    // Lets the caller skip gathering bmsUp - a dataMutex take - on every
-    // loop() pass for the whole uptime.
-    inline bool needsInputs(const State &state, unsigned long nowMs)
-    {
-        return !state.imageConfirmed && nowMs > kConfirmAfterMs;
-    }
-
-    // True exactly when decide() with the same arguments would read
-    // imagePendingVerify, so the caller can skip the OTA partition query
-    // everywhere else without re-implementing decide()'s branches.
-    inline bool needsPendingVerify(const State &state, bool wifiUp, bool bmsUp, unsigned long nowMs)
-    {
-        return !state.imageConfirmed && nowMs > kConfirmAfterMs &&
-               !(wifiUp && bmsUp) && !state.unconfirmedWarned;
-    }
-
     // imagePendingVerify is the caller's answer to "is the running OTA
     // partition still ESP_OTA_IMG_PENDING_VERIFY?", passed in rather than
     // queried here so this stays free of esp_ota_ops.h.

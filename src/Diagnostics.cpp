@@ -20,7 +20,7 @@ void Diagnostics::setDebugCallback(LogSink cb)
     debugCb = cb;
 }
 
-const char *Diagnostics::otaStateName(esp_ota_img_states_t s)
+static const char *otaStateName(esp_ota_img_states_t s)
 {
     switch (s)
     {
@@ -33,7 +33,7 @@ const char *Diagnostics::otaStateName(esp_ota_img_states_t s)
     }
 }
 
-const char *Diagnostics::resetReasonName(esp_reset_reason_t r)
+static const char *resetReasonName(esp_reset_reason_t r)
 {
     switch (r)
     {
@@ -120,7 +120,8 @@ void Diagnostics::logBootDiagnostics()
           (int)rtc_get_reset_reason(0), (int)rtc_get_reset_reason(1));
 
     char elfSha[17];
-    runningElfSha(elfSha);
+    elfSha[0] = '\0';
+    esp_ota_get_app_elf_sha256(elfSha, sizeof(elfSha));
     const esp_partition_t *running = esp_ota_get_running_partition();
     esp_ota_img_states_t otaState = ESP_OTA_IMG_UNDEFINED;
     esp_ota_get_state_partition(running, &otaState);
@@ -202,41 +203,15 @@ void Diagnostics::readCoreDump(CoreDumpInfo &out)
     snprintf(out.elfSha, sizeof(out.elfSha), "%.16s", (const char *)summary.app_elf_sha256);
 }
 
-void Diagnostics::runningElfSha(char (&out)[17])
-{
-    out[0] = '\0';
-    esp_ota_get_app_elf_sha256(out, sizeof(out));
-}
-
-// File scope (was a function-local static in confirmImageIfReady()) so
-// confirmCheckDue() can read it too.
-static RollbackConfirm::State s_rollbackState;
-
-bool Diagnostics::confirmCheckDue()
-{
-    return RollbackConfirm::needsInputs(s_rollbackState, millis());
-}
-
 void Diagnostics::confirmImageIfReady(bool wifiUp, bool bmsUp)
 {
-    RollbackConfirm::State &st = s_rollbackState;
+    static RollbackConfirm::State st;
 
-    // One clock read for both the guard below and decide(): with two reads,
-    // the guard could see exactly kConfirmAfterMs (skip the OTA query) and
-    // decide() one ms later (take the not-warned branch with
-    // imagePendingVerify=false), silently swallowing the one-shot warning.
-    const unsigned long nowMs = millis();
+    esp_ota_img_states_t otaState = ESP_OTA_IMG_UNDEFINED;
+    esp_ota_get_state_partition(esp_ota_get_running_partition(), &otaState);
+    bool imagePendingVerify = (otaState == ESP_OTA_IMG_PENDING_VERIFY);
 
-    // Only query the OTA partition state when decide() will read it.
-    bool imagePendingVerify = false;
-    if (RollbackConfirm::needsPendingVerify(st, wifiUp, bmsUp, nowMs))
-    {
-        esp_ota_img_states_t otaState = ESP_OTA_IMG_UNDEFINED;
-        esp_ota_get_state_partition(esp_ota_get_running_partition(), &otaState);
-        imagePendingVerify = (otaState == ESP_OTA_IMG_PENDING_VERIFY);
-    }
-
-    RollbackConfirm::Action action = RollbackConfirm::decide(st, wifiUp, bmsUp, nowMs, imagePendingVerify);
+    RollbackConfirm::Action action = RollbackConfirm::decide(st, wifiUp, bmsUp, millis(), imagePendingVerify);
 
     if (action.confirmNow)
     {
@@ -253,28 +228,20 @@ void Diagnostics::confirmImageIfReady(bool wifiUp, bool bmsUp)
 
 void Diagnostics::registerRoutes(AsyncWebServer &server)
 {
-    // JSON headline of the last stored core dump (issue #11) - task/PC/cause/
-    // backtrace, for a UI or API consumer that doesn't want to pull and
-    // decode the whole raw ELF dump via /api/coredump below.
-    //
-    // Registered BEFORE /api/coredump: AsyncURIMatcher's default match type
-    // for a plain string with no trailing '*' is "BackwardCompatible", which
-    // matches the URI itself OR anything starting with "<uri>/" (see
-    // AsyncURIMatcher::matches() in ESPAsyncWebServer's WebServer.cpp) - so
-    // "/api/coredump" would also swallow requests to "/api/coredump/summary"
-    // if that route were registered second, since AsyncWebServer dispatches
-    // to the first handler in registration order whose canHandle() matches
-    // (see AsyncWebServer::_attachHandler()).
+    // JSON headline of the last stored core dump (issue #11). Registered
+    // BEFORE /api/coredump: AsyncURIMatcher's plain-string match also
+    // matches "<uri>/..." and would swallow this route otherwise.
     server.on("/api/coredump/summary", HTTP_GET, [](AsyncWebServerRequest *request)
               {
         CoreDumpInfo dump;
         Diagnostics::readCoreDump(dump);
         char runningSha[17];
-        Diagnostics::runningElfSha(runningSha);
+        runningSha[0] = '\0';
+        esp_ota_get_app_elf_sha256(runningSha, sizeof(runningSha));
         esp_reset_reason_t reason = esp_reset_reason();
 
         char json[900];
-        if (!formatCoreDumpJson(dump, (int)reason, Diagnostics::resetReasonName(reason), runningSha, json, sizeof(json))) {
+        if (!formatCoreDumpJson(dump, (int)reason, resetReasonName(reason), runningSha, json, sizeof(json))) {
             request->send(500, "text/plain", "coredump summary too large");
             return;
         }
@@ -286,13 +253,11 @@ void Diagnostics::registerRoutes(AsyncWebServer &server)
     // the ELF of the firmware that crashed:
     //   espcoredump.py info_corefile -t raw -c coredump.bin firmware.elf
     //
-    // Mapped once via esp_partition_mmap() (#21) instead of a per-chunk
-    // esp_flash_read(): the previous filler's flash read disabled the cache
-    // and stalled the other core for every single chunk. The mapping is
-    // released exactly once - on normal completion AND on client abort -
-    // via onDisconnect (this library always closes non-keep-alive
-    // file-response connections, so onDisconnect is a reliable single
-    // release point).
+    // Mapped once via esp_partition_mmap() (#21): a per-chunk esp_flash_read()
+    // disables the cache and stalls the other core per chunk. The mapping is
+    // released exactly once - on normal completion AND on client abort - via
+    // onDisconnect (this library always closes non-keep-alive file-response
+    // connections, so onDisconnect is a reliable single release point).
     //
     // esp_core_dump_image_check() runs first (not just image_get()) so a
     // dump that's present-sized but fails its CRC (e.g. brownout mid-panic,

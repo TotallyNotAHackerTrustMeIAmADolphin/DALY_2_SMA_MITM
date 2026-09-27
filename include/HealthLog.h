@@ -22,9 +22,7 @@ namespace HealthLog
 
     // xTaskGetHandle() name plus the line's short "stack left: ..." name,
     // paired so the two can't drift apart - next to the enum so adding a
-    // task is one entry here. Function-local static (like DalyFrames::
-    // kAlarmBitNames()) rather than an inline namespace-scope array, since
-    // the device build predates C++17 inline variables.
+    // task is one entry here. Function-local static: the device build predates C++17 inline variables.
     struct TaskName
     {
         const char *full, *shortForm;

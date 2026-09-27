@@ -124,12 +124,15 @@ static void test_stack_drop_boundary(void)
 
 static void test_stack_low_wins_reason_and_names_task(void)
 {
+    // kStackLow sorts before kSdDrops and kHeapDrop (#106): all three fire
+    // at once, and the per-task reason must still win.
     State st;
     Sample s = steady();
     s.stackLeft[kCan] = 600;
     decide(st, s, 0);
     s.stackLeft[kCan] = kStackLowBytes - 1; // 89 B drop: below drop threshold
     s.minFreeHeap -= kHeapDropBytes;        // also a heap drop
+    s.sdDroppedQueueFull += 1;              // also an SD drop
     Decision d = decide(st, s, kTen);
     TEST_ASSERT_EQUAL(kStackLow, d.reason);
     TEST_ASSERT_EQUAL(kCan, d.task);
@@ -279,22 +282,6 @@ static void test_block_reference_ratchets_up(void)
 // applied the same way whether the candidate came from the per-task loop
 // or a global counter ---
 
-static void test_priority_stack_low_beats_sd_drops_and_heap_drop(void)
-{
-    // kStackLow sorts before kSdDrops and kHeapDrop: all three fire at
-    // once, and the per-task reason must still win.
-    State st;
-    Sample s = steady();
-    s.stackLeft[kCan] = 400;
-    decide(st, s, 0);
-    s.stackLeft[kCan] = 300;
-    s.sdDroppedQueueFull += 1;
-    s.minFreeHeap -= kHeapDropBytes;
-    Decision d = decide(st, s, kTen);
-    TEST_ASSERT_EQUAL(kStackLow, d.reason);
-    TEST_ASSERT_EQUAL(kCan, d.task);
-}
-
 static void test_priority_sd_drops_beats_heap_and_block_drop(void)
 {
     State st;
@@ -339,7 +326,6 @@ int main(int, char **)
     RUN_TEST(test_sd_drops_no_increase_no_trigger);
     RUN_TEST(test_sd_drops_baseline_captures_nonzero_counters);
     RUN_TEST(test_block_reference_ratchets_up);
-    RUN_TEST(test_priority_stack_low_beats_sd_drops_and_heap_drop);
     RUN_TEST(test_priority_sd_drops_beats_heap_and_block_drop);
     RUN_TEST(test_priority_heap_drop_beats_block_drop);
     return UNITY_END();

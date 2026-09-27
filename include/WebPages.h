@@ -33,7 +33,7 @@
 // populate a <select>, auto-select the newest" JS shared by index_html's
 // loadRecentLog(), logs_html's loadList() and graphs_html's loadList();
 // also holds fetchOk(), the fetch-then-throw-on-non-2xx wrapper shared by
-// every page's fetch call (#46). Kept to one physical line with no JS
+// every page's fetch call. Kept to one physical line with no JS
 // comments in it: a #define's raw-string value can't span real newlines,
 // and a `//` comment would swallow the rest of the macro.
 #define SHARED_LIST_JS R"jssrc( async function fetchOk(url, init) { const res = await fetch(url, init); if (!res.ok) throw new Error('HTTP ' + res.status); return res; } async function fetchAndPopulateSelect(url, filterFn, selectEl, statusEl, labelFn) { let files = await (await fetchOk(url)).json(); if (filterFn) files = files.filter(filterFn); if (statusEl) statusEl.innerText = ''; if (selectEl) { selectEl.innerHTML = ''; files.forEach(f => { const opt = document.createElement('option'); opt.value = f.name; opt.text = labelFn ? labelFn(f) : f.name; selectEl.appendChild(opt); }); if (files.length) selectEl.selectedIndex = files.length - 1; } return files; } )jssrc"
@@ -95,8 +95,7 @@ const char index_html[] PROGMEM = HTML_HEAD("BMS Bridge Pro") R"rawliteral(
 )rawliteral" SHARED_LIST_JS R"rawliteral(
   const con = document.getElementById('console');
   // One <div> per line, text only (a log line is never markup), capped at
-  // CON_MAX_LINES. The old innerHTML += line + "<br>" added two nodes per
-  // line but removed one, so the console grew without bound (#68).
+  // CON_MAX_LINES so the console can't grow without bound.
   const CON_MAX_LINES = 100;
   function conAppend(text) {
     const line = document.createElement('div');

@@ -123,8 +123,10 @@ namespace StatusFrame
                                   bool maintenanceActive, bool isResetting)
         {
             SMAFrames::SMATxData v;
-            v.packVoltage = data.packVoltage;
-            v.packCurrent = data.packCurrent;
+            // Inverter gets the raw BMS read, not the smoothed value - the
+            // smoothed pair is for the dashboard/CSV display only.
+            v.packVoltage = data.packVoltageRaw;
+            v.packCurrent = data.packCurrentRaw;
             v.packTemp = kFixedPackTempDeciC;
             v.packSOC = data.packSOC;
             v.maintenanceActive = maintenanceActive;

@@ -53,8 +53,9 @@ volatile bool netReady = false;
 
 // Per-cell moving-average smoother (bmsTask only) - see CellSmoother.h.
 CellSmoother cellSmoother;
-// Pack voltage/current moving-average smoothers (bmsTask only) - display/
-// telemetry only, see ScalarSmoother.h for why no raw variant is kept.
+// Pack voltage/current moving-average smoothers (bmsTask only) - feed the
+// display/telemetry fields; the raw read is stored alongside for the
+// inverter (see pollBasicInfo()).
 ScalarSmoother packVoltageSmoother;
 ScalarSmoother packCurrentSmoother;
 
@@ -220,7 +221,9 @@ static void pollBasicInfo(BmsPollState &st)
   // Pack voltage/current feed no safety decision (Glideslope only ever
   // reads per-cell voltages) - smoothed with the same cfg.vSamples window
   // as the cell filter purely so the dashboard/CSV graphs aren't jittery.
-  // SOC is left raw: the Daly's own SOC estimate is already smooth.
+  // The raw read is kept too (below) for what actually goes to the
+  // inverter. SOC is left raw: the Daly's own SOC estimate is already
+  // smooth.
   float smoothedVoltage = packVoltageSmoother.update(info.packVoltage, st.vSamples);
   float smoothedCurrent = packCurrentSmoother.update(info.packCurrent, st.vSamples);
 
@@ -228,6 +231,8 @@ static void pollBasicInfo(BmsPollState &st)
   {
     currentData.packVoltage = smoothedVoltage;
     currentData.packCurrent = smoothedCurrent;
+    currentData.packVoltageRaw = info.packVoltage;
+    currentData.packCurrentRaw = info.packCurrent;
     currentData.packSOC = info.packSOC;
     bmsLink.lastBasicInfoMs = millis();
     bmsLink.haveBasicInfo = true;

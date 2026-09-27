@@ -9,12 +9,14 @@
 // (`pio test -e native`).
 //
 // Nothing safety-critical reads pack voltage/current - Glideslope only ever
-// reads per-cell voltages (include/Glideslope.h) - so unlike CellSmoother
-// there is no raw variant to keep alongside this: bmsTask stores only the
-// smoothed value into DashboardData. BmsEvents::decide()'s SOC-jump
-// detector still sees the true raw DalyBasicInfo, since it runs on that
-// struct before bmsTask calls update() below (see main.cpp's
-// pollBasicInfo()).
+// reads per-cell voltages (include/Glideslope.h) - but StatusFrame::
+// buildValues() does send pack voltage/current to the inverter in CAN
+// frame 0x356, and it uses the raw reading, not this smoothed one: bmsTask
+// stores both into DashboardData (packVoltage/packCurrent smoothed for
+// display, packVoltageRaw/packCurrentRaw for the wire). BmsEvents::
+// decide()'s SOC-jump detector also sees the true raw DalyBasicInfo, since
+// it runs on that struct before bmsTask calls update() below (see
+// main.cpp's pollBasicInfo()).
 class ScalarSmoother
 {
 public:

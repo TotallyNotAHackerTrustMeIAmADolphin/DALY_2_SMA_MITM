@@ -16,7 +16,7 @@ static const char *kExpectedHeader =
     "Cell1,Cell2,Cell3,Cell4,Cell5,Cell6,Cell7,Cell8,Cell9,Cell10,Cell11,"
     "Cell12,Cell13,Cell14,Cell15,Cell16,"
     "ChargeMOS,DischargeMOS,BmsProtection,CellOV1,CellOV2,PackOV1,PackOV2,"
-    "MinCellRaw,MaxCellRaw,RawSpreadMv,Derate,SpreadMv";
+    "MinCellRaw,MaxCellRaw,RawSpreadMv,Derate,SpreadMv,PackVRaw,PackIRaw";
 
 static int countCommas(const char *csv)
 {
@@ -45,6 +45,8 @@ static DashboardData makeSample()
     d.cellSpreadMv = 80;
     d.derateFactor = 0.73f;
     d.packCurrent = -12.5f;
+    d.packVoltageRaw = 52.40f;
+    d.packCurrentRaw = -12.8f;
     d.packSOC = 87.5f;
     d.requestedCurrent = 45.0f;
     d.smaChargeMode = "Bulk";
@@ -97,6 +99,12 @@ static void test_index_max_cell_raw(void)
     TEST_ASSERT_EQUAL(index("MinCellRaw") + 1, index("MaxCellRaw"));
 }
 
+static void test_index_pack_raw_columns_are_last(void)
+{
+    TEST_ASSERT_EQUAL(39, index("PackVRaw"));
+    TEST_ASSERT_EQUAL(40, index("PackIRaw"));
+}
+
 static void test_index_unknown_name(void)
 {
     TEST_ASSERT_EQUAL(-1, index("nope"));
@@ -124,12 +132,14 @@ static void test_index_unknown_name(void)
 // RawSpreadMv %u  95      -> "95"
 // Derate      %.2f 0.73   -> "0.73"
 // SpreadMv    %u  80      -> "80"
+// PackVRaw    %.2f 52.40  -> "52.40"
+// PackIRaw    %.2f -12.8  -> "-12.80"
 static const char *kExpectedRow =
     "52.35,-12.50,87.5,3.201,3.349,45.0,Bulk,1,0,1,"
     "3.300,3.310,3.320,3.330,3.340,3.350,3.360,3.370,3.380,3.390,3.400,"
     "3.410,3.420,3.430,3.440,3.450,"
     "1,0,0,0,0,0,0,"
-    "3.195,3.360,95,0.73,80";
+    "3.195,3.360,95,0.73,80,52.40,-12.80";
 
 static void test_sample_formats_to_known_row(void)
 {
@@ -189,7 +199,7 @@ static void test_default_constructed_row(void)
     TEST_ASSERT_TRUE(formatRow(d, row, sizeof(row)) > 0);
     TEST_ASSERT_EQUAL_STRING("0.00,0.00,0.0,0.000,0.000,0.0,Unknown,0,0,0"
                              ",,,,,,,,,,,,,,,,,"
-                             "0,0,0,0,0,0,0,0.000,0.000,0,1.00,0",
+                             "0,0,0,0,0,0,0,0.000,0.000,0,1.00,0,0.00,0.00",
                              row);
 }
 
@@ -199,6 +209,7 @@ int main(int, char **)
     RUN_TEST(test_header_matches_claude_md);
     RUN_TEST(test_index_first_seven_columns);
     RUN_TEST(test_index_max_cell_raw);
+    RUN_TEST(test_index_pack_raw_columns_are_last);
     RUN_TEST(test_index_unknown_name);
     RUN_TEST(test_sample_formats_to_known_row);
     RUN_TEST(test_missing_cells_are_blank_not_omitted);

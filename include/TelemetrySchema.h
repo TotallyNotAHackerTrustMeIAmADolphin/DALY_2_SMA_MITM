@@ -62,10 +62,12 @@ namespace TelemetrySchema
     inline int formatRawSpreadMv(const DashboardData &d, char *buf, size_t len) { return snprintf(buf, len, "%u", (unsigned)d.cellSpreadRawMv); }
     inline int formatDerate(const DashboardData &d, char *buf, size_t len) { return snprintf(buf, len, "%.2f", d.derateFactor); }
     inline int formatSpreadMv(const DashboardData &d, char *buf, size_t len) { return snprintf(buf, len, "%u", (unsigned)d.cellSpreadMv); }
+    inline int formatPackVRaw(const DashboardData &d, char *buf, size_t len) { return snprintf(buf, len, "%.2f", d.packVoltageRaw); }
+    inline int formatPackIRaw(const DashboardData &d, char *buf, size_t len) { return snprintf(buf, len, "%.2f", d.packCurrentRaw); }
 
     // Column order is the CSV row layout - see CLAUDE.md's SDLogger bullet.
     // Function-local static: the device build is gnu++11 (no inline variables).
-    inline const Column (&columns())[39]
+    inline const Column (&columns())[41]
     {
         static const Column table[] = {
             {"Timestamp", formatTimestampPlaceholder},
@@ -107,6 +109,8 @@ namespace TelemetrySchema
             {"RawSpreadMv", formatRawSpreadMv},
             {"Derate", formatDerate},
             {"SpreadMv", formatSpreadMv},
+            {"PackVRaw", formatPackVRaw},
+            {"PackIRaw", formatPackIRaw},
         };
         return table;
     }

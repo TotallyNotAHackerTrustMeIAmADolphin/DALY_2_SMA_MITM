@@ -26,6 +26,8 @@ static DashboardData healthyPack()
     DashboardData d;
     d.packVoltage = 52.8f;
     d.packCurrent = -10.0f;
+    d.packVoltageRaw = d.packVoltage;
+    d.packCurrentRaw = d.packCurrent;
     d.packSOC = 60.0f;
     d.maxCellVoltage = d.maxCellVoltageRaw = 3.25f;
     d.minCellVoltage = d.minCellVoltageRaw = 3.25f;
@@ -46,6 +48,15 @@ static const SMAFrames::CanFrame &frame351(const SMAFrames::TxFrameSet &set)
         if (set.frames[i].id == 0x351)
             return set.frames[i];
     TEST_FAIL_MESSAGE("no 0x351 frame");
+    return set.frames[0];
+}
+
+static const SMAFrames::CanFrame &frame356(const SMAFrames::TxFrameSet &set)
+{
+    for (int i = 0; i < set.count; i++)
+        if (set.frames[i].id == 0x356)
+            return set.frames[i];
+    TEST_FAIL_MESSAGE("no 0x356 frame");
     return set.frames[0];
 }
 
@@ -150,10 +161,33 @@ static void test_maintenance_cvl_capped_below_normal_on_the_wire(void)
     TEST_ASSERT_EQUAL_UINT16(552, l.cvl);
 }
 
+static void test_raw_pack_voltage_current_on_the_wire_not_smoothed(void)
+{
+    // Smoothed and raw deliberately far apart so a swap can't pass by luck.
+    DashboardData d = healthyPack();
+    d.packVoltage = 52.8f;     // smoothed - display only
+    d.packCurrent = -10.0f;    // smoothed - display only
+    d.packVoltageRaw = 53.6f;  // raw - what must reach the inverter
+    d.packCurrentRaw = -42.0f; // raw - what must reach the inverter
+
+    ControlState ctrl;
+    StatusFrame::Decision dec = StatusFrame::decide(cfg, d, freshLink(), UiCommands{}, kNow, ctrl);
+    TEST_ASSERT_TRUE(dec.sendFrames);
+    uint8_t ticker;
+    SMAFrames::TxFrameSet set = SMAFrames::encodeStatus(dec.values, 0, ticker);
+    const uint8_t *b = frame356(set).data;
+
+    uint16_t v_out = (uint16_t)(b[0] | b[1] << 8);
+    int16_t i_out = (int16_t)(uint16_t)(b[2] | b[3] << 8);
+    TEST_ASSERT_EQUAL_UINT16(5360, v_out);  // 53.6 V x100
+    TEST_ASSERT_EQUAL_INT16(-420, i_out);   // -42.0 A x10
+}
+
 int main(int, char **)
 {
     UNITY_BEGIN();
     RUN_TEST(test_healthy_pack_full_limits_on_the_wire);
+    RUN_TEST(test_raw_pack_voltage_current_on_the_wire_not_smoothed);
     RUN_TEST(test_raw_max_spike_zeroes_ccl_on_the_wire);
     RUN_TEST(test_raw_min_sag_zeroes_dcl_on_the_wire);
     RUN_TEST(test_smoothed_max_taper_on_the_wire);

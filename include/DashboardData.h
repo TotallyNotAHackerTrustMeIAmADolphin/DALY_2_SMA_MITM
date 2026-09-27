@@ -17,8 +17,8 @@ constexpr int16_t kFixedPackTempDeciC = 220;
 struct DashboardData {
     // Smoothed (cfg.vSamples window, via ScalarSmoother.h) pack voltage -
     // feeds no safety decision (Glideslope only ever reads per-cell
-    // voltages), smoothed purely so the dashboard/CSV graphs aren't jittery.
-    // No raw variant is kept; see ScalarSmoother.h.
+    // voltages); display-only, for the dashboard/SSE/CSV graphs so they
+    // aren't jittery. The inverter gets packVoltageRaw below instead.
     float packVoltage = 0.0f;
     float avgCellVoltage = 0.0f;
     float minCellVoltage = 0.0f;
@@ -40,8 +40,12 @@ struct DashboardData {
     uint16_t cellSpreadRawMv = 0;
     float derateFactor = 1.0f;
 
-    // Smoothed the same way as packVoltage above.
+    // Smoothed the same way as packVoltage above; display-only.
     float packCurrent = 0.0f;
+    // Latest BMS read, unsmoothed - what StatusFrame::buildValues() sends
+    // to the inverter in CAN frame 0x356, so it never lags the real pack.
+    float packVoltageRaw = 0.0f;
+    float packCurrentRaw = 0.0f;
     // Left raw (unsmoothed) - the Daly's own SOC estimate is already smooth,
     // and BmsEvents' SOC-jump detector needs the true reading anyway.
     float packSOC = 0.0f;

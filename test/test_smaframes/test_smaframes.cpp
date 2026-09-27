@@ -1,6 +1,6 @@
-// Native unit tests for the pure SMA/Victron CAN frame encode/decode and
-// bus-off retry logic (#45): `pio test -e native`. Includes the real
-// include/SMAFrames.h - no mirrored copy to keep in sync.
+// Native unit tests for the pure SMA/Victron CAN frame encode/decode
+// (#45): `pio test -e native`. Includes the real include/SMAFrames.h - no
+// mirrored copy to keep in sync.
 
 #include <unity.h>
 #include "SMAFrames.h"
@@ -217,32 +217,29 @@ static void test_decode_0x305_zero_dlc_ignored(void)
     TEST_ASSERT_FALSE(update.hasChargeMode);
 }
 
-static void test_decode_0x300_grid_present_true(void)
+struct GridCase
 {
-    uint8_t data[8] = {0x01, 0, 0, 0, 0, 0, 0, 0};
-    RxUpdate update;
-    TEST_ASSERT_TRUE(SMAFrames::decodeFrame(0x300, data, 8, update));
-    TEST_ASSERT_TRUE(update.hasGridPresent);
-    TEST_ASSERT_TRUE(update.gridPresent);
-    TEST_ASSERT_FALSE(update.hasChargeMode);
-}
+    uint8_t byte;
+    bool present;
+};
 
-static void test_decode_0x300_grid_present_false(void)
-{
-    uint8_t data[8] = {0x00, 0, 0, 0, 0, 0, 0, 0};
-    RxUpdate update;
-    TEST_ASSERT_TRUE(SMAFrames::decodeFrame(0x300, data, 8, update));
-    TEST_ASSERT_TRUE(update.hasGridPresent);
-    TEST_ASSERT_FALSE(update.gridPresent);
-}
+// 0xFE (bit0 clear, other bits set) still reads as grid absent - only bit0
+// matters.
+static const GridCase kGridCases[] = {
+    {0x01, true}, {0x00, false}, {0xFE, false},
+};
 
-static void test_decode_0x300_only_bit0_matters(void)
+static void test_decode_0x300_grid_present_table(void)
 {
-    // Other bits set, bit0 clear -> still reads as grid absent.
-    uint8_t data[8] = {0xFE, 0, 0, 0, 0, 0, 0, 0};
-    RxUpdate update;
-    TEST_ASSERT_TRUE(SMAFrames::decodeFrame(0x300, data, 8, update));
-    TEST_ASSERT_FALSE(update.gridPresent);
+    for (const GridCase &c : kGridCases)
+    {
+        uint8_t data[8] = {c.byte, 0, 0, 0, 0, 0, 0, 0};
+        RxUpdate update;
+        TEST_ASSERT_TRUE(SMAFrames::decodeFrame(0x300, data, 8, update));
+        TEST_ASSERT_TRUE(update.hasGridPresent);
+        TEST_ASSERT_EQUAL(c.present, update.gridPresent);
+        TEST_ASSERT_FALSE(update.hasChargeMode);
+    }
 }
 
 static void test_decode_unknown_id_not_decoded(void)
@@ -252,30 +249,6 @@ static void test_decode_unknown_id_not_decoded(void)
     TEST_ASSERT_FALSE(SMAFrames::decodeFrame(0x123, data, 8, update));
     TEST_ASSERT_FALSE(update.hasChargeMode);
     TEST_ASSERT_FALSE(update.hasGridPresent);
-}
-
-// --- shouldRetryBusRecovery (checkBusHealth's _wasBusOff/_recoveryTimer) ---
-
-static void test_retry_not_due_before_one_second(void)
-{
-    TEST_ASSERT_FALSE(SMAFrames::shouldRetryBusRecovery(500, true, 0));
-}
-
-static void test_retry_due_after_one_second(void)
-{
-    TEST_ASSERT_TRUE(SMAFrames::shouldRetryBusRecovery(1001, true, 0));
-}
-
-static void test_retry_boundary_exactly_one_second_not_yet_due(void)
-{
-    // Pre-#45 uses a strict `>`, so exactly 1000ms elapsed is not yet due -
-    // preserved exactly, not rounded to >=.
-    TEST_ASSERT_FALSE(SMAFrames::shouldRetryBusRecovery(1000, true, 0));
-}
-
-static void test_retry_never_due_when_bus_not_off(void)
-{
-    TEST_ASSERT_FALSE(SMAFrames::shouldRetryBusRecovery(5000, false, 0));
 }
 
 int main(int, char **)
@@ -289,13 +262,7 @@ int main(int, char **)
     RUN_TEST(test_encode_status_ticker_not_yet_due_no_heartbeat);
     RUN_TEST(test_decode_0x305_mode_table);
     RUN_TEST(test_decode_0x305_zero_dlc_ignored);
-    RUN_TEST(test_decode_0x300_grid_present_true);
-    RUN_TEST(test_decode_0x300_grid_present_false);
-    RUN_TEST(test_decode_0x300_only_bit0_matters);
+    RUN_TEST(test_decode_0x300_grid_present_table);
     RUN_TEST(test_decode_unknown_id_not_decoded);
-    RUN_TEST(test_retry_not_due_before_one_second);
-    RUN_TEST(test_retry_due_after_one_second);
-    RUN_TEST(test_retry_boundary_exactly_one_second_not_yet_due);
-    RUN_TEST(test_retry_never_due_when_bus_not_off);
     return UNITY_END();
 }

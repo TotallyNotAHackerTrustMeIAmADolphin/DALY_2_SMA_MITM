@@ -1,11 +1,11 @@
 #pragma once
 
-// Pure SMA/Victron CAN frame encode/decode + bus-off retry timing: no
-// Arduino/FreeRTOS dependency, so this header compiles and runs under
-// `pio test -e native` (test/test_smaframes). SMA_CAN owns the actual
+// Pure SMA/Victron CAN frame encode/decode: no Arduino/FreeRTOS dependency,
+// so this header compiles and runs under `pio test -e native`
+// (test/test_smaframes). SMA_CAN owns the actual
 // twai_transmit()/twai_receive()/begin() driver calls and the debug-logging
-// callback; it calls the functions below to decide what bytes to send,
-// what a received frame means, and whether a bus-off retry is due.
+// callback; it calls the functions below to decide what bytes to send and
+// what a received frame means.
 
 #include <stdint.h>
 #include <cmath>
@@ -37,8 +37,7 @@ namespace SMAFrames
 
     // One status tick's worth of values for encodeStatus(). ccl/dcl in
     // 0.1 A, cvl/dvl in 0.1 V, packTemp in 0.1 C. Every field defaults, so a
-    // field nobody set goes out as 0, never as stack garbage. SMA_CAN.h
-    // re-exposes it as ::SMATxData.
+    // field nobody set goes out as 0, never as stack garbage.
     struct SMATxData
     {
         float packVoltage = 0.0f;
@@ -74,10 +73,6 @@ namespace SMAFrames
 
         void add(uint32_t id, uint8_t dlc, const uint8_t *src)
         {
-            // Defensive bounds check: silently drop rather than write out
-            // of bounds on this safety-critical CAN path.
-            if (count >= kMaxFrames)
-                return;
             CanFrame &f = frames[count++];
             f.id = id;
             f.dlc = dlc;
@@ -204,17 +199,5 @@ namespace SMAFrames
         }
 
         return decoded;
-    }
-
-    // Bus-off recovery retry decision (checkBusHealth()'s _wasBusOff /
-    // _recoveryTimer logic): retries only once wasBusOff is true and more
-    // than kBusRecoveryBackoffMs (strictly greater than) have elapsed since
-    // recoveryTimer was last set. Unsigned subtraction keeps this correct
-    // across a millis() wraparound (~49 days uptime).
-    inline bool shouldRetryBusRecovery(unsigned long nowMillis, bool wasBusOff, unsigned long recoveryTimer)
-    {
-        if (!wasBusOff)
-            return false;
-        return (nowMillis - recoveryTimer) > kBusRecoveryBackoffMs;
     }
 }

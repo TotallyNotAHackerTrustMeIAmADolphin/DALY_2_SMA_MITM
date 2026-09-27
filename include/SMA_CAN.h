@@ -5,10 +5,6 @@
 #include "SMAFrames.h"
 #include "LogSink.h"
 
-// SMATxData is SMAFrames::SMATxData under its old name, same pattern as
-// DalyRS485.h re-exposing DalyFrames.h's structs.
-using SMATxData = SMAFrames::SMATxData;
-
 class SMA_CAN
 {
 public:
@@ -19,7 +15,7 @@ public:
     void setDebugCallback(LogSink cb);
     void checkBusHealth();
     void readMessages(DashboardData &dashboardOut);
-    void sendStatus(const SMATxData &data);
+    void sendStatus(const SMAFrames::SMATxData &data);
 
 private:
     LogSink _debugCb;

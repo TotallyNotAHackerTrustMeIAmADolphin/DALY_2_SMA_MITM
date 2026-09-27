@@ -55,7 +55,6 @@ static DashboardData makeSample()
     d.cellSpreadRawMv = 95;
     d.derateFactor = 0.73f;
     d.packCurrent = -12.5f;
-    d.packTemp = 0; // not a CSV column
     d.packSOC = 87.5f;
     d.requestedCurrent = 45.0f;
     d.smaChargeMode = "Bulk";

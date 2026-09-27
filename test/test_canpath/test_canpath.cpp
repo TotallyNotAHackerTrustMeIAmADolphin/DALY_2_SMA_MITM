@@ -58,7 +58,7 @@ struct Limits
 static Limits tick(const DashboardData &data, const BmsLink &link, const UiCommands &ui)
 {
     ControlState ctrl;
-    StatusFrame::Decision dec = StatusFrame::decide(cfg, StatusFrame::snapshotFrom(data, link, ui, kNow), ctrl);
+    StatusFrame::Decision dec = StatusFrame::decide(cfg, data, link, ui, kNow, ctrl);
     TEST_ASSERT_TRUE(dec.sendFrames);
     uint8_t ticker;
     SMAFrames::TxFrameSet set = SMAFrames::encodeStatus(dec.values, 0, ticker);

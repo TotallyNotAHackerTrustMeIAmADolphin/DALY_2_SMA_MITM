@@ -480,14 +480,14 @@ static void applyDecision(const StatusFrame::Decision &dec)
 {
   // Written back regardless of sendFrames (a no-op copy-back when decide()
   // didn't touch them).
-  uiCommands.resetRequested = dec.isResetting;
+  uiCommands.resetRequested = dec.values.isResetting;
   uiCommands.resetHoldStartMs = dec.resetHoldStartMs;
 
   if (dec.sendFrames)
   {
     currentData.maintenanceActive = dec.values.maintenanceActive;
     currentData.forceCharge = dec.values.maintenanceActive;
-    currentData.isResetting = dec.isResetting;
+    currentData.isResetting = dec.values.isResetting;
     currentData.derateFactor = dec.derateFactor;
     currentData.requestedCurrent = dec.values.ccl / 10.0f;
   }
@@ -537,7 +537,7 @@ void canTask(void *pvParameters)
 
       if (MutexLock lock{dataMutex, kCanTickLockTimeout})
       {
-        dec = StatusFrame::decide(cfg, StatusFrame::snapshotFrom(currentData, bmsLink, uiCommands, now), ctrl);
+        dec = StatusFrame::decide(cfg, currentData, bmsLink, uiCommands, now, ctrl);
         applyDecision(dec);
       }
 

@@ -6,7 +6,7 @@
 // Holds live data to be pushed to the web dashboard and CAN bus. Kept free
 // of Arduino/FreeRTOS dependencies, like SystemConfig.h, so TelemetrySchema.h
 // and the native unit tests can format this struct without pulling in the
-// ESP32 Arduino core; `dataMutex` stays declared in SystemState.h instead.
+// ESP32 Arduino core; `dataMutex` is declared where it's used instead.
 // Every field has a default, so a default-constructed DashboardData is the
 // state before any BMS/SMA data: zeros, no derating, no SMA mode yet.
 
@@ -32,7 +32,6 @@ struct DashboardData {
     float derateFactor = 1.0f;
 
     float packCurrent = 0.0f;
-    int16_t packTemp = kFixedPackTempDeciC;
     float packSOC = 0.0f;
     float requestedCurrent = 0.0f;
     const char *smaChargeMode = "Unknown";

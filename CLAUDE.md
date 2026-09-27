@@ -48,7 +48,7 @@ change against `test/test_glideslope/`, `test/test_statusframe/` and
   (`include/MutexLock.h`) + a named `k...LockTimeout`, never raw take/give;
   decide/copy under the lock, log after release.
 - `netOutMutex` (SSE log + telemetry) is innermost — never take another
-  mutex while holding it. `WifiEventLatch` (`include/WifiEvents.h`) is
+  mutex while holding it. The WiFi event latch in `src/main.cpp` is
   lock-free (atomics), the one documented exception to `dataMutex`.
 - Nothing using async TCP (web server, SSE) runs before `setupNetwork()`
   returns.
@@ -89,11 +89,11 @@ change against `test/test_glideslope/`, `test/test_statusframe/` and
 | Task/core | Responsibility |
 |---|---|
 | `bmsTask` (core 0) | Polls the Daly BMS over RS485 every ~2.4s, feeds `CellSmoother`, stores under `dataMutex`. |
-| `canTask` (core 1) | Every 250ms: under `dataMutex`, builds a `Snapshot`, calls `decide()`, writes `Decision` back; **outside** the lock, `inverter.sendStatus()` if `sendFrames`, then logs one-shot events. Also CAN RX/bus health every 50ms. |
+| `canTask` (core 1) | Every 250ms: under `dataMutex`, calls `decide()`, writes `Decision` back; **outside** the lock, `inverter.sendStatus()` if `sendFrames`, then logs one-shot events. Also CAN RX/bus health every 50ms. |
 | `loop()` (core 1) | OTA, SD telemetry every 10s, boot diagnostics, 10-min health log. |
 | `async_tcp` | Async Web Server + SSE. |
 | SD writer task | Queue-fed CSV/log writer (`SDLogger`). |
-| WiFi event task | Records transitions into `WifiEventLatch`; no logging/I/O itself. |
+| WiFi event task | Records transitions into the WiFi event latch; no logging/I/O itself. |
 
 **Boot order:** SD → config (`ConfigStore::load()`) → BMS+CAN drivers and
 both tasks → `setupNetwork()` (~15s max) → OTA, web server → `netReady`.
@@ -102,8 +102,8 @@ connects.
 
 **Shared state:** `currentData` (`DashboardData`), `cfg` (`SystemConfig`),
 `bmsLink` and `uiCommands` (written by `handleUIAction`, read by
-`canTask`) are guarded by `dataMutex`. `WifiEventLatch` is the lock-free
-exception.
+`canTask`) are guarded by `dataMutex`. The WiFi event latch is the
+lock-free exception.
 
 ## Module map
 
@@ -116,7 +116,6 @@ exception.
 - `RollbackConfirm.h` — OTA rollback decision behind `confirmImageIfReady()` — `test_rollbackconfirm/`
 - `HealthLog.h` — `decide() -> Decision{reason, task}` for the health log — `test_healthlog/`
 - `LocalClock.h` — the one wall-clock-valid check, used by `netLog()`, NTP wait, `SDLogger` — `test_localclock/`
-- `WifiEvents.h` — `WifiEventLatch`: WiFi event → `[WIFI]` log-line state machine — `test_wifievents/`
 - `ConfigForm.h` — pure `/save` parse/validate + change-log formatting — `test_configform/`
 - `ConfigStore.h`+`.cpp` — NVS load/store; rejects a bad-typed/out-of-range value, logs the default used
 - `SettingFormat.h` — `formatSettingFixed()` (decimals, a LIMIT) / `formatSettingValue()` (round-trip, a VALUE) — `test_settingformat/`
@@ -124,7 +123,7 @@ exception.
 - `DashboardData.h` — live telemetry for the web UI/CAN TX plus Daly MOSFET/alarm fields, Arduino-free
 - `TelemetrySchema.h` — ordered CSV column table — `test_telemetryschema/`
 - `TelemetryJson.h` — SSE JSON via `BoundedWriter`, capped at `kPackCells` — `test_telemetryjson/`
-- `SDLogger.cpp` — SD writer task; access via `sdMutex_`; routes use `webLockTimeout()` (0 if already held); decimation/trim in `CsvDecimation.h`/`TailTrim.h`
+- `SDLogger.cpp` — SD writer task; access via `sdMutex_`; routes use `webLockTimeout()` (0 if already held); decimation in `CsvDecimation.h`
 - `WebDashboard.cpp` — `ESPAsyncWebServer` routes, SSE, `/toggleMaint`/`/resetSMA`, `/api/logs/*` (guarded by `findLogFile()`); `saveConfig()` uses `ConfigForm`/`ConfigStore`
 - `Diagnostics.cpp` — boot diagnostics, health log, OTA rollback, coredump routes (below)
 - `pin_config.h` — LilyGO T-CAN485 pin map (`5V_EN` driven high for RS485/CAN)
@@ -152,8 +151,8 @@ exception.
   stack/heap/largest-block regression past threshold, `SD DROPS` (any
   increase), or a 24h heartbeat. Never reintroduce an unconditional
   periodic line.
-- **WiFi:** `wifiEventHandler()` only records transitions into
-  `WifiEventLatch`; `drainWifiEvents()` in `loop()` emits `[WIFI]
+- **WiFi:** `wifiEventHandler()` only records transitions into the WiFi
+  event latch; `drainWifiEvents()` in `loop()` emits `[WIFI]
   Disconnected`/`Reconnected`/`Lost IP address`, edge-triggered.
 
 ## Engineering conventions

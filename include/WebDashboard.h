@@ -1,6 +1,6 @@
 #pragma once
 #include <ESPAsyncWebServer.h>
-#include "SystemState.h"
+#include "DashboardData.h"
 #include "LogSink.h"
 
 // The dashboard's two buttons. main.cpp's handleUIAction() applies one
@@ -22,9 +22,8 @@ public:
     // page and /save (ConfigStore::load() must have populated it already -
     // setup() calls that directly, before the BMS/CAN tasks start, since it
     // needs no network). Call after setupNetwork(): the async TCP stack
-    // must be initialised (connected or not). Refuses to start if cfg is
-    // null.
-    void begin(SystemConfig *cfg);
+    // must be initialised (connected or not).
+    void begin(SystemConfig &cfg);
 
     // Attach an action listener for the buttons
     void setActionCallback(ActionCallback cb);
@@ -48,14 +47,10 @@ private:
     ActionCallback _actionCb = nullptr;
     LogSink _debugCb = nullptr;
 
-    // One handler per route (#90); the stateless ones are static.
-    static void handleIndex(AsyncWebServerRequest *request);
-    void handleToggleMaint(AsyncWebServerRequest *request);
-    void handleResetSMA(AsyncWebServerRequest *request);
+    // One handler per route with a real body (#90); the one-liners are
+    // inline lambdas in setupRoutes() instead.
     void handleConfigPage(AsyncWebServerRequest *request);
     void saveConfig(AsyncWebServerRequest *request);
-    static void handleLogsPage(AsyncWebServerRequest *request);
-    static void handleGraphsPage(AsyncWebServerRequest *request);
     static void handleLogList(AsyncWebServerRequest *request);
     static void handleLogContent(AsyncWebServerRequest *request);
     static void handleLogDownload(AsyncWebServerRequest *request);
@@ -67,7 +62,4 @@ private:
     // the error response itself (400 missing param, 404 unknown file) - callers
     // just do `if (!findLogFile(request, name, size)) return;`.
     static bool findLogFile(AsyncWebServerRequest *request, String &outName, uint32_t &outSize);
-
-    // Picks a Content-Type by file extension (.csv -> text/csv, else text/plain).
-    static const char *contentTypeForLogFile(const String &name);
 };

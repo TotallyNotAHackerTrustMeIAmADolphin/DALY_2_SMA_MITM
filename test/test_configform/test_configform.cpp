@@ -36,7 +36,7 @@ static ConfigForm::Result apply(SystemConfig &cfg, const std::vector<Field> &fie
 
 // --- not-a-number ---
 
-static void test_not_a_number_reports_error_and_marks_present(void)
+static void test_not_a_number_reports_error(void)
 {
     SystemConfig cfg;
     std::vector<std::string> errors;
@@ -45,7 +45,6 @@ static void test_not_a_number_reports_error_and_marks_present(void)
     TEST_ASSERT_FALSE(r.ok);
     TEST_ASSERT_EQUAL(1u, errors.size());
     TEST_ASSERT_EQUAL_STRING("Max Charge Amps is not a valid number.", errors[0].c_str());
-    TEST_ASSERT_TRUE(r.present[0]); // maxChargeA is all()[0]
     TEST_ASSERT_EQUAL_FLOAT((float)cfg.maxChargeA.def(), cfg.maxChargeA); // left alone
 }
 
@@ -106,9 +105,9 @@ static void test_two_setting_rule_skipped_when_a_field_fails_to_parse(void)
     TEST_ASSERT_EQUAL_STRING("Target Trickle Vpc is not a valid number.", errors[0].c_str());
 }
 
-// --- only-present-keys-written ---
+// --- only-submitted-keys-parsed ---
 
-static void test_only_present_keys_marked_and_others_left_alone(void)
+static void test_only_submitted_keys_parsed_others_left_alone(void)
 {
     SystemConfig cfg;
     TEST_ASSERT_TRUE(cfg.maxDischargeA.set(300));
@@ -118,18 +117,6 @@ static void test_only_present_keys_marked_and_others_left_alone(void)
     TEST_ASSERT_TRUE(r.ok);
     TEST_ASSERT_EQUAL_FLOAT(200.0f, cfg.maxChargeA);
     TEST_ASSERT_EQUAL_FLOAT(300.0f, cfg.maxDischargeA); // untouched, kept its pre-call value
-
-    size_t idxCa = 0, idxDa = 0;
-    auto all = cfg.all();
-    for (size_t i = 0; i < all.size(); i++)
-    {
-        if (strcmp(all[i]->key(), "ca") == 0)
-            idxCa = i;
-        if (strcmp(all[i]->key(), "da") == 0)
-            idxDa = i;
-    }
-    TEST_ASSERT_TRUE(r.present[idxCa]);
-    TEST_ASSERT_FALSE(r.present[idxDa]);
 }
 
 // --- all-or-nothing ---
@@ -207,19 +194,38 @@ static void test_log_changes_tiny_real_change_never_prints_x_arrow_x(void)
     TEST_ASSERT_EQUAL_STRING("[CFG] Trickle Amps: 2 -> 2.0004 A\n", lines[0].c_str());
 }
 
+static void test_log_changes_same_stored_float_is_not_a_change(void)
+{
+    // 3.55 and 3.55000005 round to the same binary32 value, so this must
+    // not register as a change: compares stored value(), not the double a
+    // caller happened to pass to set().
+    SystemConfig before;
+    SystemConfig after = before;
+    TEST_ASSERT_TRUE(before.cvMaxCharge.set(3.55));
+    TEST_ASSERT_TRUE(after.cvMaxCharge.set(3.55000005));
+
+    std::vector<std::string> lines;
+    ConfigForm::logChanges(before, after, [&lines](const char *line)
+                            { lines.push_back(line); });
+
+    TEST_ASSERT_EQUAL(1u, lines.size());
+    TEST_ASSERT_EQUAL_STRING("[CFG] Saved, no changes\n", lines[0].c_str());
+}
+
 int main(int, char **)
 {
     UNITY_BEGIN();
-    RUN_TEST(test_not_a_number_reports_error_and_marks_present);
+    RUN_TEST(test_not_a_number_reports_error);
     RUN_TEST(test_out_of_range_reports_range_message);
     RUN_TEST(test_out_of_range_range_message_for_max_charge_vpc);
     RUN_TEST(test_two_setting_violation_only_checked_once_everything_parses);
     RUN_TEST(test_two_setting_rule_skipped_when_a_field_fails_to_parse);
-    RUN_TEST(test_only_present_keys_marked_and_others_left_alone);
+    RUN_TEST(test_only_submitted_keys_parsed_others_left_alone);
     RUN_TEST(test_all_or_nothing_ok_false_whenever_any_field_errors);
     RUN_TEST(test_all_present_fields_valid_is_ok);
     RUN_TEST(test_log_changes_emits_one_line_per_changed_setting);
     RUN_TEST(test_log_changes_no_changes_line_when_nothing_changed);
     RUN_TEST(test_log_changes_tiny_real_change_never_prints_x_arrow_x);
+    RUN_TEST(test_log_changes_same_stored_float_is_not_a_change);
     return UNITY_END();
 }

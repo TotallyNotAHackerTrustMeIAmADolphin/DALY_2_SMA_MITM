@@ -1,20 +1,11 @@
 #pragma once
 
 // One ordered table of telemetry column descriptors driving the CSV header
-// and row, built from DashboardData (#32). The SSE JSON is a separate,
-// hand-written format (TelemetryJson.h, #95) with different precision and
-// key order, not derived from this table. Pure, so test/test_telemetryschema
-// runs it natively.
-//
-// Column::format()'s snprintf spec for each field is exact and byte-stable:
-// existing CSV files on the SD card, and the dashboard JS parsing the SSE
-// JSON, depend on it. Treat a format-string change here with the same care
-// as Glideslope.h's math - it changes every future row on disk.
-//
-// Index order is part of the contract, covered by the native test:
-// Timestamp=0, PackV=1, PackI=2, SOC=3, MinCellV=4, MaxCellV=5, ReqI=6.
-// Callers (readGraphSeries()) look columns up by name via index(), never by
-// memorizing position.
+// and row, built from DashboardData (#32). Pure, so test/test_telemetryschema
+// runs it natively. Column::format()'s snprintf spec is exact and
+// byte-stable - existing CSV files on the SD card depend on it. Index order
+// is part of the contract, covered by the native test: Timestamp=0, PackV=1,
+// PackI=2, SOC=3, MinCellV=4, MaxCellV=5, ReqI=6.
 
 #include <stdio.h>
 #include <string.h>
@@ -119,18 +110,6 @@ namespace TelemetrySchema
     }
 
     inline int count() { return (int)(sizeof(columns()) / sizeof(columns()[0])); }
-
-    // The columns the Graphs page (#93) plots - shared by readGraphSeries()
-    // and graphs_html's JS instead of each writing out its own copy.
-    // Same function-local-static reasoning as columns() above.
-    inline const char *const (&graphColumns())[7]
-    {
-        static const char *const table[] = {
-            "Timestamp", "PackV", "PackI", "SOC", "MinCellV", "MaxCellV", "ReqI",
-        };
-        return table;
-    }
-    constexpr size_t kGraphColumnCount = 7;
 
     // Linear search is fine - called a handful of times per request
     // (readGraphSeries() resolves its column indices once, outside its

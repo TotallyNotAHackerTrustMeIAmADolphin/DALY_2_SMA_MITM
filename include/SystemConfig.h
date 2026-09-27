@@ -115,23 +115,11 @@ private:
     Kind kind_;
 };
 
-template <typename T>
-struct SettingKind;
-template <>
-struct SettingKind<float>
-{
-    static constexpr SettingBase::Kind value = SettingBase::KIND_FLOAT;
-};
-template <>
-struct SettingKind<int>
-{
-    static constexpr SettingBase::Kind value = SettingBase::KIND_INT;
-};
-template <>
-struct SettingKind<uint16_t>
-{
-    static constexpr SettingBase::Kind value = SettingBase::KIND_UINT16;
-};
+// Overload resolution picks the one matching T - a Setting<T> for any other
+// type fails to compile here instead of silently picking a wrong Kind.
+constexpr SettingBase::Kind settingKind(float) { return SettingBase::KIND_FLOAT; }
+constexpr SettingBase::Kind settingKind(int) { return SettingBase::KIND_INT; }
+constexpr SettingBase::Kind settingKind(uint16_t) { return SettingBase::KIND_UINT16; }
 
 // One setting: its current value plus everything that describes it.
 // Reads like a plain T (`cfg.maxChargeA * 0.5f`), so the glideslope math
@@ -142,11 +130,10 @@ class Setting : public SettingBase
 public:
     Setting(const char *key, const char *label, const char *unit, T min, T max, T def,
             uint8_t decimals, const char *step)
-        : SettingBase(key, label, unit, step, decimals, SettingKind<T>::value),
+        : SettingBase(key, label, unit, step, decimals, settingKind(T{})),
           value_(def), min_(min), max_(max), def_(def) {}
 
     operator T() const { return value_; }
-    T get() const { return value_; }
 
     double value() const override { return value_; }
     double min() const override { return min_; }
@@ -304,20 +291,6 @@ struct SystemConfig
             !(cfg.cvStartDTaper > cfg.cvLowAlarmGate && cfg.cvLowAlarmGate > cfg.cvMinDischarge);
         r.maintHysteresisBad = cfg.cvMaintStart >= cfg.cvMaintStop;
         return r;
-    }
-
-    // Bit i set iff before.all()[i]->value() != after.all()[i]->value() -
-    // for WebDashboard's post-save "[CFG] <label>: <old> -> <new>" lines.
-    static uint32_t changedMask(const SystemConfig &before, const SystemConfig &after)
-    {
-        static_assert(kNumSettings <= 32, "changedMask() needs a wider return type");
-        std::array<const SettingBase *, kNumSettings> b = before.all();
-        std::array<const SettingBase *, kNumSettings> a = after.all();
-        uint32_t mask = 0;
-        for (size_t i = 0; i < kNumSettings; i++)
-            if (b[i]->value() != a[i]->value())
-                mask |= (uint32_t)1 << i;
-        return mask;
     }
 
 private:

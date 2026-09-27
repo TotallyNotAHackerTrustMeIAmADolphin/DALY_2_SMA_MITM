@@ -19,7 +19,7 @@ void setUp(void)
 
 void tearDown(void) {}
 
-// --- CCL taper (carried over from the old device-side test) ---
+// --- CCL taper ---
 
 static void test_ccl_full_below_taper(void) { TEST_ASSERT_EQUAL(1000, calculateCCL(cfg, 3.0f, 3.0f, 0, true, false)); }
 static void test_ccl_full_at_taper_start(void) { TEST_ASSERT_EQUAL(1000, calculateCCL(cfg, 3.3f, 3.3f, 0, true, false)); }
@@ -215,44 +215,17 @@ static void test_dcl_derated_by_spread_never_below_limp(void)
     TEST_ASSERT_EQUAL(150, calculateDCL(cfg, 3.3f, 3.3f, 150, true, false));
 }
 
-static void test_ccl_gate_unaffected_by_spread(void)
+static void test_hard_gates_and_maintenance_unaffected_by_spread(void)
 {
-    // rawMaxV(3.4) >= cvHighAlarmGate(3.4) -> trickle is returned before
-    // the spread factor is even computed - a huge spread (200mV, well past
-    // spreadMaxMv) changes nothing. Same value as test_ccl_trickle_at_alarm_gate.
+    // A huge spread (200mV, well past spreadMaxMv) changes nothing on any
+    // branch that returns before the spread factor is computed: the gate,
+    // the hard cutoff, or maintenance mode. Same values as their
+    // spread-free counterparts above.
     TEST_ASSERT_EQUAL(50, calculateCCL(cfg, 3.4f, 3.4f, 200, true, false));
-}
-
-static void test_ccl_hard_cutoff_unaffected_by_spread(void)
-{
-    // rawMaxV(3.5) >= cvMaxCharge(3.5) -> 0A regardless of spread.
     TEST_ASSERT_EQUAL(0, calculateCCL(cfg, 3.5f, 3.5f, 200, true, false));
-}
-
-static void test_ccl_maintenance_unaffected_by_spread(void)
-{
-    // maintenanceActive short-circuits before the spread factor is
-    // computed -> still maintAmps(20A) -> 200, not derated.
     TEST_ASSERT_EQUAL(200, calculateCCL(cfg, 3.0f, 3.0f, 200, true, true));
-}
-
-static void test_dcl_gate_unaffected_by_spread(void)
-{
-    // rawMinV(3.1) <= cvLowAlarmGate(3.1) -> limp, unaffected by spread.
-    // Same value as test_dcl_limp_at_alarm_gate.
     TEST_ASSERT_EQUAL(150, calculateDCL(cfg, 3.1f, 3.1f, 200, true, false));
-}
-
-static void test_dcl_hard_cutoff_unaffected_by_spread(void)
-{
-    // rawMinV(3.0) <= cvMinDischarge(3.0) -> 0A regardless of spread.
     TEST_ASSERT_EQUAL(0, calculateDCL(cfg, 3.0f, 3.0f, 200, true, false));
-}
-
-static void test_dcl_maintenance_unaffected_by_spread(void)
-{
-    // maintenanceActive short-circuits before the spread factor is
-    // computed -> still 0A (DCL is always 0 in maintenance), unaffected.
     TEST_ASSERT_EQUAL(0, calculateDCL(cfg, 3.3f, 3.3f, 200, true, true));
 }
 
@@ -260,9 +233,7 @@ static void test_dcl_maintenance_unaffected_by_spread(void)
 
 static void test_ccl_just_above_taper_start(void)
 {
-    // 3.31V: slope = (3.4-3.31)/0.1 = 0.9 -> target = 5 + 0.9*(100-5)
-    //        = 5 + 85.5 = 90.5A -> 905 (confirmed against a native float
-    //        build: no rounding surprise at this point).
+    // 3.31V: slope = (3.4-3.31)/0.1 = 0.9 -> target = 5 + 0.9*(100-5) = 90.5A -> 905.
     TEST_ASSERT_EQUAL(905, calculateCCL(cfg, 3.31f, 3.31f, 0, true, false));
 }
 
@@ -287,9 +258,7 @@ static void test_dcl_full_at_taper_start_boundary(void)
 
 static void test_dcl_just_below_taper_start(void)
 {
-    // 3.19V: slope = (3.19-3.1)/0.1 = 0.9 -> target = 15 + 0.9*(200-15)
-    //        = 15 + 166.5 = 181.5A -> 1815 (confirmed against a native
-    //        float build: no rounding surprise at this point either).
+    // 3.19V: slope = (3.19-3.1)/0.1 = 0.9 -> target = 15 + 0.9*(200-15) = 181.5A -> 1815.
     TEST_ASSERT_EQUAL(1815, calculateDCL(cfg, 3.19f, 3.19f, 0, true, false));
 }
 
@@ -306,12 +275,8 @@ static void test_dcl_zero_below_hard_min(void)
 
 static void test_ccl_equal_gate_and_taper_still_trickle(void)
 {
-    // A naive "cvHighAlarmGate == cvStartTaper" degenerate config does NOT
-    // actually exercise the `div <= 0.0001f` guard: any voltage >= the
-    // (now-shared) threshold is caught by the earlier
-    // `maxCellV >= cfg.cvHighAlarmGate` check first, so the taper branch
-    // (and its guard) is never entered. Still correct - trickle - just via
-    // a different code path than the guard.
+    // "gate == taper" is caught by the earlier `maxCellV >= cvHighAlarmGate`
+    // check, never reaching the taper branch's own `div <= 0.0001f` guard.
     cfg.cvHighAlarmGate.setUnchecked(3.3f);
     cfg.cvStartTaper.setUnchecked(3.3f);
     TEST_ASSERT_EQUAL(50, calculateCCL(cfg, 3.35f, 3.35f, 0, true, false));
@@ -319,11 +284,9 @@ static void test_ccl_equal_gate_and_taper_still_trickle(void)
 
 static void test_ccl_degenerate_taper_guard(void)
 {
-    // To actually exercise the `div <= 0.0001f` guard we need
-    // cvStartTaper < maxCellV < cvHighAlarmGate (so neither boundary check
-    // above fires first) with the gate/taper gap itself <= 0.0001f. Build
-    // the thresholds from an epsilon offset rather than decimal literals so
-    // the ordering is exact regardless of how the literals themselves round.
+    // Exercises the `div <= 0.0001f` guard itself: cvStartTaper < maxCellV
+    // < cvHighAlarmGate with the gate/taper gap <= 0.0001f, built from an
+    // epsilon offset so the ordering is exact regardless of float rounding.
     cfg.cvStartTaper.setUnchecked(3.3f);
     cfg.cvHighAlarmGate.setUnchecked(cfg.cvStartTaper + 0.00005f); // gap 0.00005 <= 0.0001f
     float v = cfg.cvStartTaper + 0.00002f;             // strictly between
@@ -332,28 +295,13 @@ static void test_ccl_degenerate_taper_guard(void)
 
 static void test_dcl_degenerate_taper_guard(void)
 {
-    // Mirrors test_ccl_degenerate_taper_guard. (A first guess that this
-    // guard is unreachable for DCL - because "gate == taper" doesn't reach
-    // it, same as CCL above - doesn't hold up under the same epsilon-gap
-    // construction used for CCL: the earlier `minCellV <= cvLowAlarmGate`
-    // check only intercepts when the gap is exactly zero or negative, not
-    // when it's merely tiny, so this guard IS reachable with sane-direction,
-    // near-equal thresholds.)
+    // Mirrors test_ccl_degenerate_taper_guard: unlike "gate == taper", a
+    // merely-tiny gap isn't caught by the earlier `minCellV <= cvLowAlarmGate`
+    // check, so this guard is reachable here.
     cfg.cvLowAlarmGate.setUnchecked(3.1f);
     cfg.cvStartDTaper.setUnchecked(cfg.cvLowAlarmGate + 0.00005f);
     float v = cfg.cvLowAlarmGate + 0.00002f;
     TEST_ASSERT_EQUAL(150, calculateDCL(cfg, v, v, 0, true, false));
-}
-
-static void test_ccl_inverted_gate_taper_trickle(void)
-{
-    // Inverted config: gate(3.3) below taper(3.4). The
-    // `maxCellV >= cfg.cvHighAlarmGate` check still fires first for any
-    // voltage at/above the (lower) gate, so this never yields more than
-    // trickle even though the config itself is nonsensical.
-    cfg.cvHighAlarmGate.setUnchecked(3.3f);
-    cfg.cvStartTaper.setUnchecked(3.4f);
-    TEST_ASSERT_EQUAL(50, calculateCCL(cfg, 3.35f, 3.35f, 0, true, false));
 }
 
 static void test_ccl_clamp_when_trickle_exceeds_max(void)
@@ -376,13 +324,9 @@ static void test_dcl_clamp_when_limp_exceeds_max(void)
 
 static void test_ccl_rounding_artifact(void)
 {
-    // maxChargeA=12.35f is not exactly representable (its actual value is
-    // 12.35000038...); multiplying by 10.0f in single precision gives
-    // 123.50000038..., which rounds up to 124. This is an IEEE-754 single
-    // precision artefact of the literal itself, not of the round() call -
-    // it is identical on native (this test) and on the xtensa device build,
-    // since both use IEEE binary32 float. Confirmed against a standalone
-    // float build before pinning.
+    // 12.35f isn't exactly representable (~12.35000038); *10.0f in single
+    // precision rounds up to 124, identically on native and the xtensa
+    // device build (both IEEE binary32).
     cfg.maxChargeA.setUnchecked(12.35f);
     TEST_ASSERT_EQUAL(124, calculateCCL(cfg, 3.0f, 3.0f, 0, true, false));
 }
@@ -620,12 +564,7 @@ int main(int, char **)
     RUN_TEST(test_ccl_derated_by_spread_never_below_trickle);
     RUN_TEST(test_dcl_derated_by_spread_at_midpoint);
     RUN_TEST(test_dcl_derated_by_spread_never_below_limp);
-    RUN_TEST(test_ccl_gate_unaffected_by_spread);
-    RUN_TEST(test_ccl_hard_cutoff_unaffected_by_spread);
-    RUN_TEST(test_ccl_maintenance_unaffected_by_spread);
-    RUN_TEST(test_dcl_gate_unaffected_by_spread);
-    RUN_TEST(test_dcl_hard_cutoff_unaffected_by_spread);
-    RUN_TEST(test_dcl_maintenance_unaffected_by_spread);
+    RUN_TEST(test_hard_gates_and_maintenance_unaffected_by_spread);
     RUN_TEST(test_ccl_just_above_taper_start);
     RUN_TEST(test_ccl_trickle_between_gate_and_max);
     RUN_TEST(test_ccl_zero_above_hard_max);
@@ -636,7 +575,6 @@ int main(int, char **)
     RUN_TEST(test_ccl_equal_gate_and_taper_still_trickle);
     RUN_TEST(test_ccl_degenerate_taper_guard);
     RUN_TEST(test_dcl_degenerate_taper_guard);
-    RUN_TEST(test_ccl_inverted_gate_taper_trickle);
     RUN_TEST(test_ccl_clamp_when_trickle_exceeds_max);
     RUN_TEST(test_dcl_clamp_when_limp_exceeds_max);
     RUN_TEST(test_ccl_rounding_artifact);

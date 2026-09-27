@@ -8,6 +8,7 @@
 #include <unity.h>
 #include <string>
 #include <cstring>
+#include <vector>
 #include "CsvDecimation.h"
 
 using CsvDecimation::Accumulator;
@@ -15,24 +16,28 @@ using CsvDecimation::Accumulator;
 void setUp(void) {}
 void tearDown(void) {}
 
+// Feeds `input` through a fresh Accumulator in one shot and returns whatever
+// finish() left in the output buffer, so each test below is just a
+// fields/skip/input/expected comparison.
+static std::string run(const size_t *fields, size_t nFields, size_t skip, const std::string &input, size_t outCap = 256)
+{
+    Accumulator accum(fields, nFields, skip);
+    std::vector<char> out(outCap);
+    size_t outLen = 0;
+    accum.feed((const uint8_t *)input.data(), input.size(), out.data(), out.size(), &outLen);
+    accum.finish(out.data(), out.size(), &outLen);
+    return std::string(out.data(), outLen);
+}
+
 // --- skip == 1: every line kept ---
 
 static void test_skip1_all_lines_kept(void)
 {
     // Each line's 3 fields chosen so picking indices {0,1,2} in order
     // reproduces the line unchanged - a simple, self-checking case.
-    const std::string input = "T0,V0,I0\nT1,V1,I1\nT2,V2,I2\n";
     const size_t fields[3] = {0, 1, 2};
-    Accumulator accum(fields, 3, /*skip=*/1);
-
-    char out[256];
-    size_t outLen = 0;
-    accum.feed((const uint8_t *)input.data(), input.size(), out, sizeof(out), &outLen);
-    accum.finish(out, sizeof(out), &outLen);
-
-    const std::string expected = "T0,V0,I0\nT1,V1,I1\nT2,V2,I2\n";
-    TEST_ASSERT_EQUAL_UINT32(expected.size(), outLen);
-    TEST_ASSERT_EQUAL_MEMORY(expected.data(), out, expected.size());
+    TEST_ASSERT_EQUAL_STRING("T0,V0,I0\nT1,V1,I1\nT2,V2,I2\n",
+                              run(fields, 3, 1, "T0,V0,I0\nT1,V1,I1\nT2,V2,I2\n").c_str());
 }
 
 // --- skip == N > 1: only every Nth line kept ---
@@ -40,24 +45,13 @@ static void test_skip1_all_lines_kept(void)
 static void test_skipN_only_every_nth_line_kept(void)
 {
     // 6 lines (index 0..5), skip=3: lineIdx 0 is always kept (keepLine_
-    // starts true); index 1,2 dropped; index 3 kept (3 % 3 == 0); index
-    // 4,5 dropped. Matches the pre-refactor `keepLine = (lineIdx % skip
-    // == 0)` semantics exactly.
+    // starts true); index 1,2 dropped; index 3 kept (3 % 3 == 0); index 4,5 dropped.
     std::string input;
     for (int i = 0; i < 6; i++)
         input += "L" + std::to_string(i) + "A,L" + std::to_string(i) + "B\n";
 
     const size_t fields[1] = {0}; // just the first field, to keep expected output short
-    Accumulator accum(fields, 1, /*skip=*/3);
-
-    char out[256];
-    size_t outLen = 0;
-    accum.feed((const uint8_t *)input.data(), input.size(), out, sizeof(out), &outLen);
-    accum.finish(out, sizeof(out), &outLen);
-
-    const std::string expected = "L0A\nL3A\n";
-    TEST_ASSERT_EQUAL_UINT32(expected.size(), outLen);
-    TEST_ASSERT_EQUAL_MEMORY(expected.data(), out, expected.size());
+    TEST_ASSERT_EQUAL_STRING("L0A\nL3A\n", run(fields, 1, 3, input).c_str());
 }
 
 // --- a line split across two feed() calls (chunk boundary mid-line) ---
@@ -93,22 +87,13 @@ static void test_oversized_line_safely_truncated(void)
 {
     // Field 0 is short ("AAAA"), field 1 is 400 'B's - well past
     // kLineBufSize (320) once combined with the leading "AAAA,". Only the
-    // first kLineBufSize-1 (319) bytes of the line are ever buffered
-    // (matching the pre-refactor lineBuf's `lineLen < sizeof(lineBuf)-1`
-    // bounds check), so field 1's extracted text is truncated to whatever
-    // fit: 319 - strlen("AAAA,") = 314 'B's.
+    // first kLineBufSize-1 (319) bytes of the line are ever buffered, so
+    // field 1's extracted text is truncated to whatever fit: 319 -
+    // strlen("AAAA,") = 314 'B's.
     std::string line = "AAAA," + std::string(400, 'B') + "\n";
     const size_t fields[2] = {0, 1};
-    Accumulator accum(fields, 2, /*skip=*/1);
-
-    char out[1024];
-    size_t outLen = 0;
-    accum.feed((const uint8_t *)line.data(), line.size(), out, sizeof(out), &outLen);
-    accum.finish(out, sizeof(out), &outLen);
-
     const std::string expected = "AAAA," + std::string(314, 'B') + "\n";
-    TEST_ASSERT_EQUAL_UINT32(expected.size(), outLen);
-    TEST_ASSERT_EQUAL_MEMORY(expected.data(), out, expected.size());
+    TEST_ASSERT_EQUAL_STRING(expected.c_str(), run(fields, 2, 1, line, 1024).c_str());
 }
 
 // --- a final line with no trailing newline is only flushed by finish() ---
@@ -174,12 +159,7 @@ static void test_tiny_outcap_never_overflows_and_ends_on_complete_line(void)
 static void test_finish_with_no_input_writes_nothing(void)
 {
     const size_t fields[1] = {0};
-    Accumulator accum(fields, 1, /*skip=*/1);
-
-    char out[64];
-    size_t outLen = 0;
-    accum.finish(out, sizeof(out), &outLen);
-    TEST_ASSERT_EQUAL_UINT32(0, outLen);
+    TEST_ASSERT_EQUAL_STRING("", run(fields, 1, 1, "").c_str());
 }
 
 // --- CsvDecimation::estimateSkip (#96): the skip-interval math extracted
@@ -187,33 +167,31 @@ static void test_finish_with_no_input_writes_nothing(void)
 
 using CsvDecimation::estimateSkip;
 
-// Zero sample lines (huge single line, or a file barely bigger than its
-// header): estimatedLines stays at its default of 1, so skip is always 1
-// regardless of dataBytes/targetPoints.
-static void test_estimateskip_zero_sample_lines_is_skip_one(void)
+// Cases whose skip is always 1: zero sample lines (estimatedLines stays at
+// its default), a tiny file whose estimated line count rounds down to 0
+// (clamped back up rather than dividing by zero downstream), and a
+// targetPoints far bigger than the estimated row count (keep every row).
+struct EstimateSkipCase
 {
-    TEST_ASSERT_EQUAL_UINT32(1, estimateSkip(/*dataBytes=*/500000, /*sampleBytes=*/4096, /*sampleLines=*/0, /*targetPoints=*/300));
-    TEST_ASSERT_EQUAL_UINT32(1, estimateSkip(0, 0, 0, 1));
+    uint32_t dataBytes, sampleBytes;
+    size_t sampleLines, targetPoints, expectedSkip;
+};
+
+static void test_estimateskip_skip_one_cases(void)
+{
+    static const EstimateSkipCase cases[] = {
+        {500000, 4096, 0, 300, 1},
+        {0, 0, 0, 1, 1},
+        {10, 4096, 100, 300, 1},
+        {4096, 4096, 100, 100000, 1},
+    };
+    for (const auto &c : cases)
+        TEST_ASSERT_EQUAL_UINT32(c.expectedSkip, estimateSkip(c.dataBytes, c.sampleBytes, c.sampleLines, c.targetPoints));
 }
 
-// A tiny file whose estimated line count rounds down to 0 is clamped back
-// up to 1 rather than dividing by zero downstream.
-static void test_estimateskip_tiny_file_clamped_to_one_line(void)
-{
-    // avgLineLen = 4096/100 ~= 41; dataBytes=10 -> estimatedLines rounds to 0.
-    TEST_ASSERT_EQUAL_UINT32(1, estimateSkip(/*dataBytes=*/10, /*sampleBytes=*/4096, /*sampleLines=*/100, /*targetPoints=*/300));
-}
-
-// targetPoints far bigger than the estimated row count: keep every row (skip=1).
-static void test_estimateskip_oversized_target_keeps_every_row(void)
-{
-    // avgLineLen = 4096/100 = 40.96; dataBytes=4096 -> estimatedLines ~= 100.
-    TEST_ASSERT_EQUAL_UINT32(1, estimateSkip(/*dataBytes=*/4096, /*sampleBytes=*/4096, /*sampleLines=*/100, /*targetPoints=*/100000));
-}
-
-// Normal case: matches the pre-refactor inline math exactly (same floats,
-// same integer truncation order: estimatedLines first, then /targetPoints).
-static void test_estimateskip_normal_case_matches_old_inline_math(void)
+// Normal case: same integer truncation order as the formula (estimatedLines
+// first, then /targetPoints).
+static void test_estimateskip_normal_case(void)
 {
     const uint32_t dataBytes = 24000;
     const uint32_t sampleBytes = 4096;
@@ -247,10 +225,8 @@ int main(int, char **)
     RUN_TEST(test_final_line_without_newline_flushed_by_finish);
     RUN_TEST(test_tiny_outcap_never_overflows_and_ends_on_complete_line);
     RUN_TEST(test_finish_with_no_input_writes_nothing);
-    RUN_TEST(test_estimateskip_zero_sample_lines_is_skip_one);
-    RUN_TEST(test_estimateskip_tiny_file_clamped_to_one_line);
-    RUN_TEST(test_estimateskip_oversized_target_keeps_every_row);
-    RUN_TEST(test_estimateskip_normal_case_matches_old_inline_math);
+    RUN_TEST(test_estimateskip_skip_one_cases);
+    RUN_TEST(test_estimateskip_normal_case);
     RUN_TEST(test_estimateskip_zero_target_points_treated_as_one);
     return UNITY_END();
 }

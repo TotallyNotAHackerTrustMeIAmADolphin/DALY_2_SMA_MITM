@@ -10,14 +10,13 @@ namespace ConfigForm
 {
     struct Result
     {
-        bool present[SystemConfig::kNumSettings] = {false}; // key was submitted
         bool ok = true; // false = caller must not publish or store copy
     };
 
-    // Parses every field lookup(key) returns non-null for into copy, marks
-    // it present, and - only if everything parsed - checks the two-setting
-    // rules. emit(message) fires once per problem; both callables' return
-    // values need only stay valid for that one call.
+    // Parses every field lookup(key) returns non-null for into copy, and -
+    // only if everything parsed - checks the two-setting rules. emit(message)
+    // fires once per problem; both callables' return values need only stay
+    // valid for that one call.
     template <typename Lookup, typename Emit>
     Result apply(SystemConfig &copy, Lookup lookup, Emit emit)
     {
@@ -29,7 +28,6 @@ namespace ConfigForm
             const char *text = lookup(s.key());
             if (!text)
                 continue;
-            r.present[i] = true;
 
             switch (s.parse(text))
             {
@@ -69,23 +67,24 @@ namespace ConfigForm
     template <typename Emit>
     void logChanges(const SystemConfig &before, const SystemConfig &after, Emit emit)
     {
-        uint32_t changed = SystemConfig::changedMask(before, after);
-        if (changed == 0)
-        {
-            emit("[CFG] Saved, no changes\n");
-            return;
-        }
         std::array<const SettingBase *, SystemConfig::kNumSettings> beforeSettings = before.all();
         std::array<const SettingBase *, SystemConfig::kNumSettings> afterSettings = after.all();
+        bool any = false;
         for (size_t i = 0; i < afterSettings.size(); i++)
         {
-            if (!(changed & ((uint32_t)1 << i)))
+            // Compares stored values, not the doubles a caller passed to
+            // set(): two values that round to the same binary32 are not a
+            // change (#94), but a tiny real change still is.
+            if (beforeSettings[i]->value() == afterSettings[i]->value())
                 continue;
+            any = true;
             char oldBuf[24], newBuf[24], line[96];
             formatSettingValue(*beforeSettings[i], beforeSettings[i]->value(), oldBuf, sizeof(oldBuf));
             formatSettingValue(*afterSettings[i], afterSettings[i]->value(), newBuf, sizeof(newBuf));
             snprintf(line, sizeof(line), "[CFG] %s: %s -> %s %s\n", afterSettings[i]->label(), oldBuf, newBuf, afterSettings[i]->unit());
             emit(line);
         }
+        if (!any)
+            emit("[CFG] Saved, no changes\n");
     }
 }

@@ -10,6 +10,10 @@
 #include <SD.h>
 #include <cstddef>
 
+// Guards currentData/cfg; defined in main.cpp. Only saveConfig() below
+// touches it in this file.
+extern SemaphoreHandle_t dataMutex;
+
 namespace
 {
     // Every setting is a Setting<T> member of SystemConfig (include/
@@ -48,17 +52,9 @@ namespace
 WebDashboard::WebDashboard(uint16_t port)
     : _server(port), _events("/events") {}
 
-void WebDashboard::begin(SystemConfig *cfg)
+void WebDashboard::begin(SystemConfig &cfg)
 {
-    // /config and /save (registered by setupRoutes() below) dereference
-    // _cfg. Refuse to start rather than serve routes that would crash on a
-    // null deref.
-    if (cfg == nullptr)
-    {
-        logTo(_debugCb, "[WEB] begin() called with a null config - server not started\n");
-        return;
-    }
-    _cfg = cfg;
+    _cfg = &cfg;
 
     setupRoutes();
 
@@ -137,7 +133,7 @@ void WebDashboard::saveConfig(AsyncWebServerRequest *request)
         return;
     }
 
-    ConfigStore::store(copy, result.present);
+    ConfigStore::store(copy);
 
     // Only now that the save has fully succeeded (published under the lock
     // and written to NVS), never for a refused save.
@@ -182,11 +178,6 @@ bool WebDashboard::findLogFile(AsyncWebServerRequest *request, String &outName, 
     return false;
 }
 
-const char *WebDashboard::contentTypeForLogFile(const String &name)
-{
-    return name.endsWith(".csv") ? "text/csv" : "text/plain";
-}
-
 namespace
 {
     // ReadResult -> status code, once, for both /api/logs/content and
@@ -210,11 +201,6 @@ namespace
     }
 }
 
-void WebDashboard::handleIndex(AsyncWebServerRequest *request)
-{
-    request->send(200, "text/html", index_html);
-}
-
 namespace
 {
     // Both action routes differ only in which UiAction they apply.
@@ -223,16 +209,6 @@ namespace
         bool applied = cb && cb(action);
         request->send(applied ? 200 : 503, "text/plain", applied ? "OK" : "Device busy, try again");
     }
-}
-
-void WebDashboard::handleToggleMaint(AsyncWebServerRequest *request)
-{
-    respondToAction(request, _actionCb, UiAction::ToggleMaint);
-}
-
-void WebDashboard::handleResetSMA(AsyncWebServerRequest *request)
-{
-    respondToAction(request, _actionCb, UiAction::ResetSma);
 }
 
 void WebDashboard::handleConfigPage(AsyncWebServerRequest *request)
@@ -246,16 +222,6 @@ void WebDashboard::handleConfigPage(AsyncWebServerRequest *request)
         h.replace(String("!!IN_") + s->key() + "!!", inputTag(*s));
     }
     request->send(200, "text/html", h);
-}
-
-void WebDashboard::handleLogsPage(AsyncWebServerRequest *request)
-{
-    request->send(200, "text/html", logs_html);
-}
-
-void WebDashboard::handleGraphsPage(AsyncWebServerRequest *request)
-{
-    request->send(200, "text/html", graphs_html);
 }
 
 void WebDashboard::handleLogList(AsyncWebServerRequest *request)
@@ -337,7 +303,7 @@ void WebDashboard::handleLogDownload(AsyncWebServerRequest *request)
     request->onDisconnect([lock]() mutable
                            { lock.reset(); });
 
-    request->send(SD, sdPath, contentTypeForLogFile(name), true /* download */);
+    request->send(SD, sdPath, name.endsWith(".csv") ? "text/csv" : "text/plain", true /* download */);
 }
 
 void WebDashboard::handleGraph(AsyncWebServerRequest *request)
@@ -373,16 +339,18 @@ void WebDashboard::handleGraph(AsyncWebServerRequest *request)
 
 void WebDashboard::setupRoutes()
 {
-    _server.on("/", HTTP_GET, handleIndex);
+    _server.on("/", HTTP_GET, [](AsyncWebServerRequest *r)
+               { r->send(200, "text/html", index_html); });
     _server.on("/toggleMaint", HTTP_POST, [this](AsyncWebServerRequest *r)
-               { handleToggleMaint(r); });
+               { respondToAction(r, _actionCb, UiAction::ToggleMaint); });
     _server.on("/resetSMA", HTTP_POST, [this](AsyncWebServerRequest *r)
-               { handleResetSMA(r); });
+               { respondToAction(r, _actionCb, UiAction::ResetSma); });
     _server.on("/config", HTTP_GET, [this](AsyncWebServerRequest *r)
                { handleConfigPage(r); });
     _server.on("/save", HTTP_GET, [this](AsyncWebServerRequest *r)
                { saveConfig(r); });
-    _server.on("/logs", HTTP_GET, handleLogsPage);
+    _server.on("/logs", HTTP_GET, [](AsyncWebServerRequest *r)
+               { r->send(200, "text/html", logs_html); });
     _server.on("/api/logs/list", HTTP_GET, handleLogList);
     _server.on("/api/logs/content", HTTP_GET, handleLogContent);
     _server.on("/api/logs/download", HTTP_GET, handleLogDownload);
@@ -390,6 +358,7 @@ void WebDashboard::setupRoutes()
     // matters, live in Diagnostics::registerRoutes() (#90) - neither is web
     // code.
     Diagnostics::registerRoutes(_server);
-    _server.on("/graphs", HTTP_GET, handleGraphsPage);
+    _server.on("/graphs", HTTP_GET, [](AsyncWebServerRequest *r)
+               { r->send(200, "text/html", graphs_html); });
     _server.on("/api/logs/graph", HTTP_GET, handleGraph);
 }

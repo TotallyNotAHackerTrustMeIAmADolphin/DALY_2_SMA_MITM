@@ -1,6 +1,6 @@
-// Native unit tests for the pure SMA/Victron CAN frame encode/decode and
-// bus-off retry logic (#45): `pio test -e native`. Includes the real
-// include/SMAFrames.h - no mirrored copy to keep in sync.
+// Native unit tests for the pure SMA/Victron CAN frame encode/decode
+// (#45): `pio test -e native`. Includes the real include/SMAFrames.h - no
+// mirrored copy to keep in sync.
 
 #include <unity.h>
 #include "SMAFrames.h"
@@ -25,7 +25,7 @@ static const CanFrame *findFrame(const TxFrameSet &set, uint32_t id)
 
 // --- encodeStatus (sendStatus's pre-#45 byte layout) ---
 
-void test_encode_status_normal_operation(void)
+static void test_encode_status_normal_operation(void)
 {
     // packVoltage 55.2V -> v_out = round(5520.0) = 5520 = 0x1590
     // packCurrent 5.0A  -> i_out = round(50.0)   = 50   = 0x0032
@@ -40,7 +40,7 @@ void test_encode_status_normal_operation(void)
     data.ccl = 300;
     data.dcl = 250;
     data.cvl = 5750;
-    data.dvl = 4900; // unused by encodeStatus, same as pre-#45 sendStatus()
+    data.dvl = 490; // 49.0 V (0.1 V units) -> bytes 6-7 (#63)
     data.maintenanceActive = false;
     data.isResetting = false;
 
@@ -53,7 +53,7 @@ void test_encode_status_normal_operation(void)
     const CanFrame *f351 = findFrame(frameSet, 0x351);
     TEST_ASSERT_NOT_NULL(f351);
     TEST_ASSERT_EQUAL_UINT8(8, f351->dlc);
-    uint8_t expected351[8] = {0x76, 0x16, 0x2C, 0x01, 0xFA, 0x00, 0xC0, 0x00};
+    uint8_t expected351[8] = {0x76, 0x16, 0x2C, 0x01, 0xFA, 0x00, 0xEA, 0x01};
     TEST_ASSERT_EQUAL_UINT8_ARRAY(expected351, f351->data, 8);
 
     const CanFrame *f355 = findFrame(frameSet, 0x355);
@@ -75,7 +75,7 @@ void test_encode_status_normal_operation(void)
     TEST_ASSERT_EQUAL_UINT8_ARRAY(expected359, f359->data, 8);
 }
 
-void test_encode_status_maintenance_sets_soc_sentinel_and_status_bytes(void)
+static void test_encode_status_maintenance_sets_soc_sentinel_and_real_dvl(void)
 {
     SMATxData data{};
     data.packVoltage = 50.0f;
@@ -85,6 +85,7 @@ void test_encode_status_maintenance_sets_soc_sentinel_and_status_bytes(void)
     data.ccl = 10;
     data.dcl = 10;
     data.cvl = 5500;
+    data.dvl = 480;
     data.maintenanceActive = true;
     data.isResetting = false;
 
@@ -98,18 +99,23 @@ void test_encode_status_maintenance_sets_soc_sentinel_and_status_bytes(void)
 
     const CanFrame *f351 = findFrame(frameSet, 0x351);
     TEST_ASSERT_NOT_NULL(f351);
-    TEST_ASSERT_EQUAL_UINT8(0x70, f351->data[6]); // maintenance status byte
+    // Maintenance sends the real DVL like normal operation (#63), not the
+    // old 0x70 status byte.
+    TEST_ASSERT_EQUAL_UINT8(0xE0, f351->data[6]); // 480 = 0x01E0 (48.0 V)
+    TEST_ASSERT_EQUAL_UINT8(0x01, f351->data[7]);
 
     const CanFrame *f359 = findFrame(frameSet, 0x359);
     TEST_ASSERT_NOT_NULL(f359);
     TEST_ASSERT_EQUAL_UINT8(0x10, f359->data[0]); // maintenance bit set
 }
 
-void test_encode_status_resetting_overrides_maintenance_status_byte(void)
+static void test_encode_status_resetting_sends_zero_dvl(void)
 {
-    // isResetting takes priority over maintenanceActive for the 0x351
-    // status byte, same as the pre-#45 ternary chain.
+    // The cluster reset sends DVL 0x0000 for its hold, whatever the real
+    // DVL and maintenance state (#63) - exactly the bytes it sent before
+    // DVL was encoded, since the reset relies on them.
     SMATxData data{};
+    data.dvl = 480;
     data.maintenanceActive = true;
     data.isResetting = true;
     data.packSOC = 50.0f;
@@ -120,9 +126,10 @@ void test_encode_status_resetting_overrides_maintenance_status_byte(void)
     const CanFrame *f351 = findFrame(frameSet, 0x351);
     TEST_ASSERT_NOT_NULL(f351);
     TEST_ASSERT_EQUAL_UINT8(0x00, f351->data[6]);
+    TEST_ASSERT_EQUAL_UINT8(0x00, f351->data[7]);
 }
 
-void test_encode_status_negative_current(void)
+static void test_encode_status_negative_current(void)
 {
     // packCurrent -12.3A -> i_out = round(-123.0) = -123 = 0xFF85 (int16_t)
     SMATxData data{};
@@ -137,7 +144,7 @@ void test_encode_status_negative_current(void)
     TEST_ASSERT_EQUAL_UINT8(0xFF, f356->data[3]);
 }
 
-void test_encode_status_ticker_rollover_emits_heartbeat_frames(void)
+static void test_encode_status_ticker_rollover_emits_heartbeat_frames(void)
 {
     // tickerIn=10 -> tickerIn+1=11 > 10 -> resets to 0 and adds the
     // 0x35E ("SMA" ascii id) / 0x35F (manufacturer data) heartbeat pair.
@@ -162,7 +169,7 @@ void test_encode_status_ticker_rollover_emits_heartbeat_frames(void)
     TEST_ASSERT_EQUAL_UINT8_ARRAY(expected35F, f35F->data, 8);
 }
 
-void test_encode_status_ticker_not_yet_due_no_heartbeat(void)
+static void test_encode_status_ticker_not_yet_due_no_heartbeat(void)
 {
     SMATxData data{};
     uint8_t nextTicker;
@@ -176,52 +183,33 @@ void test_encode_status_ticker_not_yet_due_no_heartbeat(void)
 
 // --- decodeFrame (readMessages's 0x305 mode / 0x300 grid decoding) ---
 
-void test_decode_0x305_mode_bulk(void)
+struct ModeCase
 {
-    uint8_t data[8] = {1, 0, 0, 0, 0, 0, 0, 0};
-    RxUpdate update;
-    TEST_ASSERT_TRUE(SMAFrames::decodeFrame(0x305, data, 8, update));
-    TEST_ASSERT_TRUE(update.hasChargeMode);
-    TEST_ASSERT_EQUAL_STRING("Bulk", update.chargeMode);
-    TEST_ASSERT_FALSE(update.hasGridPresent);
+    uint8_t byte;
+    const char *mode;
+};
+
+// #104: anything but 1-4 used to fall through to "Equalize", so a 0 or
+// garbage byte showed as an equalize charge on the dashboard.
+static const ModeCase kModeCases[] = {
+    {0, "Unknown"}, {1, "Bulk"}, {2, "Absorption"}, {3, "Float"},
+    {4, "Equalize"}, {5, "Unknown"}, {99, "Unknown"}, {0xFF, "Unknown"},
+};
+
+static void test_decode_0x305_mode_table(void)
+{
+    for (const ModeCase &c : kModeCases)
+    {
+        uint8_t data[8] = {c.byte, 0, 0, 0, 0, 0, 0, 0};
+        RxUpdate update;
+        TEST_ASSERT_TRUE(SMAFrames::decodeFrame(0x305, data, 8, update));
+        TEST_ASSERT_TRUE(update.hasChargeMode);
+        TEST_ASSERT_FALSE(update.hasGridPresent);
+        TEST_ASSERT_EQUAL_STRING(c.mode, update.chargeMode);
+    }
 }
 
-void test_decode_0x305_mode_absorption(void)
-{
-    uint8_t data[8] = {2, 0, 0, 0, 0, 0, 0, 0};
-    RxUpdate update;
-    TEST_ASSERT_TRUE(SMAFrames::decodeFrame(0x305, data, 8, update));
-    TEST_ASSERT_EQUAL_STRING("Absorption", update.chargeMode);
-}
-
-void test_decode_0x305_mode_float(void)
-{
-    uint8_t data[8] = {3, 0, 0, 0, 0, 0, 0, 0};
-    RxUpdate update;
-    TEST_ASSERT_TRUE(SMAFrames::decodeFrame(0x305, data, 8, update));
-    TEST_ASSERT_EQUAL_STRING("Float", update.chargeMode);
-}
-
-void test_decode_0x305_mode_equalize(void)
-{
-    uint8_t data[8] = {4, 0, 0, 0, 0, 0, 0, 0};
-    RxUpdate update;
-    TEST_ASSERT_TRUE(SMAFrames::decodeFrame(0x305, data, 8, update));
-    TEST_ASSERT_EQUAL_STRING("Equalize", update.chargeMode);
-}
-
-void test_decode_0x305_mode_unrecognized_byte_falls_back_to_equalize(void)
-{
-    // The pre-#45 ternary chain's final else is a catch-all: any byte other
-    // than 1/2/3 (4 included) decodes as "Equalize". Preserved as-is - #45
-    // is a structural extraction, not a protocol fix.
-    uint8_t data[8] = {99, 0, 0, 0, 0, 0, 0, 0};
-    RxUpdate update;
-    TEST_ASSERT_TRUE(SMAFrames::decodeFrame(0x305, data, 8, update));
-    TEST_ASSERT_EQUAL_STRING("Equalize", update.chargeMode);
-}
-
-void test_decode_0x305_zero_dlc_ignored(void)
+static void test_decode_0x305_zero_dlc_ignored(void)
 {
     uint8_t data[8] = {1, 0, 0, 0, 0, 0, 0, 0};
     RxUpdate update;
@@ -229,35 +217,32 @@ void test_decode_0x305_zero_dlc_ignored(void)
     TEST_ASSERT_FALSE(update.hasChargeMode);
 }
 
-void test_decode_0x300_grid_present_true(void)
+struct GridCase
 {
-    uint8_t data[8] = {0x01, 0, 0, 0, 0, 0, 0, 0};
-    RxUpdate update;
-    TEST_ASSERT_TRUE(SMAFrames::decodeFrame(0x300, data, 8, update));
-    TEST_ASSERT_TRUE(update.hasGridPresent);
-    TEST_ASSERT_TRUE(update.gridPresent);
-    TEST_ASSERT_FALSE(update.hasChargeMode);
+    uint8_t byte;
+    bool present;
+};
+
+// 0xFE (bit0 clear, other bits set) still reads as grid absent - only bit0
+// matters.
+static const GridCase kGridCases[] = {
+    {0x01, true}, {0x00, false}, {0xFE, false},
+};
+
+static void test_decode_0x300_grid_present_table(void)
+{
+    for (const GridCase &c : kGridCases)
+    {
+        uint8_t data[8] = {c.byte, 0, 0, 0, 0, 0, 0, 0};
+        RxUpdate update;
+        TEST_ASSERT_TRUE(SMAFrames::decodeFrame(0x300, data, 8, update));
+        TEST_ASSERT_TRUE(update.hasGridPresent);
+        TEST_ASSERT_EQUAL(c.present, update.gridPresent);
+        TEST_ASSERT_FALSE(update.hasChargeMode);
+    }
 }
 
-void test_decode_0x300_grid_present_false(void)
-{
-    uint8_t data[8] = {0x00, 0, 0, 0, 0, 0, 0, 0};
-    RxUpdate update;
-    TEST_ASSERT_TRUE(SMAFrames::decodeFrame(0x300, data, 8, update));
-    TEST_ASSERT_TRUE(update.hasGridPresent);
-    TEST_ASSERT_FALSE(update.gridPresent);
-}
-
-void test_decode_0x300_only_bit0_matters(void)
-{
-    // Other bits set, bit0 clear -> still reads as grid absent.
-    uint8_t data[8] = {0xFE, 0, 0, 0, 0, 0, 0, 0};
-    RxUpdate update;
-    TEST_ASSERT_TRUE(SMAFrames::decodeFrame(0x300, data, 8, update));
-    TEST_ASSERT_FALSE(update.gridPresent);
-}
-
-void test_decode_unknown_id_not_decoded(void)
+static void test_decode_unknown_id_not_decoded(void)
 {
     uint8_t data[8] = {1, 2, 3, 4, 5, 6, 7, 8};
     RxUpdate update;
@@ -266,52 +251,18 @@ void test_decode_unknown_id_not_decoded(void)
     TEST_ASSERT_FALSE(update.hasGridPresent);
 }
 
-// --- shouldRetryBusRecovery (checkBusHealth's _wasBusOff/_recoveryTimer) ---
-
-void test_retry_not_due_before_one_second(void)
-{
-    TEST_ASSERT_FALSE(SMAFrames::shouldRetryBusRecovery(500, true, 0));
-}
-
-void test_retry_due_after_one_second(void)
-{
-    TEST_ASSERT_TRUE(SMAFrames::shouldRetryBusRecovery(1001, true, 0));
-}
-
-void test_retry_boundary_exactly_one_second_not_yet_due(void)
-{
-    // Pre-#45 uses a strict `>`, so exactly 1000ms elapsed is not yet due -
-    // preserved exactly, not rounded to >=.
-    TEST_ASSERT_FALSE(SMAFrames::shouldRetryBusRecovery(1000, true, 0));
-}
-
-void test_retry_never_due_when_bus_not_off(void)
-{
-    TEST_ASSERT_FALSE(SMAFrames::shouldRetryBusRecovery(5000, false, 0));
-}
-
 int main(int, char **)
 {
     UNITY_BEGIN();
     RUN_TEST(test_encode_status_normal_operation);
-    RUN_TEST(test_encode_status_maintenance_sets_soc_sentinel_and_status_bytes);
-    RUN_TEST(test_encode_status_resetting_overrides_maintenance_status_byte);
+    RUN_TEST(test_encode_status_maintenance_sets_soc_sentinel_and_real_dvl);
+    RUN_TEST(test_encode_status_resetting_sends_zero_dvl);
     RUN_TEST(test_encode_status_negative_current);
     RUN_TEST(test_encode_status_ticker_rollover_emits_heartbeat_frames);
     RUN_TEST(test_encode_status_ticker_not_yet_due_no_heartbeat);
-    RUN_TEST(test_decode_0x305_mode_bulk);
-    RUN_TEST(test_decode_0x305_mode_absorption);
-    RUN_TEST(test_decode_0x305_mode_float);
-    RUN_TEST(test_decode_0x305_mode_equalize);
-    RUN_TEST(test_decode_0x305_mode_unrecognized_byte_falls_back_to_equalize);
+    RUN_TEST(test_decode_0x305_mode_table);
     RUN_TEST(test_decode_0x305_zero_dlc_ignored);
-    RUN_TEST(test_decode_0x300_grid_present_true);
-    RUN_TEST(test_decode_0x300_grid_present_false);
-    RUN_TEST(test_decode_0x300_only_bit0_matters);
+    RUN_TEST(test_decode_0x300_grid_present_table);
     RUN_TEST(test_decode_unknown_id_not_decoded);
-    RUN_TEST(test_retry_not_due_before_one_second);
-    RUN_TEST(test_retry_due_after_one_second);
-    RUN_TEST(test_retry_boundary_exactly_one_second_not_yet_due);
-    RUN_TEST(test_retry_never_due_when_bus_not_off);
     return UNITY_END();
 }

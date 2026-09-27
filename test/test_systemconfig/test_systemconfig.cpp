@@ -10,6 +10,8 @@
 #include "SystemConfig.h"
 #include "WebPages.h"
 
+using ParseResult = SettingBase::ParseResult;
+
 using ValidationResult = SystemConfig::ValidationResult;
 
 // A realistic live-style config (3.55 V max charge, #8), set through set()
@@ -30,6 +32,19 @@ static SystemConfig baseline()
 
 void setUp(void) {}
 void tearDown(void) {}
+
+// A setting's position in all() isn't part of the contract (only its key
+// is - see SettingBase::key()'s comment) - this finds it instead of a test
+// hardcoding a literal that reordering all() would silently invalidate.
+static size_t indexOf(SystemConfig &cfg, const SettingBase *s)
+{
+    auto all = cfg.all();
+    for (size_t i = 0; i < all.size(); i++)
+        if (all[i] == s)
+            return i;
+    TEST_FAIL_MESSAGE("setting not found in all()");
+    return (size_t)-1;
+}
 
 // --- The settings themselves ---
 
@@ -96,10 +111,29 @@ static void test_assigning_a_config_copies_values_not_identities(void)
     a = b;
     TEST_ASSERT_EQUAL_FLOAT(3.30f, a.cvStartTaper);
     TEST_ASSERT_EQUAL_STRING("cvt", a.cvStartTaper.key());
-    TEST_ASSERT_TRUE(a.all()[1] == &a.cvStartTaper);
+    // all() must reach a's own member, not b's - mutating through it must
+    // not disturb b (copies values, not identities).
+    size_t idx = indexOf(a, &a.cvStartTaper);
+    TEST_ASSERT_TRUE(a.all()[idx]->set(3.20));
+    TEST_ASSERT_EQUAL_FLOAT(3.20f, a.cvStartTaper);
+    TEST_ASSERT_EQUAL_FLOAT(3.30f, b.cvStartTaper);
     // `a.cvStartTaper = a.cvMaxCharge;` must not compile (it would copy
     // the key "cmv" too): Setting's copy-assignment is deleted.
     TEST_ASSERT_FALSE((std::is_copy_assignable<Setting<float>>::value));
+
+    // saveConfig() edits a copy and publishes it with `*_cfg = copy` - same
+    // guarantee, a different member.
+    SystemConfig c;
+    TEST_ASSERT_TRUE(c.maxChargeA.set(300));
+    SystemConfig d = c;
+    TEST_ASSERT_EQUAL_FLOAT(300.0f, d.maxChargeA);
+    size_t idxCa = indexOf(d, &d.maxChargeA);
+    TEST_ASSERT_TRUE(d.all()[idxCa]->set(200)); // mutate through all(), not the member directly
+    TEST_ASSERT_EQUAL_FLOAT(200.0f, d.maxChargeA); // ... and it reached the real member
+    TEST_ASSERT_EQUAL_FLOAT(300.0f, c.maxChargeA); // c untouched
+    c = d;
+    TEST_ASSERT_EQUAL_FLOAT(200.0f, c.maxChargeA);
+    TEST_ASSERT_EQUAL_STRING("ca", c.all()[idxCa]->key());
 }
 
 static void test_every_setting_has_exactly_one_label_and_input_on_config_page(void)
@@ -127,21 +161,6 @@ static void test_every_setting_has_exactly_one_label_and_input_on_config_page(vo
     TEST_ASSERT_TRUE(html.find("type=\"number\"") == std::string::npos); // no hand-written inputs left
 }
 
-static void test_copy_carries_values_and_all_points_into_the_copy(void)
-{
-    // saveConfig() edits a copy and publishes it with `*_cfg = copy`.
-    SystemConfig a;
-    TEST_ASSERT_TRUE(a.maxChargeA.set(300));
-    SystemConfig b = a;
-    TEST_ASSERT_EQUAL_FLOAT(300.0f, b.maxChargeA);
-    TEST_ASSERT_TRUE(b.all()[0] == &b.maxChargeA);
-    TEST_ASSERT_TRUE(b.all()[0]->set(200));
-    TEST_ASSERT_EQUAL_FLOAT(300.0f, a.maxChargeA); // a untouched
-    a = b;
-    TEST_ASSERT_EQUAL_FLOAT(200.0f, a.maxChargeA);
-    TEST_ASSERT_EQUAL_STRING("ca", a.all()[0]->key());
-}
-
 // --- set(): the only way a value gets in ---
 
 static void test_set_accepts_limits_and_refuses_just_outside(void)
@@ -166,7 +185,7 @@ static void test_set_integer_setting_refuses_fraction(void)
 {
     SystemConfig cfg;
     TEST_ASSERT_FALSE(cfg.vSamples.set(12.5));
-    TEST_ASSERT_EQUAL(12, (int)cfg.vSamples);
+    TEST_ASSERT_EQUAL((int)cfg.vSamples.def(), (int)cfg.vSamples);
 }
 
 static void test_charge_headroom_boundary(void)
@@ -199,48 +218,48 @@ static void test_parse_rejects_garbage_and_leaves_value_alone(void)
     for (const char *in : bad)
     {
         SystemConfig cfg;
-        TEST_ASSERT_EQUAL_MESSAGE(PARSE_NOT_A_NUMBER, cfg.maxChargeA.parse(in), in);
-        TEST_ASSERT_EQUAL_FLOAT(250.0f, cfg.maxChargeA);
+        TEST_ASSERT_EQUAL_MESSAGE(ParseResult::NotANumber, cfg.maxChargeA.parse(in), in);
+        TEST_ASSERT_EQUAL_FLOAT((float)cfg.maxChargeA.def(), cfg.maxChargeA);
     }
 }
 
 static void test_parse_accepts_numbers_with_spaces(void)
 {
     SystemConfig cfg;
-    TEST_ASSERT_EQUAL(PARSE_OK, cfg.maxChargeA.parse(" 252.5 "));
+    TEST_ASSERT_EQUAL(ParseResult::Ok, cfg.maxChargeA.parse(" 252.5 "));
     TEST_ASSERT_EQUAL_FLOAT(252.5f, cfg.maxChargeA);
-    TEST_ASSERT_EQUAL(PARSE_OK, cfg.spreadStartMv.parse("61"));
+    TEST_ASSERT_EQUAL(ParseResult::Ok, cfg.spreadStartMv.parse("61"));
     TEST_ASSERT_EQUAL(61, (int)cfg.spreadStartMv);
-    TEST_ASSERT_EQUAL(PARSE_OK, cfg.cvMaxCharge.parse("3.550"));
+    TEST_ASSERT_EQUAL(ParseResult::Ok, cfg.cvMaxCharge.parse("3.550"));
     TEST_ASSERT_EQUAL_FLOAT(3.55f, cfg.cvMaxCharge);
 }
 
 static void test_parse_never_wraps(void)
 {
     SystemConfig cfg;
-    TEST_ASSERT_EQUAL(PARSE_OUT_OF_RANGE, cfg.spreadStartMv.parse("-60"));
-    TEST_ASSERT_EQUAL(PARSE_OUT_OF_RANGE, cfg.spreadStartMv.parse("65596")); // would truncate to 60
-    TEST_ASSERT_EQUAL(PARSE_OUT_OF_RANGE, cfg.spreadStartMv.parse("99999999999999999999"));
-    TEST_ASSERT_EQUAL(60, (int)cfg.spreadStartMv);
-    TEST_ASSERT_EQUAL(PARSE_OUT_OF_RANGE, cfg.bmsTimeout.parse("-1"));
-    TEST_ASSERT_EQUAL(60, (int)cfg.bmsTimeout);
+    TEST_ASSERT_EQUAL(ParseResult::OutOfRange, cfg.spreadStartMv.parse("-60"));
+    TEST_ASSERT_EQUAL(ParseResult::OutOfRange, cfg.spreadStartMv.parse("65596")); // would truncate to 60
+    TEST_ASSERT_EQUAL(ParseResult::OutOfRange, cfg.spreadStartMv.parse("99999999999999999999"));
+    TEST_ASSERT_EQUAL((int)cfg.spreadStartMv.def(), (int)cfg.spreadStartMv);
+    TEST_ASSERT_EQUAL(ParseResult::OutOfRange, cfg.bmsTimeout.parse("-1"));
+    TEST_ASSERT_EQUAL((int)cfg.bmsTimeout.def(), (int)cfg.bmsTimeout);
 }
 
 static void test_parse_integer_setting_rejects_fraction(void)
 {
     SystemConfig cfg;
-    TEST_ASSERT_EQUAL(PARSE_NOT_A_NUMBER, cfg.vSamples.parse("12.5"));
-    TEST_ASSERT_EQUAL(12, (int)cfg.vSamples);
+    TEST_ASSERT_EQUAL(ParseResult::NotANumber, cfg.vSamples.parse("12.5"));
+    TEST_ASSERT_EQUAL((int)cfg.vSamples.def(), (int)cfg.vSamples);
 }
 
 static void test_parse_range_and_nonfinite(void)
 {
     SystemConfig cfg;
-    TEST_ASSERT_EQUAL(PARSE_OUT_OF_RANGE, cfg.cvMaxCharge.parse("3.5505"));
-    TEST_ASSERT_EQUAL(PARSE_OUT_OF_RANGE, cfg.cvMaxCharge.parse("3.5501"));
-    TEST_ASSERT_EQUAL(PARSE_OUT_OF_RANGE, cfg.cvMaxCharge.parse("nan"));
-    TEST_ASSERT_EQUAL(PARSE_OUT_OF_RANGE, cfg.cvMaxCharge.parse("1e39"));
-    TEST_ASSERT_EQUAL_FLOAT(3.45f, cfg.cvMaxCharge);
+    TEST_ASSERT_EQUAL(ParseResult::OutOfRange, cfg.cvMaxCharge.parse("3.5505"));
+    TEST_ASSERT_EQUAL(ParseResult::OutOfRange, cfg.cvMaxCharge.parse("3.5501"));
+    TEST_ASSERT_EQUAL(ParseResult::OutOfRange, cfg.cvMaxCharge.parse("nan"));
+    TEST_ASSERT_EQUAL(ParseResult::OutOfRange, cfg.cvMaxCharge.parse("1e39"));
+    TEST_ASSERT_EQUAL_FLOAT((float)cfg.cvMaxCharge.def(), cfg.cvMaxCharge);
 }
 
 // --- validate(): rules relating two settings ---
@@ -313,227 +332,6 @@ static void test_combined_violations_all_surface(void)
     TEST_ASSERT_TRUE(r.maintHysteresisBad);
 }
 
-// --- changedMask(): which settings a /save actually changed ---
-
-static void test_changed_mask_identical_configs_is_zero(void)
-{
-    SystemConfig a = baseline();
-    SystemConfig b = baseline();
-    TEST_ASSERT_EQUAL(0u, SystemConfig::changedMask(a, b));
-}
-
-static void test_changed_mask_one_setting_sets_only_its_bit(void)
-{
-    // Every baseline() value sits strictly above its setting's min(), so
-    // moving each one to its min() in turn always produces a real change -
-    // and its bit must be the one at that setting's own position in all().
-    SystemConfig a = baseline();
-    for (size_t i = 0; i < a.all().size(); i++)
-    {
-        SystemConfig probe = a;
-        SettingBase *s = probe.all()[i];
-        TEST_ASSERT_TRUE_MESSAGE(s->set(s->min()), s->key());
-        TEST_ASSERT_TRUE_MESSAGE(s->value() != a.all()[i]->value(), s->key());
-
-        uint32_t mask = SystemConfig::changedMask(a, probe);
-        TEST_ASSERT_EQUAL_MESSAGE((uint32_t)1 << i, mask, s->key());
-    }
-}
-
-static void test_changed_mask_two_settings_both_bits(void)
-{
-    SystemConfig a = baseline();
-    SystemConfig b = baseline();
-    TEST_ASSERT_TRUE(b.maxChargeA.set(300));   // index 0
-    TEST_ASSERT_TRUE(b.vSamples.set(5));       // index 13
-    uint32_t mask = SystemConfig::changedMask(a, b);
-    TEST_ASSERT_EQUAL(((uint32_t)1 << 0) | ((uint32_t)1 << 13), mask);
-}
-
-static void test_changed_mask_refused_set_leaves_mask_zero(void)
-{
-    SystemConfig a = baseline();
-    SystemConfig b = baseline();
-    TEST_ASSERT_FALSE(b.maxChargeA.set(-5)); // refused: out of range
-    TEST_ASSERT_FALSE(b.cvMaxCharge.set(9));  // refused: out of range
-    TEST_ASSERT_EQUAL(0u, SystemConfig::changedMask(a, b));
-}
-
-// --- formatSettingValue(): the post-save change-log formatter ---
-
-static void test_format_setting_value_float_precision(void)
-{
-    SystemConfig cfg;
-    char buf[24];
-
-    formatSettingValue(cfg.maxChargeA, 250.0, buf, sizeof(buf));
-    TEST_ASSERT_EQUAL_STRING("250", buf);
-
-    formatSettingValue(cfg.maxChargeA, 252.5, buf, sizeof(buf));
-    TEST_ASSERT_EQUAL_STRING("252.5", buf);
-
-    formatSettingValue(cfg.maxChargeA, 252.0625, buf, sizeof(buf));
-    TEST_ASSERT_EQUAL_STRING("252.0625", buf);
-
-    formatSettingValue(cfg.trickleA, (double)2.0004f, buf, sizeof(buf));
-    TEST_ASSERT_EQUAL_STRING("2.0004", buf);
-
-    formatSettingValue(cfg.cvMaxCharge, (double)3.55f, buf, sizeof(buf));
-    TEST_ASSERT_EQUAL_STRING("3.55", buf);
-
-    formatSettingValue(cfg.cvMaxCharge, (double)3.425f, buf, sizeof(buf));
-    TEST_ASSERT_EQUAL_STRING("3.425", buf);
-
-    formatSettingValue(cfg.maxChargeA, 0.0, buf, sizeof(buf));
-    TEST_ASSERT_EQUAL_STRING("0", buf);
-
-    formatSettingValue(cfg.maxChargeA, 1000.0, buf, sizeof(buf));
-    TEST_ASSERT_EQUAL_STRING("1000", buf);
-
-    formatSettingValue(cfg.trickleA, (double)0.001f, buf, sizeof(buf));
-    TEST_ASSERT_EQUAL_STRING("0.001", buf);
-}
-
-static void test_format_setting_value_integer_kind(void)
-{
-    SystemConfig cfg;
-    char buf[24];
-
-    formatSettingValue(cfg.bmsTimeout, 60.0, buf, sizeof(buf));
-    TEST_ASSERT_EQUAL_STRING("60", buf);
-}
-
-static void test_changed_mask_same_stored_float_is_not_a_change(void)
-{
-    // 3.55 and 3.55000005 both round to the same binary32 value, so this
-    // must not register as a change (a real change must differ once
-    // stored, not merely in the double the caller happened to pass).
-    SystemConfig a;
-    SystemConfig b;
-    TEST_ASSERT_TRUE(a.cvMaxCharge.set(3.55));
-    TEST_ASSERT_TRUE(b.cvMaxCharge.set(3.55000005));
-    TEST_ASSERT_TRUE((float)a.cvMaxCharge == (float)b.cvMaxCharge);
-    TEST_ASSERT_EQUAL(0u, SystemConfig::changedMask(a, b));
-}
-
-static void test_changed_mask_tiny_real_change_is_a_change(void)
-{
-    // 2.0 -> 2.0004 is a real, distinguishable binary32 change: it must set
-    // the bit, and formatSettingValue() must print the two differently
-    // (the bug this whole fix is for: the old 3-decimal formatter printed
-    // both as "2").
-    SystemConfig a;
-    SystemConfig b;
-    TEST_ASSERT_TRUE(a.trickleA.set(2.0));
-    TEST_ASSERT_TRUE(b.trickleA.set(2.0004));
-    TEST_ASSERT_TRUE((float)a.trickleA != (float)b.trickleA);
-
-    size_t idx = 3; // trickleA's position in all()
-    TEST_ASSERT_TRUE(a.all()[idx] == &a.trickleA);
-    uint32_t mask = SystemConfig::changedMask(a, b);
-    TEST_ASSERT_EQUAL((uint32_t)1 << idx, mask);
-
-    char oldBuf[24];
-    char newBuf[24];
-    formatSettingValue(a.trickleA, a.trickleA.value(), oldBuf, sizeof(oldBuf));
-    formatSettingValue(b.trickleA, b.trickleA.value(), newBuf, sizeof(newBuf));
-    TEST_ASSERT_TRUE(strcmp(oldBuf, newBuf) != 0);
-    TEST_ASSERT_EQUAL_STRING("2", oldBuf);
-    TEST_ASSERT_EQUAL_STRING("2.0004", newBuf);
-}
-
-static void test_changed_mask_reviewer_example_500_vs_500_00003(void)
-{
-    // The reviewer's counterexample to the first (7-sig-fig) formatter:
-    // (float)500.0 != (float)500.00003, so this must be a real change with
-    // distinct printed values, not "500 -> 500".
-    SystemConfig a;
-    SystemConfig b;
-    TEST_ASSERT_TRUE(a.maxDischargeA.set(500.0));
-    TEST_ASSERT_TRUE(b.maxDischargeA.set(500.00003));
-    TEST_ASSERT_TRUE((float)a.maxDischargeA != (float)b.maxDischargeA);
-
-    size_t idx = 8; // maxDischargeA's position in all()
-    TEST_ASSERT_TRUE(a.all()[idx] == &a.maxDischargeA);
-    TEST_ASSERT_EQUAL((uint32_t)1 << idx, SystemConfig::changedMask(a, b));
-
-    char oldBuf[24];
-    char newBuf[24];
-    formatSettingValue(a.maxDischargeA, a.maxDischargeA.value(), oldBuf, sizeof(oldBuf));
-    formatSettingValue(b.maxDischargeA, b.maxDischargeA.value(), newBuf, sizeof(newBuf));
-    TEST_ASSERT_TRUE(strcmp(oldBuf, newBuf) != 0);
-    TEST_ASSERT_EQUAL_STRING("500", oldBuf);
-    TEST_ASSERT_EQUAL_STRING("500.00003", newBuf);
-}
-
-static void test_changed_mask_reviewer_example_3_55_vs_3_5500002(void)
-{
-    // cvMaxCharge's max is the #8 headroom, 3.65f - 0.10f = 3.5500002 (as a
-    // float promoted to double, 3.5500001907348633) - the largest value
-    // set() accepts, and itself the reviewer's "3.5500002" counterexample
-    // to 3.55: two distinct binary32 values that both print "3.55" at
-    // 7 significant digits.
-    SystemConfig a;
-    SystemConfig b;
-    TEST_ASSERT_TRUE(a.cvMaxCharge.set(3.55));
-    TEST_ASSERT_TRUE(b.cvMaxCharge.set(b.cvMaxCharge.max()));
-    TEST_ASSERT_TRUE((float)a.cvMaxCharge != (float)b.cvMaxCharge);
-    TEST_ASSERT_TRUE(SystemConfig::changedMask(a, b) != 0u);
-
-    char oldBuf[24];
-    char newBuf[24];
-    formatSettingValue(a.cvMaxCharge, a.cvMaxCharge.value(), oldBuf, sizeof(oldBuf));
-    formatSettingValue(b.cvMaxCharge, b.cvMaxCharge.value(), newBuf, sizeof(newBuf));
-    TEST_ASSERT_TRUE(strcmp(oldBuf, newBuf) != 0);
-    TEST_ASSERT_EQUAL_STRING("3.55", oldBuf);
-    TEST_ASSERT_EQUAL_STRING("3.5500002", newBuf);
-}
-
-// A dummy SettingBase-shaped stand-in isn't needed: reuse a real float
-// setting (maxChargeA, range wide enough to hold every sweep start/value
-// used below) purely for its KIND_FLOAT tag - formatSettingValue() never
-// looks at its range or current value, only s.kind() and the v passed in.
-static void sweepRange(const SettingBase &floatSetting, float start, int steps)
-{
-    float v = start;
-    char prevBuf[24];
-    formatSettingValue(floatSetting, (double)v, prevBuf, sizeof(prevBuf));
-    TEST_ASSERT_TRUE_MESSAGE(v == (float)strtod(prevBuf, nullptr), prevBuf);
-
-    for (int i = 0; i < steps; i++)
-    {
-        float next = nextafterf(v, INFINITY);
-        TEST_ASSERT_TRUE(next != v);
-
-        char nextBuf[24];
-        formatSettingValue(floatSetting, (double)next, nextBuf, sizeof(nextBuf));
-
-        // Each string parses back to exactly its own float (an exact
-        // compare, not TEST_ASSERT_EQUAL_FLOAT - Unity's float assert
-        // allows a relative tolerance, which would let a formatter that's
-        // off by a ULP pass) ...
-        TEST_ASSERT_TRUE_MESSAGE(next == (float)strtod(nextBuf, nullptr), nextBuf);
-        // ... and adjacent floats never print identically (the whole point
-        // of this fix: a real, distinguishable change must always log as
-        // two different numbers).
-        TEST_ASSERT_TRUE_MESSAGE(strcmp(prevBuf, nextBuf) != 0, nextBuf);
-
-        v = next;
-        strcpy(prevBuf, nextBuf);
-    }
-}
-
-static void test_format_setting_value_sweep_adjacent_floats_always_differ(void)
-{
-    SystemConfig cfg;
-    // Ranges chosen to stay within maxChargeA's [0, 1000] the whole sweep
-    // (2000 consecutive floats moves the value by only a handful of ULPs).
-    sweepRange(cfg.maxChargeA, 2.5f, 2000);
-    sweepRange(cfg.maxChargeA, 3.4f, 2000);
-    sweepRange(cfg.maxChargeA, 250.0f, 2000);
-    sweepRange(cfg.maxChargeA, 999.0f, 2000);
-}
-
 int main(int, char **)
 {
     UNITY_BEGIN();
@@ -542,7 +340,6 @@ int main(int, char **)
     RUN_TEST(test_all_covers_every_member);
     RUN_TEST(test_assigning_a_config_copies_values_not_identities);
     RUN_TEST(test_every_setting_has_exactly_one_label_and_input_on_config_page);
-    RUN_TEST(test_copy_carries_values_and_all_points_into_the_copy);
     RUN_TEST(test_set_accepts_limits_and_refuses_just_outside);
     RUN_TEST(test_set_integer_setting_refuses_fraction);
     RUN_TEST(test_charge_headroom_boundary);
@@ -558,16 +355,5 @@ int main(int, char **)
     RUN_TEST(test_maint_hysteresis_boundary);
     RUN_TEST(test_equal_spread_thresholds_allowed);
     RUN_TEST(test_combined_violations_all_surface);
-    RUN_TEST(test_changed_mask_identical_configs_is_zero);
-    RUN_TEST(test_changed_mask_one_setting_sets_only_its_bit);
-    RUN_TEST(test_changed_mask_two_settings_both_bits);
-    RUN_TEST(test_changed_mask_refused_set_leaves_mask_zero);
-    RUN_TEST(test_format_setting_value_float_precision);
-    RUN_TEST(test_format_setting_value_integer_kind);
-    RUN_TEST(test_changed_mask_same_stored_float_is_not_a_change);
-    RUN_TEST(test_changed_mask_tiny_real_change_is_a_change);
-    RUN_TEST(test_changed_mask_reviewer_example_500_vs_500_00003);
-    RUN_TEST(test_changed_mask_reviewer_example_3_55_vs_3_5500002);
-    RUN_TEST(test_format_setting_value_sweep_adjacent_floats_always_differ);
     return UNITY_END();
 }

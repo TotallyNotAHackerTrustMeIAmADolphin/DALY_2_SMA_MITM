@@ -1,26 +1,16 @@
 #pragma once
 
-// The bmsTask edge-triggered event logic (#44), kept free of Arduino/
-// FreeRTOS dependencies for the same reason as StatusFrame.h/Glideslope.h:
-// so test/test_bmsevents compiles and runs *this* code natively
-// (`pio test -e native`) instead of a hand-copied mirror of it. bmsTask
-// becomes: read from the Daly driver, call decide() (no lock needed, it's
-// pure), take dataMutex to write currentData, then log whatever events came
-// back via netLog.
+// The bmsTask edge-triggered event logic (#44): pure, so test/test_bmsevents
+// runs it natively. bmsTask reads from the Daly driver, calls decide() (no
+// lock needed), takes dataMutex to write currentData, then logs whatever
+// events came back via netLog.
 //
 // Same shape as StatusFrame::decide(): previous state + a new reading in,
 // one-shot events to log + updated state out. Unlike StatusFrame (one
 // Snapshot per 250ms tick), bmsTask reads DalyBasicInfo/DalyMosfetStatus/
-// DalyAlarmStatus at three different points in its loop (each gated on its
-// own `bms.readX()` succeeding, with a vTaskDelay and a separate
-// dataMutex-protected currentData write in between) - so decide() takes
+// DalyAlarmStatus at three different points in its loop, so decide() takes
 // each reading as an optional pointer and bmsTask calls it once per
-// successful read, passing nullptr for the other two, right where that read
-// used to update its own function-local `static`s.
-//
-// This absorbs main.cpp's old inline SOC-jump check, MOSFET edge detection,
-// and alarm-bit diff loop - their logic now lives inside decide() below,
-// unchanged.
+// successful read, passing nullptr for the other two.
 
 #include <stdint.h>
 #include <cmath>
@@ -33,11 +23,9 @@ namespace BmsEvents
     using DalyFrames::DalyBasicInfo;
     using DalyFrames::DalyMosfetStatus;
 
-    // Persistent between calls; owned by bmsTask as a local (replaces the
-    // three function-local `static`s - lastSoc, the MOSFET previous state,
-    // lastAlarmBytes/lastFaultCode - that used to live inside bmsTask, plus
-    // their own baseline flags so the first read after boot doesn't log a
-    // spurious "changed" event).
+    // Persistent between calls; owned by bmsTask as a local, with baseline
+    // flags so the first read after boot doesn't log a spurious "changed"
+    // event.
     struct State
     {
         bool haveSoc = false;
@@ -52,23 +40,11 @@ namespace BmsEvents
         uint8_t lastFaultCode = 0;
     };
 
-    // One decoded alarm-bit transition - mirrors the byte/bit loop that used
-    // to live directly inside bmsTask. name is nullptr for a bit position
-    // not defined in DalyFrames::kAlarmBitNames() (bmsTask then logs the
-    // raw byte.bit position instead, same as before).
-    struct AlarmBitEvent
-    {
-        int byteIndex = 0;
-        int bitIndex = 0;
-        bool set = false;
-        const char *name = nullptr;
-    };
-
     // One-shot log events for this call - bmsTask emits the existing log
-    // lines for whichever of these fired. A single alarm read can flip more
-    // than one bit at once, so alarmBits is a small fixed array (7 bytes x
-    // 8 bits = 56 possible bits, the whole 0x98 payload minus the fault-code
-    // byte) rather than a single flag.
+    // lines for whichever of these fired. alarmChanged[b] is an XOR mask of
+    // bytes 0-6 of the 0x98 payload against the previous reading - bmsTask
+    // loops its set bits, naming each via DalyFrames::kAlarmBitNames() and
+    // reading SET/CLEARED off the new alarm reading itself.
     struct Events
     {
         bool socJumped = false;
@@ -80,9 +56,7 @@ namespace BmsEvents
         bool dischargeMosChanged = false;
         bool dischargeMosOn = false;
 
-        static constexpr int kMaxAlarmBitEvents = 56;
-        AlarmBitEvent alarmBits[kMaxAlarmBitEvents];
-        int alarmBitCount = 0;
+        uint8_t alarmChanged[7] = {0};
 
         bool faultCodeChanged = false;
         uint8_t faultCodeFrom = 0;
@@ -139,34 +113,18 @@ namespace BmsEvents
             st.haveMosfetBaseline = true;
         }
 
-        // Edge-triggered, one event per changed bit (undefined bits still
-        // reported, by byte.bit position, so an unexpected fault isn't
-        // silently swallowed) - baseline flag so the first read after boot
-        // doesn't report every bit as "SET"/"CLEARED" from an all-zero
+        // Edge-triggered, one bit mask per changed byte (undefined bits
+        // still reported, by byte.bit position, so an unexpected fault
+        // isn't silently swallowed) - baseline flag so the first read after
+        // boot doesn't report every bit as "SET"/"CLEARED" from an all-zero
         // starting point.
         if (alarmStatus)
         {
             if (st.haveAlarmBaseline)
             {
                 for (int b = 0; b < 7; b++)
-                {
-                    uint8_t changed = alarmStatus->rawBytes[b] ^ st.lastAlarmBytes[b];
-                    if (!changed)
-                        continue;
-                    for (int bit = 0; bit < 8; bit++)
-                    {
-                        if (!(changed & (1 << bit)))
-                            continue;
-                        if (ev.alarmBitCount < Events::kMaxAlarmBitEvents)
-                        {
-                            AlarmBitEvent &e = ev.alarmBits[ev.alarmBitCount++];
-                            e.byteIndex = b;
-                            e.bitIndex = bit;
-                            e.set = alarmStatus->rawBytes[b] & (1 << bit);
-                            e.name = DalyFrames::kAlarmBitNames()[b][bit];
-                        }
-                    }
-                }
+                    ev.alarmChanged[b] = alarmStatus->rawBytes[b] ^ st.lastAlarmBytes[b];
+
                 if (alarmStatus->rawBytes[7] != st.lastFaultCode)
                 {
                     ev.faultCodeChanged = true;

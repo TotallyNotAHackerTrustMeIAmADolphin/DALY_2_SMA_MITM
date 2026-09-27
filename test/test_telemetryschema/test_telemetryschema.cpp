@@ -18,11 +18,9 @@ static const char *kExpectedHeader =
     "ChargeMOS,DischargeMOS,BmsProtection,CellOV1,CellOV2,PackOV1,PackOV2,"
     "MinCellRaw,MaxCellRaw,RawSpreadMv,Derate";
 
-static int countFields(const char *csv)
+static int countCommas(const char *csv)
 {
-    if (*csv == '\0')
-        return 0;
-    int n = 1;
+    int n = 0;
     for (const char *p = csv; *p; p++)
         if (*p == ',')
             n++;
@@ -46,7 +44,6 @@ static DashboardData makeSample()
     d.cellSpreadRawMv = 95;
     d.derateFactor = 0.73f;
     d.packCurrent = -12.5f;
-    d.packTemp = 0; // not a CSV column
     d.packSOC = 87.5f;
     d.requestedCurrent = 45.0f;
     d.smaChargeMode = "Bulk";
@@ -69,7 +66,7 @@ void tearDown(void) {}
 
 // --- Header ---
 
-void test_header_matches_claude_md(void)
+static void test_header_matches_claude_md(void)
 {
     char buf[512];
     int n = formatHeader(buf, sizeof(buf));
@@ -77,15 +74,9 @@ void test_header_matches_claude_md(void)
     TEST_ASSERT_EQUAL_STRING(kExpectedHeader, buf);
 }
 
-void test_header_has_38_fields(void)
-{
-    TEST_ASSERT_EQUAL(38, countFields(kExpectedHeader));
-    TEST_ASSERT_EQUAL(count(), countFields(kExpectedHeader));
-}
-
 // --- index() ---
 
-void test_index_first_seven_columns(void)
+static void test_index_first_seven_columns(void)
 {
     TEST_ASSERT_EQUAL(0, index("Timestamp"));
     TEST_ASSERT_EQUAL(1, index("PackV"));
@@ -96,58 +87,18 @@ void test_index_first_seven_columns(void)
     TEST_ASSERT_EQUAL(6, index("ReqI"));
 }
 
-void test_index_max_cell_raw(void)
+static void test_index_max_cell_raw(void)
 {
-    // Position today: Timestamp(0)+10 base fields(1-10)+16 cells(11-26)+7
-    // MOS/alarm columns(27-33) -> MinCellRaw is 34, MaxCellRaw is 35.
-    TEST_ASSERT_EQUAL(34, index("MinCellRaw"));
-    TEST_ASSERT_EQUAL(35, index("MaxCellRaw"));
+    // Relative to PackOV2 (the last MOS/alarm column), not an absolute
+    // literal: a new column appended after Derate (CLAUDE.md's documented
+    // extension point) must not move these two.
+    TEST_ASSERT_EQUAL(index("PackOV2") + 1, index("MinCellRaw"));
+    TEST_ASSERT_EQUAL(index("MinCellRaw") + 1, index("MaxCellRaw"));
 }
 
-void test_index_unknown_name(void)
+static void test_index_unknown_name(void)
 {
     TEST_ASSERT_EQUAL(-1, index("nope"));
-}
-
-// --- count() / formatter output count ---
-
-void test_column_count_is_38(void)
-{
-    TEST_ASSERT_EQUAL(38, count());
-}
-
-void test_formatter_output_count_matches_columns_minus_timestamp(void)
-{
-    // Timestamp (index 0) has no real formatter (it's produced by the
-    // logger from the row's write time, not from DashboardData) and
-    // reports "nothing to write" like a not-yet-read cell would - every
-    // other column, given a fully-populated sample, must produce output.
-    DashboardData d = makeSample();
-    int produced = 0;
-    for (int i = 0; i < count(); i++)
-    {
-        char field[64];
-        int n = kColumns[i].format(d, field, sizeof(field));
-        if (n > 0)
-            produced++;
-    }
-    TEST_ASSERT_EQUAL(count() - 1, produced);
-}
-
-void test_row_field_count_matches_header_field_count(void)
-{
-    // formatRow() only builds the part of the row after Timestamp (the
-    // logger prepends that itself); prepending a stand-in timestamp here
-    // mirrors loggingTask()'s own "%s,%s\n" and lets the two field counts
-    // be compared directly.
-    DashboardData d = makeSample();
-    char row[480];
-    int n = formatRow(d, row, sizeof(row));
-    TEST_ASSERT_TRUE(n > 0);
-
-    char full[512];
-    snprintf(full, sizeof(full), "2024-01-01 00:00:00,%s", row);
-    TEST_ASSERT_EQUAL(countFields(kExpectedHeader), countFields(full));
 }
 
 // --- Known row string, hand-derived from makeSample() above ---
@@ -178,7 +129,7 @@ static const char *kExpectedRow =
     "1,0,0,0,0,0,0,"
     "3.195,3.360,95,0.73";
 
-void test_sample_formats_to_known_row(void)
+static void test_sample_formats_to_known_row(void)
 {
     DashboardData d = makeSample();
     char row[480];
@@ -187,35 +138,69 @@ void test_sample_formats_to_known_row(void)
     TEST_ASSERT_EQUAL_STRING(kExpectedRow, row);
 }
 
-// --- Missing-cell behavior (matches the pre-refactor cellCount bound) ---
+// --- Missing/blank fields stay in place, never dropped (#66) ---
 
-void test_missing_cells_are_omitted_not_padded(void)
+static void test_missing_cells_are_blank_not_omitted(void)
 {
     DashboardData d = makeSample();
-    d.cellVoltages.resize(5); // only 5 of 16 cells read so far
+    d.cellVoltages.resize(4); // only 4 of 16 cells read so far
 
     char row[480];
-    formatRow(d, row, sizeof(row));
+    int n = formatRow(d, row, sizeof(row));
+    TEST_ASSERT_TRUE(n > 0);
 
-    // 10 base fields + 5 cells + 7 MOS/alarm + 4 raw/spread/derate = 26.
-    TEST_ASSERT_EQUAL(26, countFields(row));
-    // The 5th cell (index 4) is 3.300+4*0.010=3.340, immediately followed
-    // by ChargeMOS's "1" - no empty placeholders for the missing 11 cells.
-    TEST_ASSERT_NOT_NULL(strstr(row, "3.340,1,0,0,0,0,0,0,3.195"));
+    // Every column still gets a field - missing cells are empty, not
+    // dropped - so the row plus a stand-in timestamp has exactly as many
+    // commas as the header (count() - 1), the same check formatRow's other
+    // callers rely on to keep columns aligned under their header.
+    char full[512];
+    snprintf(full, sizeof(full), "2024-01-01 00:00:00,%s", row);
+    TEST_ASSERT_EQUAL(count() - 1, countCommas(full));
+
+    // Cell4 (index 3) is 3.300+3*0.010=3.330, followed by 12 blank fields
+    // for Cell5..Cell16, then ChargeMOS's "1" - no shift in later columns.
+    TEST_ASSERT_NOT_NULL(strstr(row, "3.330,,,,,,,,,,,,,1,0,0,0,0,0,0,3.195"));
+}
+
+static void test_empty_mode_string_stays_a_field(void)
+{
+    DashboardData d = makeSample();
+    d.smaChargeMode = ""; // e.g. before the SMA has reported a mode
+
+    char row[480];
+    int n = formatRow(d, row, sizeof(row));
+    TEST_ASSERT_TRUE(n > 0);
+
+    char full[512];
+    snprintf(full, sizeof(full), "2024-01-01 00:00:00,%s", row);
+    TEST_ASSERT_EQUAL(count() - 1, countCommas(full));
+    TEST_ASSERT_NOT_NULL(strstr(row, "45.0,,1,0,1,")); // ReqI,Mode(blank),ForceCharge,...
+}
+
+// A default-constructed DashboardData (#80) formats deterministically: the
+// pre-BMS state, no cells yet (all 16 Cell columns blank, not omitted -
+// #66), no derating.
+static void test_default_constructed_row(void)
+{
+    DashboardData d;
+    char row[480];
+    TEST_ASSERT_TRUE(formatRow(d, row, sizeof(row)) > 0);
+    TEST_ASSERT_EQUAL_STRING("0.00,0.00,0.0,0.000,0.000,0.0,Unknown,0,0,0"
+                             ",,,,,,,,,,,,,,,,,"
+                             "0,0,0,0,0,0,0,0.000,0.000,0,1.00",
+                             row);
 }
 
 int main(int, char **)
 {
     UNITY_BEGIN();
     RUN_TEST(test_header_matches_claude_md);
-    RUN_TEST(test_header_has_38_fields);
     RUN_TEST(test_index_first_seven_columns);
     RUN_TEST(test_index_max_cell_raw);
     RUN_TEST(test_index_unknown_name);
-    RUN_TEST(test_column_count_is_38);
-    RUN_TEST(test_formatter_output_count_matches_columns_minus_timestamp);
-    RUN_TEST(test_row_field_count_matches_header_field_count);
     RUN_TEST(test_sample_formats_to_known_row);
-    RUN_TEST(test_missing_cells_are_omitted_not_padded);
+    RUN_TEST(test_missing_cells_are_blank_not_omitted);
+    RUN_TEST(test_empty_mode_string_stays_a_field);
+    RUN_TEST(test_default_constructed_row);
     return UNITY_END();
 }

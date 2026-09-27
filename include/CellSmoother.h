@@ -1,24 +1,24 @@
 #pragma once
 
 #include <stdint.h>
+#include "SystemConfig.h"
 
-// Per-cell moving-average smoother for Daly BMS cell voltages (#31),
-// extracted out of bmsTask (src/main.cpp) so the reseed-on-window-change
-// regression documented below has a native test that would catch its
-// return. Pure: no Arduino/FreeRTOS dependency, so test/test_cellsmoother
-// can include and run *this* header natively (`pio test -e native`), same
-// pattern as Glideslope.h. bmsTask becomes: read the BMS -> update() ->
-// take dataMutex -> store the Result fields into currentData -> give -> log
-// if reseeded (outside the lock).
+// Per-cell moving-average smoother for Daly BMS cell voltages. Pure: no
+// Arduino/FreeRTOS dependency, so test/test_cellsmoother can include and
+// run *this* header natively (`pio test -e native`), same pattern as
+// Glideslope.h. bmsTask: read the BMS -> update() -> take dataMutex -> store
+// the Result fields into currentData -> give -> log if reseeded.
+//
+// The window holds integer mV (the Daly's unit); only the average rounds,
+// and Result converts to volts once.
 class CellSmoother
 {
 public:
-    static constexpr int MAX_CELLS = 16;
-    static constexpr int MAX_SAMPLES = 20;
+    static constexpr int MAX_SAMPLES = kMaxVSamples;
 
     struct Result
     {
-        float smoothedV[MAX_CELLS] = {};
+        float smoothedV[kPackCells] = {};
         float minV = 0.0f, maxV = 0.0f, avgV = 0.0f;
         float rawMinV = 0.0f, rawMaxV = 0.0f;
         uint16_t rawSpreadMv = 0;
@@ -26,11 +26,10 @@ public:
         bool reseeded = false;
     };
 
-    // rawV: this read's per-cell voltages, in volts; n entries (clamped to
-    // [0, MAX_CELLS] - extra entries beyond MAX_CELLS are ignored, same as
-    // bmsTask's old `i < MAX_CELLS` bound). windowSize: cfg.vSamples,
-    // clamped to [1, MAX_SAMPLES].
-    Result update(const float *rawV, int n, int windowSize)
+    // rawMv: this read's per-cell voltages, in millivolts; n entries
+    // (clamped to [0, kPackCells]). windowSize: cfg.vSamples, clamped to
+    // [1, MAX_SAMPLES].
+    Result update(const uint16_t *rawMv, int n, int windowSize)
     {
         if (windowSize < 1)
             windowSize = 1;
@@ -40,8 +39,8 @@ public:
         int cells = n;
         if (cells < 0)
             cells = 0;
-        if (cells > MAX_CELLS)
-            cells = MAX_CELLS;
+        if (cells > kPackCells)
+            cells = kPackCells;
 
         Result r;
         r.cells = cells;
@@ -51,86 +50,70 @@ public:
         // since lastWindowSize_ starts at -1 and never matches a real
         // windowSize. Without this, slots [windowSize..MAX_SAMPLES) keep
         // whatever was last written there; raising cfg.vSamples at runtime
-        // would then average stale (e.g. boot-time) voltages back in for a
-        // whole window. (It used to be pre-filled with cvMaxCharge, which
-        // made the smoothed max start near the hard limit and swung the CCL
-        // 500A -> trickle -> 500A after every boot.)
+        // would then average stale voltages back in for a whole window.
         if (windowSize != lastWindowSize_)
         {
             for (int i = 0; i < cells; i++)
-            {
-                uint16_t mv = (uint16_t)(rawV[i] * 1000.0f);
                 for (int j = 0; j < MAX_SAMPLES; j++)
-                    buf_[i][j] = mv;
-            }
+                    buf_[i][j] = rawMv[i];
             index_ = 0;
             lastWindowSize_ = windowSize;
             r.reseeded = true;
         }
 
-        float sum = 0.0f;
-        float localMin = 10.0f;
-        float localMax = 0.0f;
-        float rawMin = 10.0f;
-        float rawMax = 0.0f;
+        uint32_t sumMv = 0;
+        uint16_t localMinMv = 0xFFFF;
+        uint16_t localMaxMv = 0;
+        uint16_t rawMinMv = 0xFFFF;
+        uint16_t rawMaxMv = 0;
 
         for (int i = 0; i < cells; i++)
         {
-            // Update per-cell buffer
-            buf_[i][index_] = (uint16_t)(rawV[i] * 1000.0f);
+            buf_[i][index_] = rawMv[i];
 
-            // Calculate smoothed average for this cell
-            uint32_t cellSumMV = 0;
+            uint32_t cellSumMv = 0;
             for (int j = 0; j < windowSize; j++)
-                cellSumMV += buf_[i][j];
+                cellSumMv += buf_[i][j];
 
-            float smoothedV = (float)(cellSumMV / windowSize) / 1000.0f;
-            r.smoothedV[i] = smoothedV;
+            // Rounded, not floored (#70).
+            uint16_t smoothedMv = (uint16_t)((cellSumMv + (uint32_t)windowSize / 2) / (uint32_t)windowSize);
+            r.smoothedV[i] = smoothedMv / 1000.0f;
 
-            sum += smoothedV;
-            if (smoothedV < localMin)
-                localMin = smoothedV;
-            if (smoothedV > localMax)
-                localMax = smoothedV;
+            sumMv += smoothedMv;
+            if (smoothedMv < localMinMv)
+                localMinMv = smoothedMv;
+            if (smoothedMv > localMaxMv)
+                localMaxMv = smoothedMv;
 
             // Raw (unsmoothed) min/max from this latest read - drives the
-            // glideslope hard cutoff/alarm gate (#9), independent of the
+            // glideslope hard cutoff/alarm gate, independent of the
             // smoothed values above which drive the taper.
-            if (rawV[i] < rawMin)
-                rawMin = rawV[i];
-            if (rawV[i] > rawMax)
-                rawMax = rawV[i];
+            if (rawMv[i] < rawMinMv)
+                rawMinMv = rawMv[i];
+            if (rawMv[i] > rawMaxMv)
+                rawMaxMv = rawMv[i];
         }
 
-        // avgV matches bmsTask's original `sum / MAX_CELLS` (not
-        // `sum / cells`): correct for the real 16-cell pack this firmware
-        // always runs (DalyRS485::readCellVoltages always resizes its
-        // output to exactly MAX_CELLS), preserved as-is here rather than
-        // "fixed" for a fewer-than-16 input as part of this refactor.
-        r.avgV = sum / MAX_CELLS;
-        r.minV = localMin;
-        r.maxV = localMax;
-        r.rawMinV = rawMin;
-        r.rawMaxV = rawMax;
+        // Divides by the cells actually read, not kPackCells (#70).
+        r.avgV = (float)sumMv / (1000.0f * cells);
+        r.minV = localMinMv / 1000.0f;
+        r.maxV = localMaxMv / 1000.0f;
+        r.rawMinV = rawMinMv / 1000.0f;
+        r.rawMaxV = rawMaxMv / 1000.0f;
 
-        // Raw spread (#24), from the same unsmoothed read as rawMin/rawMax
-        // above - drives Glideslope::spreadFactor() in canTask. Hand-rolled
-        // round-half-away-from-zero (this header is stdint.h-only, no
-        // <math.h>) matching libc round() for the values this ever sees in
-        // practice (rawMax >= rawMin whenever cells > 0).
-        float spreadMv = (rawMax - rawMin) * 1000.0f;
-        r.rawSpreadMv = (uint16_t)(spreadMv >= 0.0f ? spreadMv + 0.5f : spreadMv - 0.5f);
+        // Raw spread, from the same unsmoothed read as rawMin/rawMax above -
+        // drives Glideslope::spreadFactor().
+        r.rawSpreadMv = rawMaxMv - rawMinMv;
 
-        // Increment circular buffer index AFTER processing all cells, once
-        // per update() call (not per-cell) - matches bmsTask's original
-        // placement outside the per-cell loop.
+        // Increment circular buffer index after processing all cells, once
+        // per update() call, not per-cell.
         index_ = (index_ + 1) % windowSize;
 
         return r;
     }
 
 private:
-    uint16_t buf_[MAX_CELLS][MAX_SAMPLES] = {};
+    uint16_t buf_[kPackCells][MAX_SAMPLES] = {};
     int index_ = 0;
     int lastWindowSize_ = -1; // never matches a real windowSize -> first call always reseeds
 };

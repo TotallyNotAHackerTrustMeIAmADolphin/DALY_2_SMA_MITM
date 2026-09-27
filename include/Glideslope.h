@@ -28,16 +28,31 @@ namespace Glideslope
 
     // Converts a current in A to the 0.1A units sent in 0x351, clamped to
     // what a uint16_t can hold. A float -> uint16_t cast of a negative (or
-    // too large) value is undefined and in practice wraps: a negative
-    // trickleA/limpDischargeA/maintAmps (e.g. a /config typo) used to go
-    // out as ~6550A instead of 0A (#52). Every current-limit return below
-    // goes through here, so no branch can reintroduce the wraparound.
+    // too large) value is undefined and in practice wraps, so a negative
+    // trickleA/limpDischargeA/maintAmps (e.g. a /config typo) would go out
+    // as ~6550A instead of 0A without this (#52). Every current-limit
+    // return below goes through here, so no branch can reintroduce the
+    // wraparound.
     inline uint16_t toDeciAmps(float amps)
     {
         float deci = roundf(amps * 10.0f);
         if (!(deci > 0.0f))
             return 0;
         if (deci > 65535.0f)
+            return 65535;
+        return (uint16_t)deci;
+    }
+
+    // Converts a voltage in V to the 0.1 V units sent in 0x351 (CVL/DVL).
+    // Truncates, as the bare (uint16_t) cast it replaces did, but a NaN or
+    // negative value gives 0 and a huge one saturates instead of being
+    // undefined behaviour.
+    inline uint16_t toDeciVolts(float volts)
+    {
+        float deci = volts * 10.0f;
+        if (!(deci > 0.0f))
+            return 0;
+        if (deci >= 65535.0f)
             return 65535;
         return (uint16_t)deci;
     }
@@ -63,73 +78,83 @@ namespace Glideslope
         return 1.0f - (float)(spreadMv - startMv) / (float)(maxMv - startMv);
     }
 
-    // Charge current limit. bmsFresh=false (comms timeout, or no BMS data
-    // yet) forces 0A as a fail-safe, checked before anything else.
+    // Taper spans (start-taper to alarm gate) at or below this are treated
+    // as degenerate: floor current, no division.
+    constexpr float kMinTaperSpanV = 0.0001f;
+
+    inline float clamp01(float x)
+    {
+        if (x < 0.0f)
+            x = 0.0f;
+        if (x > 1.0f)
+            x = 1.0f;
+        return x;
+    }
+
+    // The part calculateCCL() and calculateDCL() share once the cutoff and
+    // gate branches have passed, with the voltage axis already folded:
+    // headroomV is how far the smoothed cell is from the gate towards full
+    // current, spanV the gate-to-start-taper distance. Interpolates floorA
+    // (trickle/limp) .. maxA, applies the spread factor and never goes
+    // below floorA. headroomV <= 0 (smoothed at/past the gate while raw
+    // isn't) clamps to floorA - intended, see calculateCCL()'s comment.
+    inline uint16_t taperLimit(float headroomV, float spanV, float floorA, float maxA, float factor)
+    {
+        if (spanV <= kMinTaperSpanV)
+            return toDeciAmps(floorA);
+        float slope = clamp01(headroomV / spanV);
+        float target = floorA + (slope * (maxA - floorA));
+        return toDeciAmps(fmaxf(target * factor, floorA));
+    }
+
+    // Below the taper: full current, spread-derated, never below floorA.
+    inline uint16_t fullLimit(float maxA, float floorA, float factor)
+    {
+        return toDeciAmps(fmaxf(maxA * factor, floorA));
+    }
+
+    // Charge current limit. bmsFresh=false forces 0A (fail-safe), checked
+    // first. Hard cutoff/gate use rawMaxV (the latest single BMS read) so a
+    // fast per-cell spike trips them immediately, not ~48s later once the
+    // moving average catches up; the taper between cvStartTaper and
+    // cvHighAlarmGate keeps using smoothedMaxV so the CCL doesn't jitter on
+    // per-read noise - see CLAUDE.md's Glideslope section (#9) for the full
+    // rationale and root cause this fixed. Once smoothedMaxV reaches the
+    // gate, the taper can't give back more than trickle even if rawMaxV
+    // has since dropped below it - intentional, not a bug.
     //
-    // Two different cell-voltage inputs, by design (#9): the hard cutoff
-    // (cvMaxCharge -> 0A) and the alarm gate (cvHighAlarmGate -> trickle)
-    // use rawMaxV, the latest single BMS read - a fast per-cell spike (e.g.
-    // a weak cell's internal resistance under a sudden current step) must
-    // trip these immediately, not ~48s later once bmsTask's moving average
-    // catches up. The taper between cvStartTaper and cvHighAlarmGate keeps
-    // using smoothedMaxV so the CCL doesn't jitter with normal per-read
-    // noise. One consequence: if smoothedMaxV is already at/above the gate
-    // while rawMaxV has since dropped back below it, the taper's slope
-    // clamp still yields trickle (never more than trickle once the gate has
-    // been reached on the smoothed value) - that's intentional, not a bug.
-    //
-    // spreadMv (#24) is the raw max-min cell spread in mV: a weak cell's IR
-    // drop scales with current, not voltage/SOC, so it derates the taper
-    // and full-current results via spreadFactor() - multiplicatively,
-    // clamped back up to trickleA, same as the "never below trickle" clamp
-    // already used for the taper's slope target. Never applied to the hard
-    // 0A/gate-trickle branches above (those are the fail-safes; the weak
-    // cell's own voltage already gates them) or in maintenance mode.
+    // spreadMv (#24) derates the taper/full-current result via
+    // spreadFactor(), clamped back up to trickleA; never applied to the
+    // hard 0A/gate-trickle branches (already gated by the weak cell's own
+    // voltage) or in maintenance mode.
     inline uint16_t calculateCCL(const SystemConfig &cfg, float smoothedMaxV, float rawMaxV, uint16_t spreadMv, bool bmsFresh, bool maintenanceActive)
     {
         if (!bmsFresh)
             return 0;
 
-        // A NaN voltage (e.g. a corrupted BMS read) or a NaN threshold (e.g.
-        // a corrupted NVS float) makes every comparison below false, which
-        // would otherwise fall through to the final `return maxChargeA` -
-        // full current instead of the fail-safe 0A. A NaN current setpoint
-        // would make round(NaN) -> uint16_t undefined. Catch both explicitly.
+        // NaN (corrupted BMS read, NVS float, or current setpoint) fails
+        // every comparison below, which would otherwise fall through to
+        // full current instead of 0A; round(NaN)->uint16_t is also
+        // undefined. Catch explicitly.
         if (isnan(smoothedMaxV) || isnan(rawMaxV) || isnan(cfg.cvMaxCharge) || isnan(cfg.cvHighAlarmGate) || isnan(cfg.cvStartTaper) ||
             isnan(cfg.maxChargeA) || isnan(cfg.trickleA) || isnan(cfg.maintAmps))
             return 0;
 
-        if (maintenanceActive)
-            return toDeciAmps(cfg.maintAmps);
-
+        // Checked before maintenance: a force charge never bypasses the cutoff or gate (#60).
         if (rawMaxV >= cfg.cvMaxCharge)
             return 0;
         if (rawMaxV >= cfg.cvHighAlarmGate)
-            return toDeciAmps(cfg.trickleA);
+            return toDeciAmps(maintenanceActive ? fminf(cfg.maintAmps, cfg.trickleA) : (float)cfg.trickleA);
+
+        if (maintenanceActive)
+            return toDeciAmps(cfg.maintAmps);
 
         float factor = spreadFactor(spreadMv, cfg.spreadStartMv, cfg.spreadMaxMv);
 
         if (smoothedMaxV > cfg.cvStartTaper)
-        {
-            float div = cfg.cvHighAlarmGate - cfg.cvStartTaper;
-            if (div <= 0.0001f)
-                return toDeciAmps(cfg.trickleA);
-
-            // If smoothedMaxV is already at/above cvHighAlarmGate here (raw
-            // has since fallen back below the gate, or this cell's smoothed
-            // value simply lags above it), slope goes negative and clamps
-            // to 0 -> target == trickleA. Intended: see the function
-            // comment above.
-            float slope = (cfg.cvHighAlarmGate - smoothedMaxV) / div;
-            if (slope < 0.0f)
-                slope = 0.0f;
-            if (slope > 1.0f)
-                slope = 1.0f;
-
-            float target = cfg.trickleA + (slope * (cfg.maxChargeA - cfg.trickleA));
-            return toDeciAmps(fmaxf(target * factor, cfg.trickleA));
-        }
-        return toDeciAmps(fmaxf(cfg.maxChargeA * factor, cfg.trickleA));
+            return taperLimit(cfg.cvHighAlarmGate - smoothedMaxV, cfg.cvHighAlarmGate - cfg.cvStartTaper,
+                              cfg.trickleA, cfg.maxChargeA, factor);
+        return fullLimit(cfg.maxChargeA, cfg.trickleA, factor);
     }
 
     // Discharge current limit - mirror image of calculateCCL. See its
@@ -141,9 +166,7 @@ namespace Glideslope
         if (!bmsFresh)
             return 0;
 
-        // See the matching check in calculateCCL(): NaN fails every
-        // comparison below, which would otherwise fall through to the
-        // final `return maxDischargeA` instead of the fail-safe 0A.
+        // See the matching check in calculateCCL().
         if (isnan(smoothedMinV) || isnan(rawMinV) || isnan(cfg.cvMinDischarge) || isnan(cfg.cvLowAlarmGate) || isnan(cfg.cvStartDTaper) ||
             isnan(cfg.maxDischargeA) || isnan(cfg.limpDischargeA))
             return 0;
@@ -159,24 +182,8 @@ namespace Glideslope
         float factor = spreadFactor(spreadMv, cfg.spreadStartMv, cfg.spreadMaxMv);
 
         if (smoothedMinV < cfg.cvStartDTaper)
-        {
-            float div = cfg.cvStartDTaper - cfg.cvLowAlarmGate;
-            if (div <= 0.0001f)
-                return toDeciAmps(cfg.limpDischargeA);
-
-            // Mirror of calculateCCL()'s slope clamp: smoothedMinV at/below
-            // cvLowAlarmGate here (raw has since risen back above it) makes
-            // slope negative, clamped to 0 -> target == limpDischargeA.
-            // Intended: see calculateCCL()'s comment above.
-            float slope = (smoothedMinV - cfg.cvLowAlarmGate) / div;
-            if (slope < 0.0f)
-                slope = 0.0f;
-            if (slope > 1.0f)
-                slope = 1.0f;
-
-            float target = cfg.limpDischargeA + (slope * (cfg.maxDischargeA - cfg.limpDischargeA));
-            return toDeciAmps(fmaxf(target * factor, cfg.limpDischargeA));
-        }
-        return toDeciAmps(fmaxf(cfg.maxDischargeA * factor, cfg.limpDischargeA));
+            return taperLimit(smoothedMinV - cfg.cvLowAlarmGate, cfg.cvStartDTaper - cfg.cvLowAlarmGate,
+                              cfg.limpDischargeA, cfg.maxDischargeA, factor);
+        return fullLimit(cfg.maxDischargeA, cfg.limpDischargeA, factor);
     }
 }

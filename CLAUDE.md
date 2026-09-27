@@ -1,105 +1,214 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code when working in this repository.
 
-## Project Overview
+## Project overview
 
-Dual-core ESP32 firmware (PlatformIO/Arduino framework) that acts as a Man-In-The-Middle bridge between a **Daly Smart BMS** (RS485) and an **SMA Sunny Island Inverter** (CAN). Target hardware is the LilyGO T-CAN485 board. Instead of trusting the BMS's coarse SOC-based current limits, it computes smooth Charge/Discharge Current Limits (the "Glideslope") directly from individual cell voltages and reports those to the inverter over CAN, along with a live web dashboard.
+Dual-core ESP32 firmware (PlatformIO/Arduino) acting as a Man-In-The-Middle
+bridge between a **Daly Smart BMS** (RS485) and an **SMA Sunny Island
+Inverter** (CAN), on a LilyGO T-CAN485 board. Instead of trusting the BMS's
+coarse SOC-based current limits, it computes smooth Charge/Discharge Current
+Limits (the "Glideslope") from cell voltages and reports those to the
+inverter over CAN, alongside a live web dashboard.
 
-This firmware controls high-power charging/discharging of a real battery pack. Treat `include/Glideslope.h` (where the math lives) and the `calculateCCL`/`calculateDCL` wrappers in `src/main.cpp`, along with the CAN protocol implementation, as safety-critical — verify glideslope math carefully on any change.
+Controls high-power charging/discharging of a real battery pack.
+`include/Glideslope.h`, `include/StatusFrame.h` and the SMA CAN protocol
+(`include/SMAFrames.h`/`src/SMA_CAN.cpp`) are safety-critical — verify any
+change against `test/test_glideslope/`, `test/test_statusframe/` and
+`test/test_canpath/`.
 
-## Build & Run (PlatformIO)
+## Build / test / flash runbook
 
 - **Build:** `pio run`
-- **Upload via USB:** `pio run -t upload` (platformio.ini defaults to OTA upload; override `--upload-port` for a USB serial port)
-- **Upload via OTA:** `pio run -t upload` (`upload_port` is derived automatically from `include/secrets.h`'s `local_IP` by `scripts/extract_upload_ip.py`, a PlatformIO `pre:` build script — pass `--upload-port <DEVICE_IP>` only to override it, e.g. targeting a different device); OTA port is 3232 (after an OTA, wait for `[SYS] Firmware confirmed` before flashing again — see OTA rollback under Diagnostics)
-- **Serial monitor:** `pio run -t monitor` (115200 baud)
+- **First-time setup:** copy `include/secrets_example.h` to
+  `include/secrets.h`, fill in `ssid`/`password` and the network block
+  (`local_IP`, `gateway`, `subnet`, `primaryDNS`, `secondaryDNS`).
+  Gitignored — never commit it or hardcode a network value into
+  `src/main.cpp`/`platformio.ini` instead (`docs/adr/0002-...md`). Keep its
+  globals `static` (a bare global has external linkage, fails to link a
+  second TU).
+- **Upload via USB:** `pio run -e lilygo-t-can485-usb -t upload` (esptool;
+  `--upload-port /dev/ttyUSB0` to override autodetect). First flash, and a
+  rollback-capable bootloader. Default env is OTA-only.
+- **Upload via OTA:** `pio run -t upload`. `upload_port` comes from
+  `include/secrets.h`'s `local_IP` via `scripts/extract_upload_ip.py` (a
+  `pre:` build script) — `--upload-port <IP>` only to target a different
+  device. Port 3232. Wait for `[SYS] Firmware confirmed ...` before the
+  next OTA (see OTA rollback below).
+- **Monitor:** `pio run -t monitor` (115200 baud)
 - **Clean:** `pio run -t clean`
-- **Run unit tests:** `pio test -e native` (Unity, runs on the host). The device env has `test_ignore = *` on purpose: with `espota` as its upload protocol, a device-side `pio test` would OTA-flash the test firmware over the live bridge.
+- **Unit tests:** `pio test -e native` (Unity, host-side). Device env has
+  `test_ignore = *`: its upload protocol is `espota`, so a device-side
+  `pio test` would OTA-flash the test firmware over the live bridge. Never
+  run `pio test` without `-e native`.
 
-### First-time setup
-1. Copy `include/secrets_example.h` to `include/secrets.h` and fill in `ssid`/`password` **and** the network block (`local_IP`, `gateway`, `subnet`, `primaryDNS`, `secondaryDNS`) to match your network. This file is gitignored — never commit real credentials or your network layout. All network config lives in this one file now; don't add new hardcoded IPs back into `src/main.cpp` or `platformio.ini`.
+## Hard rules
+
+- Cross-task fields: guard with `dataMutex` via RAII `MutexLock`
+  (`include/MutexLock.h`) + a named `k...LockTimeout`, never raw take/give;
+  decide/copy under the lock, log after release.
+- `netOutMutex` (SSE log + telemetry) is innermost — never take another
+  mutex while holding it. The WiFi event latch in `src/main.cpp` is
+  lock-free (atomics), the one documented exception to `dataMutex`.
+- Nothing using async TCP (web server, SSE) runs before `setupNetwork()`
+  returns.
+- Glideslope math lives only in `include/Glideslope.h`; add a
+  `test/test_glideslope/` case per change.
+- Hard cutoff/alarm gate use **raw** cell voltage; the taper between them
+  uses **smoothed** — never swap (`docs/adr/0001-...md`).
+- Maintenance mode never bypasses the hard cutoff/alarm gate, only the
+  taper/full-current branch.
+- Every current limit goes through `toDeciAmps()`; CVL/DVL through
+  `toDeciVolts()` — floor at 0, saturate at 65535, map NaN/negative to 0,
+  never a bare `(uint16_t)` cast.
+- Stale/missing/NaN cell-voltage or threshold data forces 0A
+  (`Glideslope::isFresh`, via `decide()`).
+- `cvMaxCharge`'s max is fixed at `kDalyOvervoltageV - kMinChargeMarginV`
+  (3.550V) — never widen (`docs/adr/0001-...md`).
+- No CAN frames until the BMS has delivered basic info + cell voltages at
+  least once (`bmsLink.ready()`, #20).
+- New `SystemConfig` setting = `Setting<T>` member + entry in `all()` +
+  `!!LABEL_<key>!!`/`!!IN_<key>!!` in `config_html` (a native test checks
+  both).
+- Never pass a `Setting` to `netLog`/`logTo`/`printf` directly (varargs
+  skip its `T` conversion) — `-Werror=format` makes that a compile error.
+- Log a VALUE with `formatSettingValue()`, a LIMIT with
+  `formatSettingFixed()` — never the reverse.
+- Use `netLog(fmt, ...)`, or a `LogSink` wired to `netLogLine`
+  (`include/LogSink.h`). Log edge-triggered, never periodic spam.
+- CSV columns (`include/TelemetrySchema.h`) are always appended, never
+  inserted earlier in the row.
+- Keep `graphs_html` charts single-axis.
+- `verifyRollbackLater()` must keep returning `true` (see OTA rollback).
+- Secrets/network config: `include/secrets.h` only.
+- `ESPAsyncWebServer`/`AsyncTCP` pinned exactly in `platformio.ini`; bump
+  deliberately (#11, lwIP thread).
 
 ## Architecture
 
-### Dual-core FreeRTOS split
-- **Core 0 (`bmsTask` in `src/main.cpp`):** Polls the Daly BMS over RS485 every ~2.4s (basic info + per-cell voltages + MOSFET/alarm status), runs the per-cell readings through `CellSmoother` (`include/CellSmoother.h`, #31) - a pure, Arduino-free class holding the moving-average ring buffers, keyed on window size `cfg.vSamples` and reseeded from the current reading whenever that window size changes, including the first reading - and writes its `Result` (smoothed + raw min/max/avg, raw spread) into the shared `currentData`. `test/test_cellsmoother/test_cellsmoother.cpp` includes the real header and runs natively (`pio test -e native`), same pattern as `Glideslope.h`.
-- **Core 1 (`canTask`):** Drives the SMA CAN heartbeat (every 250ms), reads SMA frames and handles CAN bus health / bus-off recovery. Per tick it copies a `StatusFrame::Snapshot` out of `currentData`/the reset globals under `dataMutex`, calls the pure `StatusFrame::decide()` (`include/StatusFrame.h`, #29) to get a `Decision`, writes the result back (`currentData.maintenanceActive`/`isResetting`/`derateFactor`, the shared reset globals) under the same lock, then — outside the lock — maps `Decision::values` into an `SMATxData` and calls `inverter.sendStatus()` if `Decision::sendFrames`, and logs whichever one-shot `Decision::events` fired. It sends **nothing** until the BMS has delivered basic info and cell voltages once (`haveBasicInfo && haveCellData`), so no placeholder values ever reach the SMA. Once BMS data has been seen, frames keep going even if the BMS goes silent, with CCL/DCL 0 A and an edge-triggered `[BMS] Data stale ...` / `[BMS] Data fresh again` line; a BMS that has **never** answered means no frames at all — how the Sunny Island treats that silence is an open question, see issue #20.
-- **Core 1 (Arduino `loop()`):** OTA handling, SD telemetry every 10s (also gated on real BMS data), the one-time boot diagnostics and the 10-minute health log. The Async Web Server / SSE run on their own task (`async_tcp`) via `ESPAsyncWebServer`.
-- **Boot order (`setup()`):** SD, then config (NVS; after SD so its validation warnings reach the SD log) → BMS + CAN drivers and both tasks → `setupNetwork()` (blocks up to ~15s for WiFi + NTP) → OTA, web server → `netReady = true`. BMS/CAN deliberately start before the network so the SMA isn't left without frames while WiFi connects. Nothing that uses the async TCP stack (web server, SSE) may run before `setupNetwork()`: `WebDashboard::loadConfig()` is split from `WebDashboard::begin()` for that reason.
-- **Shared state:** `currentData` (`DashboardData`, `include/SystemState.h`), `cfg` (`SystemConfig`, `include/SystemConfig.h`) and the BMS freshness flags (`haveBasicInfo`/`haveCellData`, `lastBasicInfoRead`/`lastCellRead`) are shared between tasks and guarded by `dataMutex` (a `SemaphoreHandle_t`). Any new cross-task field must be read/written inside `xSemaphoreTake(dataMutex, ...)` / `xSemaphoreGive(dataMutex)`, following the existing pattern in `bmsTask` and `canTask`. The UI-action fields `manualMaintForce`, `isResetting`, `resetHoldStartTime` are also under `dataMutex` (written by `handleUIAction` on the web task, read by `canTask`). The WiFi event flags (`wifiPending*`, `wifiConnected`, ...) are the documented exception — one writer (the WiFi event task), one reader (`loop()`), never touched by `bmsTask`/`canTask`, so they are `volatile` without a mutex.
-- **Network output lock:** `netOutMutex` serializes every call into the SSE event source (`netLog`'s SSE log channel and `pushTelemetry`). AsyncEventSource locks internally since ESPAsyncWebServer 3.x, but sharing the mutex keeps log lines from interleaving. It is the innermost lock: never take another mutex while holding it.
+| Task/core | Responsibility |
+|---|---|
+| `bmsTask` (core 0) | Polls the Daly BMS over RS485 every ~2.4s, feeds `CellSmoother`, stores under `dataMutex`. |
+| `canTask` (core 1) | Every 250ms: under `dataMutex`, calls `decide()`, writes `Decision` back; **outside** the lock, `inverter.sendStatus()` if `sendFrames`, then logs one-shot events. Also CAN RX/bus health every 50ms. |
+| `loop()` (core 1) | OTA, SD telemetry every 10s, boot diagnostics, 10-min health log. |
+| `async_tcp` | Async Web Server + SSE. |
+| SD writer task | Queue-fed CSV/log writer (`SDLogger`). |
+| WiFi event task | Records transitions into the WiFi event latch; no logging/I/O itself. |
 
-### Glideslope current-limit logic
-The math lives in `include/Glideslope.h` (`Glideslope::calculateCCL`/`calculateDCL`/`isFresh`): pure functions with no Arduino/FreeRTOS dependencies. There is no longer a `calculateCCL()`/`calculateDCL()` wrapper pair in `src/main.cpp`: `StatusFrame::decide()` (`include/StatusFrame.h`, #29) calls `Glideslope::calculateCCL`/`calculateDCL`/`isFresh` directly, passing in `cfg` and a `StatusFrame::Snapshot` of the smoothed/raw voltages and BMS-freshness state that `canTask` captured under `dataMutex`; `canTask` itself no longer touches the glideslope math. The core control algorithm:
-- Below `cvStartTaper`/above `cvStartDTaper`: full `maxChargeA`/`maxDischargeA`.
-- Between the start-taper and alarm-gate voltages: linear interpolation down to trickle/limp current.
-- At/beyond the alarm gate: fixed trickle (`trickleA`) or limp (`limpDischargeA`) current.
-- At/beyond the hard max/min voltage: 0A.
-- **Raw vs. smoothed input split (#9):** `DashboardData` carries both a 20-sample-smoothed max/min cell voltage (`maxCellVoltage`/`minCellVoltage`, ~48s window at `vSamples=20`) and the unsmoothed value from the latest BMS read (`maxCellVoltageRaw`/`minCellVoltageRaw`). The **hard cutoff** (`cvMaxCharge`/`cvMinDischarge` → 0A) and the **alarm gate** (`cvHighAlarmGate`/`cvLowAlarmGate` → trickle/limp) are evaluated against the **raw** value, so a fast per-cell spike trips them immediately instead of ~48s later once the moving average catches up. The **taper** between the start-taper and gate voltages keeps using the **smoothed** value so the CCL/DCL doesn't jitter on ordinary per-read noise. Consequence: once the smoothed value has reached the gate, the taper's slope clamp can't give back more than trickle/limp even if the raw value has since dropped back below it — this is intended, not a bug (see the root cause: 2026-09-22, Cell 16's raw voltage reached ~3.5–3.6V under a 222A step while the 48s-smoothed value only reached 3.416V, so the bridge kept reporting CCL=363A — issue #9, #8).
-- `cvMaxCharge` must stay below the Daly BMS's own cell overvoltage protection (3.65V on this pack, confirmed by the operator in #8) with real margin — the Daly's own protection is not a substitute for this firmware's cutoff, since a Daly-side trip resets the reported SOC to 100% and can produce a bus transient. The live config's 3.55V leaves only 100mV of margin; that margin was already found to be one contributing factor to the #8 SMA cluster fault and should not be narrowed further.
-- Stale or missing BMS data forces 0A as a fail-safe, checked first in both functions. `bmsDataFresh()` requires **both** basic info and cell voltages to have been read at least once and within `cfg.bmsTimeout` seconds (settable on `/config` as BMS timeout). "Never read" counts as stale (before, `lastSuccessfulBmsRead == 0` let full limits through for the first 60s after boot).
-- Maintenance mode (`currentData.maintenanceActive`, driven by either manual UI toggle or automatic low-voltage winter maintenance detection in `StatusFrame::decide()`) overrides normal taper behavior; the automatic trigger compares the smoothed **minimum cell voltage** (not the pack average) against `cfg.cvMaintStart`/`cfg.cvMaintStop`, so it starts as soon as any one weak cell sags below `cvMaintStart` and releases once it recovers above `cvMaintStop` (#12).
-- A NaN cell voltage (smoothed or raw) or NaN threshold (corrupted NVS) yields 0 A, same as stale data.
-- Every current-limit return goes through `Glideslope::toDeciAmps()`, which floors at 0 and saturates at 65535 (0.1 A units): a negative `trickleA`/`limpDischargeA`/`maintAmps`/`maxChargeA`/`maxDischargeA` yields 0 A instead of wrapping to ~6550 A (#52). Don't add a bare `(uint16_t)` cast of a current back.
-- **Cell spread derating (#24, #8):** a weak cell's internal-resistance drop scales with current, not SOC, so a voltage threshold alone reacts late. `calculateCCL`/`calculateDCL` take the raw max-min cell spread (`DashboardData.cellSpreadRawMv`, computed each `bmsTask` cycle from the same unsmoothed 0x95 read as the raw min/max) and derate the taper/full-current result via `Glideslope::spreadFactor(spreadMv, cfg.spreadStartMv, cfg.spreadMaxMv)` — 1.0 (no change) at/below `spreadStartMv` (default 60mV), linear down to 0.0 at/above `spreadMaxMv` (default 150mV), clamped back up to trickle/limp, same as the existing slope-target clamp. Never applied to the hard-cutoff, alarm-gate or maintenance branches — only the smooth taper/full-current path. `DashboardData.derateFactor` mirrors the live factor for the dashboard.
+**Boot order:** SD → config (`ConfigStore::load()`) → BMS+CAN drivers and
+both tasks → `setupNetwork()` (~15s max) → OTA, web server → `netReady`.
+BMS/CAN start first so the SMA isn't left without frames while WiFi
+connects.
 
-`test/test_glideslope/test_glideslope.cpp` includes the real `Glideslope.h` and runs natively (`pio test -e native`). Change the math only in `Glideslope.h` and add a test case with it.
+**Shared state:** `currentData` (`DashboardData`), `cfg` (`SystemConfig`),
+`bmsLink` and `uiCommands` (written by `handleUIAction`, read by
+`canTask`) are guarded by `dataMutex`. The WiFi event latch is the
+lock-free exception.
 
-### Module layout
-- `include/DalyFrames.h` / `src/DalyRS485.cpp` / `include/DalyRS485.h` — Daly BMS RS485 protocol (9600 baud), split into a pure parser and a UART adapter (#30) so the parsing half runs under `pio test -e native` (`test/test_dalyframes`): `include/DalyFrames.h` is Arduino-free and holds the data structs (`DalyBasicInfo`, `DalyMosfetStatus`, `DalyAlarmStatus`), the frame checksum check, the byte-level parsers (`parseBasicInfo`, `parseCellFrame`, `parseMosfetStatus`, `parseAlarmStatus`), the cell-voltage plausibility gate (`cellVoltagesPlausible`, 1.5–4.5 V via `kCellMinPlausibleMv`/`kCellMaxPlausibleMv`), and the 0x98 alarm bit-name table (`kAlarmBitNames()`) — `DalyRS485.h` re-exposes the structs and table under their old names (`using` declarations, `DalyRS485::kAlarmBitNames`) so existing callers (`main.cpp`) are unchanged. `DalyRS485` (`src/DalyRS485.cpp`) owns the UART send/receive/retry loop and calls the parsers on each frame's 8-byte payload: basic pack info + per-cell voltage reads (`0x90`/`0x95`), plus the BMS's own hardware protection state via `readMosfetStatus()` (`0x93`: charge/discharge MOSFET on/off) and `readAlarmStatus()` (`0x98`: full protection bitfield — cell/pack over/undervoltage, over/undertemperature, overcurrent, SOC, MOSFET, and communication/hardware faults, every bit decoded via `kAlarmBitNames` and logged by name edge-triggered in `bmsTask`) — polled each `bmsTask` cycle, independent of `calculateCCL`/`calculateDCL`, so a BMS-initiated cutoff is visible even if our own glideslope never would have tripped. The `0x93`/`0x98` parsers reject the frame rather than trust an out-of-range byte, since the exact byte layout is from the documented Daly protocol family, not verified against every pack's firmware. `readCellVoltages()` rejects the whole read if any cell is outside the plausibility gate — the read counts as failed, so the data goes stale and the limits drop to 0 A instead of a corrupt value entering the filter; logged edge-triggered.
-- `src/SMA_CAN.cpp` / `include/SMA_CAN.h` — SMA/Victron CAN protocol (500kbps), status frame TX (CCL/DCL/CVL/DVL, SOC, etc.), bus-off detection and recovery ("nuclear" driver suspend/resume if the CAN cable is unplugged and reattached). `sendStatus()`/`readMessages()`/`checkBusHealth()` are thin adapters over `include/SMAFrames.h` (#45): pure `encodeStatus()` (SMATxData → the CAN frames to send), `decodeFrame()` (a received frame → mode/grid-present), and `shouldRetryBusRecovery()` (bus-off state + timers → retry now or not) — no Arduino/FreeRTOS dependency, mirroring the `DalyFrames.h`/`DalyRS485.h` split; `SMA_CAN.h`'s `SMATxData` is a `using` alias onto `SMAFrames::SMATxData`. Tested in `test/test_smaframes/`.
-- `src/WebDashboard.cpp` / `include/WebDashboard.h` — `ESPAsyncWebServer` routes (ESP32Async's `AsyncTCP`/`ESPAsyncWebServer`, pinned exactly in `platformio.ini`; bump deliberately, since the web stack runs on the lwIP thread and a bug there crashes the whole device - see issue #11), Server-Sent Events for live telemetry push, the UI action callback (`handleUIAction` in `main.cpp`) for toggles like manual maintenance force and SMA cluster reset, and the `/api/logs/*` routes backing the Logs/Graphs pages (list, tail-view, full-file download, decimated graph series) — see `findLogFile()` for the shared filename-whitelist/path-traversal guard these all use. `GET /api/coredump/summary` (JSON: task, PC, cause, backtrace, crashing ELF sha, reset reason, running ELF sha) sits next to the existing raw `/api/coredump`, which answers 404 when no dump is stored and 409 when one is present but fails its CRC check. Every setting is a `Setting<T>` member of `SystemConfig` (see its bullet) that carries its own key, label, unit, min, max and default; `loadConfig()`, `saveConfig()` and `/config` just loop over `cfg.all()`. `loadConfig()` resets each setting to its default and takes a stored NVS value only if it has the expected NVS type (one `getType()` per key; a mismatch is logged instead of silently reading the default) and `set()` accepts it (NVS integers are read at full width, so the range check happens before narrowing), otherwise logs `[CFG] Stored ... - using the default` (a value saved before #61, e.g. a spread threshold wrapped to 65476, or NaN from corrupted flash, would otherwise switch a safety mechanism off). `saveConfig()` calls `Setting::parse()` per submitted field (whole string must be a number, then `set()`), then the two-setting rules in `SystemConfig::validate()`; all-or-nothing: any problem answers 400 with one line per problem and writes nothing. A successful save logs `[CFG] <label>: <old> -> <new> <unit>` for each setting `SystemConfig::changedMask()` found actually changed, or `[CFG] Saved, no changes` if none did; the numbers come from `formatSettingValue()` (shortest fixed-form (non-exponent) `%g` precision that round-trips the binary32 value exactly (up to 9 significant digits), falling back to exponent form only below 1e-4, so a real change never prints as `X -> X`). It holds `dataMutex` only for publishing `*_cfg = copy` (parsing and error text run unlocked on a copy — this handler is the only writer of `*_cfg`). `/config` fills `<strong>!!LABEL_<key>!!</strong>` and `!!IN_<key>!!` (the `<input>` with the setting's min/max/step, plus a generated `min–max unit · default` line). Add a setting = add a `Setting<T>` member, list it in `all()`, and add those two placeholders (a native test fails if they don't match); never hand-write an `<input>`, a label, a range or a default in the page, or a second range check. `loadConfig()` logs two-setting violations of a stored config as `[CFG] Loaded config fails validation: ...` (#56). `WebDashboard::setDebugCallback()` (wired to `netLog` in `setup()`) takes `netLog`'s own variadic `(fmt, ...)` signature directly, unlike `DalyRS485`/`SMA_CAN`'s single-string callback style.
-- `src/SDLogger.cpp` / `include/SDLogger.h` — background SD-card logger: a queue-fed FreeRTOS task writes BMS/SMA telemetry to daily-rotated CSV files and system events to a parallel `.log` file. All direct (non-queued) SD/SPI access — the writer task's own file writes, and every web-route read (list/tail/download/graph) — is guarded by `SDLogger::sdMutex()`, a second mutex independent of `dataMutex`. Routes that need the card for longer than a quick read (full-file download, graph decimation) hold `sdMutex_` for that whole operation; see the comments on `/api/logs/download` and `/api/logs/graph` in `WebDashboard.cpp` for the accepted tradeoff (the writer task drops samples it can't log during that window) and how each bounds its worst case. The CSV row layout — one ordered table of column descriptors in `include/TelemetrySchema.h` (`TelemetrySchema::kColumns`; also drives the CSV header and, for the fields that format identically, the SSE JSON — see #32) — is `Timestamp,PackV,PackI,SOC,MinCellV,MaxCellV,ReqI,Mode,ForceCharge,MaintenanceActive,GridPresent,Cell1..16,ChargeMOS,DischargeMOS,BmsProtection,CellOV1,CellOV2,PackOV1,PackOV2,MinCellRaw,MaxCellRaw,RawSpreadMv,Derate` — `readGraphSeries()` looks up the columns it needs (`Timestamp`..`ReqI`) by name via `TelemetrySchema::index()` rather than hardcoding raw positions, so any new telemetry field is one table entry, appended after the existing columns (currently after `Derate`), never inserted earlier in the row. `readGraphSeries()`/`readTail()` are themselves thin adapters over two pure headers (#43): `include/CsvDecimation.h` (`Accumulator`: stateful chunk-fed line splitting + skip-interval decimation, writes into a caller buffer, no Arduino `String`) and `include/TailTrim.h` (`Trimmer`: rolling keep-last-N-bytes + drop-leading-partial-line). Tested in `test/test_csvdecimation/` and `test/test_tailtrim/`.
-- `include/WebPages.h` — dashboard, config, logs, and graphs pages' HTML/JS/CSS stored as `PROGMEM` string literals (`index_html`, `config_html`, `logs_html`, `graphs_html`); no separate frontend build step. The nav bar (markup + CSS) shared by all four pages is defined once as the `NAV_CSS`/`NAV_BAR` macros at the top of the file and spliced into each page literal via adjacent string-literal concatenation (compile-time, zero runtime cost) — edit those macros, not the individual pages, when changing navigation. The dashboard's live console (`#console`) seeds itself from the newest `.log` file's tail via `/api/logs/list` + `/api/logs/content` on page load (the SSE `log` channel has no replay/backlog, so without this a fresh page load shows nothing until the next event fires), then switches to the live SSE feed. `graphs_html` charts via Chart.js loaded from a CDN (browser-side only, no firmware cost) — keep each chart single-axis (see the `fix: split dual-axis...` commit) rather than reintroducing a dual-axis chart. `config_html`'s rows each carry a one-sentence `.desc` under the label (what the setting does, its unit) — the two cell-spread-derating fields (#24) additionally carry a `.hint` span with a typical range (`typical 40–100` / `typical 120–200`). `config_html` contains no hand-written `<input>`s, labels, ranges or defaults: they are generated from the `Setting`s (always with a `min`, since without one the browser counts `step`s from the stored value — a stored 51 with `step="5"` refused 60). The `.hint` spans carry only what the table doesn't: a typical range or a rationale.
-- `include/DashboardData.h` — `DashboardData` (live telemetry pushed to web UI and used for CAN TX; also carries the Daly MOSFET/alarm fields — `chargeMosOn`, `dischargeMosOn`, `bmsProtectionActive`, `cellOvervoltLevel1/2`, `packOvervoltLevel1/2`) kept free of Arduino includes so `TelemetrySchema.h` and the native tests can use it.
-- `include/SystemState.h` — only the `extern SemaphoreHandle_t dataMutex;` declaration plus the includes of the two structs above.
-- `include/SystemConfig.h` — `SystemConfig`, the NVS-persisted settings, kept free of Arduino/FreeRTOS includes so the glideslope math and native tests can use it. Each member is a `Setting<float|int|uint16_t>` declared with its key, label, unit, min, max, default, decimals and HTML step; it reads like a plain number (`operator T`), so `Glideslope.h`/`StatusFrame.h` use `cfg.maxChargeA` unchanged. `set(v)` is the gate: it stores `v` only if it is finite, within [min, max] and whole for an integer setting, so every value from NVS or the form is range-checked; `parse(text)` is `set()` for a form string; `reset()` restores the default. `SettingBase` is the type-independent view `all()` hands out for load/save/page loops. `formatSettingValue()` (also in this header, pure, snprintf-based) formats a setting's value for the post-save change log: a plain integer for an integer kind, or, for a float kind, the shortest fixed-form (non-exponent) `%g` precision that round-trips its binary32 value exactly (up to 9 significant digits, `FLT_DECIMAL_DIG`), falling back to exponent form only below 1e-4 - see the WebDashboard bullet. A `Setting` can't be assigned from another one (`cfg.cvStartTaper = cfg.cvMaxCharge` would also copy the NVS key and range, so its copy-assignment is deleted); assigning a whole `SystemConfig` copies each setting's value from the same setting. `setUnchecked()` bypasses the range and is only compiled under `PIO_UNIT_TESTING`, for native tests that feed the math out-of-range values (NaN, negative amps, reversed thresholds) to prove its own fail-safes — firmware can't call it. Never pass a `Setting` to `netLog`/`debugLog`/`printf` directly (varargs skip the conversion to T): cast it or call `.get()`; the device env's `build_src_flags = -Werror=format -Werror=conditionally-supported` makes that a compile error (the Arduino core's `-w` would otherwise hide it). A member missing from `all()` fails `test_all_covers_every_member`. `SystemConfig::validate()` checks only the rules relating two settings (#12 maintenance start above min discharge, charge/discharge taper ordering, maintenance hysteresis; spread start ≥ full is deliberately allowed, `spreadFactor()` treats it as a step). The #8 headroom (`cvMaxCharge` ≤ `kDalyOvervoltageV - kMinChargeMarginV` = 3.550 V) is simply `cvMaxCharge`'s max. Ranges are sanity limits against typos and rolled-over values, not tuning advice. Tested in `test/test_systemconfig/` (including that every setting has exactly one `!!LABEL_`/`!!IN_<key>!!` in `config_html`; `WebPages.h` defines `PROGMEM` itself when built without Arduino).
-- `include/Glideslope.h` — the pure glideslope math (see the Glideslope section).
-- `include/StatusFrame.h` — pure `StatusFrame::decide(cfg, Snapshot, ControlState&) -> Decision`: everything `canTask` decides per 250 ms tick (data gate, freshness, glideslope inputs, spread derating, maintenance hysteresis, reset hold, frame values, one-shot log events). Tested in `test/test_statusframe/`. `canTask` only holds the lock, fills the snapshot, maps `Values` to `SMATxData` and emits the log lines.
-- `include/BmsEvents.h` — pure `BmsEvents::decide(State&, const DalyBasicInfo*, const DalyMosfetStatus*, const DalyAlarmStatus*) -> Events`: the same shape as `StatusFrame::decide()`, for `bmsTask`'s edge-triggered SOC-jump/MOSFET-transition/alarm-bit-diff detection. `bmsTask` reads the three Daly frames at three separate points in its loop, so it calls `decide()` once per successful read with the other two readings `nullptr`; `State` is one caller-owned struct threaded through each call, replacing the old per-event `static`s. Tested in `test/test_bmsevents/`.
-- `include/RollbackConfirm.h` — pure `RollbackConfirm::decide(State&, wifiUp, bmsUp, nowMs, imagePendingVerify) -> Action` (#58/#57): the OTA rollback-confirmation decision behind `Diagnostics::confirmImageIfReady()` (see OTA rollback under Diagnostics), same shape as `StatusFrame::decide()`/`BmsEvents::decide()`. Tested in `test/test_rollbackconfirm/`.
-- `include/HealthLog.h` — pure `HealthLog::decide(State&, Sample, nowMs) -> Reason`: whether a 10-minute health sample is worth a log line (see Health under Diagnostics). Tested in `test/test_healthlog/`.
-- `include/CellSmoother.h` — the per-cell moving average (`update(rawV, n, windowSize) -> Result`): reseed on first call and window change, smoothed/raw min/max, raw spread. Owns `MAX_CELLS`/`MAX_SAMPLES`. Tested in `test/test_cellsmoother/`.
-- `include/TelemetrySchema.h` — the ordered column table (`kColumns`, `index(name)`, `formatHeader`/`formatRow`) that `SDLogger` writes and `readGraphSeries()` indexes. Tested in `test/test_telemetryschema/`. `broadcastTelemetry`'s JSON stays hand-written (different precision and key order) behind a `static_assert` on the column count.
-- `include/pin_config.h` — all hardware pin mappings for the LilyGO T-CAN485. The board requires the `5V_EN` pin driven high to power the RS485/CAN transceivers.
-- `src/Diagnostics.cpp` / `include/Diagnostics.h` — boot-reason/core-dump diagnostics (`Diagnostics::logBootDiagnostics()`), the periodic health log (`Diagnostics::logHealth()`), and the OTA rollback-confirmation safety net (`Diagnostics::confirmImageIfReady()`, `verifyRollbackLater()`) — moved out of `main.cpp` (#21) as a self-contained unit, callback-wired to `netLog` like `DalyRS485`/`SMA_CAN`/`SDLogger`/`WebDashboard`. `logHealth()` looks up every task, including `BMS_Task`/`CAN_Task`, by name via `xTaskGetHandle` — `main.cpp` no longer keeps task handles around just for this. `confirmImageIfReady()` is a thin wrapper over `RollbackConfirm::decide()` (#58/#57): it holds the `static RollbackConfirm::State`, queries `esp_ota_get_state_partition()` only when the answer could change the outcome, calls `decide()`, and performs the resulting `confirmNow`/`logNotConfirmed` side effects (`esp_ota_mark_app_valid_cancel_rollback()` + the existing log lines).
-- `src/main.cpp` — wiring of the above: WiFi/NTP/OTA setup, the two-core task split, `netLog`, and the glideslope calculations.
+## Module map
 
-### Diagnostics
-- **Boot:** `setup()` calls `Diagnostics::logBootDiagnostics()` right after the SD logger starts (and `Diagnostics::setDebugCallback(netLog)` is wired first), before the tasks, so a crash loop or a reset in the first minute still leaves its reason on the SD card (lines before NTP carry the `[WAITING FOR NTP...]` prefix, or the local time the RTC carried over a soft reset). It logs `esp_reset_reason()`, the running ELF sha256, the OTA partition and its state, a `[DIAG] ROLLED BACK: partition ... ` line when the bootloader reverted to the previous image, and the core dump summary (`[DIAG] No core dump stored.` vs `[DIAG] Core dump present but unreadable (...)`). The first health line follows once the clock is valid or after 60 s.
-- **Core dumps:** this Arduino core's prebuilt sdkconfig writes an ELF core dump to the `coredump` flash partition on every panic, and OTA doesn't erase it. `GET /api/coredump` streams it; decode it with the **matching** `firmware.elf`: `espcoredump.py info_corefile -t raw -c coredump.bin firmware.elf`. A dump stays until the next crash overwrites it, so compare its ELF sha with the running one. Keep the `firmware.elf` of every build you deploy.
-- **OTA rollback:** `verifyRollbackLater()` (`src/Diagnostics.cpp`, `extern "C"`, overrides a weak symbol in the Arduino core) returns true so the Arduino core does not mark a fresh OTA image valid at boot. `loop()` calls `Diagnostics::confirmImageIfReady(wifiUp, bmsUp)` every iteration (`bmsUp` computed under `dataMutex` in `main.cpp`, same as before); it confirms the image (`esp_ota_mark_app_valid_cancel_rollback()`) only once both have been true for 2 min uptime; log line `[SYS] Firmware confirmed ...`. If that hasn't happened at 2 min, `[SYS] Firmware NOT confirmed ...` names what is missing (one-shot warning); any reset before confirmation (panic, WDT, brownout, power cycle) makes the bootloader boot the previous firmware. `confirmImageIfReady()` is a thin wrapper over the pure `RollbackConfirm::decide()` (`include/RollbackConfirm.h`, #58/#57, tested in `test/test_rollbackconfirm/`) — WiFi/BMS coming up later can still confirm the image even after the not-confirmed warning has already fired once, since the confirm branch is checked before the warned flag. While the image is pending, a second OTA is refused by the OTA library (`esp_ota_begin` returns `ESP_ERR_OTA_ROLLBACK_INVALID_STATE`; espota just shows an error): wait for the confirm line, or reboot to roll back and OTA again. Rollback is enforced by the bootloader binary, which OTA never updates, so it only works on a device whose bootloader was USB-flashed from a core with `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` (core 2.0.17 has it). A USB-flashed image has state "undefined" and is never rolled back.
-- **Health:** every 10 min `Diagnostics::logHealth()` samples free / minimum / largest-block heap, the remaining stack (bytes) of `loop`, `BMS_Task`, `CAN_Task`, `SD_LogTask`, `async_tcp` and `arduino_events` (the WiFi event task, all looked up by name via `xTaskGetHandle`), and the current WiFi RSSI (`n/a` while disconnected) — but only **logs** a `[DIAG] Health (<reason>): ...` line when the pure `HealthLog::decide()` (`include/HealthLog.h`) says so: a baseline after boot; `STACK LOW` when a task has <512 B left (on first reaching it and on every further drop — a task at 0 B is exhausted, not missing: missing is `HealthLog::kNoTask`, shown as `-`); `TASK GONE` when a task seen before can no longer be found; a stack high-water mark dropping ≥256 B, the heap low-water mark dropping ≥4 KB, or the largest block falling ≥8 KB below the best value since the last line (that reference ratchets up); or a 24 h heartbeat. Per-task reasons name the task (`[DIAG] Health (STACK LOW: can): ...`). Loop's stack is looked up as `loopTask` by name like the others. RSSI rides along but never triggers a line (WiFi has its own edge-triggered lines). Same event-only rule as the Logging section: don't reintroduce an unconditional periodic line.
-- **WiFi:** `wifiEventHandler()` (registered in `setupNetwork()`) only records the transition — no logging, no network I/O on the WiFi event task; `loop()` emits the `[WIFI] ...` lines via `drainWifiEvents()`, edge-triggered — one `[WIFI] Disconnected (reason …)` line per transition (with a decoded reason where known, e.g. beacon timeout, wrong password, AP not found), one `[WIFI] Reconnected …, was down for Ns` line on recovery, one `[WIFI] Lost IP address (still associated)` line for `ARDUINO_EVENT_WIFI_STA_LOST_IP` — not one per retry while the AP is unreachable. The ESP32's RTC survives a software/panic reset, so `time(nullptr)` can already be valid before WiFi/NTP even run; the time zone is set with `setenv("TZ", …)`/`tzset()` at the very top of `setup()`, before anything can log a timestamp, so early lines (e.g. the CAN driver start) use local time like everything else instead of UTC.
+- `Glideslope.h` — CCL/DCL/isFresh/spreadFactor/toDeciAmps/toDeciVolts — `test_glideslope/`
+- `StatusFrame.h` — `decide()` -> `Decision`, per-tick `canTask` logic — `test_statusframe/`, e2e `test_canpath/`
+- `DalyFrames.h`+`DalyRS485.cpp` — Daly RS485, pure parser + UART adapter — `test_dalyframes/`
+- `SMAFrames.h`+`SMA_CAN.cpp` — SMA/Victron CAN, pure codec + adapter — `test_smaframes/`
+- `CellSmoother.h` — per-cell moving average, window `cfg.vSamples` (default 12) — `test_cellsmoother/`
+- `BmsEvents.h` — `bmsTask`'s edge-triggered SOC/MOSFET/alarm detection — `test_bmsevents/`
+- `RollbackConfirm.h` — OTA rollback decision behind `confirmImageIfReady()` — `test_rollbackconfirm/`
+- `HealthLog.h` — `decide() -> Decision{reason, task}` for the health log — `test_healthlog/`
+- `LocalClock.h` — the one wall-clock-valid check, used by `netLog()`, NTP wait, `SDLogger` — `test_localclock/`
+- `ConfigForm.h` — pure `/save` parse/validate + change-log formatting — `test_configform/`
+- `ConfigStore.h`+`.cpp` — NVS load/store; rejects a bad-typed/out-of-range value, logs the default used
+- `SettingFormat.h` — `formatSettingFixed()` (decimals, a LIMIT) / `formatSettingValue()` (round-trip, a VALUE) — `test_settingformat/`
+- `SystemConfig.h` — each member a `Setting<T>`; `set()` range-gates every write; `validate()` checks two-setting rules — `test_systemconfig/`
+- `DashboardData.h` — live telemetry for the web UI/CAN TX plus Daly MOSFET/alarm fields, Arduino-free
+- `TelemetrySchema.h` — ordered CSV column table — `test_telemetryschema/`
+- `TelemetryJson.h` — SSE JSON via `BoundedWriter`, capped at `kPackCells` — `test_telemetryjson/`
+- `SDLogger.cpp` — SD writer task; access via `sdMutex_`; routes use `webLockTimeout()` (0 if already held); decimation in `CsvDecimation.h`
+- `WebDashboard.cpp` — `ESPAsyncWebServer` routes, SSE, `/toggleMaint`/`/resetSMA`, `/api/logs/*` (guarded by `findLogFile()`); `saveConfig()` uses `ConfigForm`/`ConfigStore`
+- `Diagnostics.cpp` — boot diagnostics, health log, OTA rollback, coredump routes (below)
+- `pin_config.h` — LilyGO T-CAN485 pin map (`5V_EN` driven high for RS485/CAN)
+- `main.cpp` — wiring: WiFi/NTP/OTA setup, two-core task split, `netLog`, mutex timeouts
 
-### Logging
-Use `netLog(fmt, ...)` (defined in `src/main.cpp`) for all application-level log output. Serial and the SD card's daily `.log` file (via `SDLogger::logEvent`) always get the line; the web UI's live console via SSE gets it only once `netReady` is set and only if `netOutMutex` is obtained within 50 ms — otherwise that sink silently drops the line. Don't use bare `Serial.print` for anything user-relevant — if a module can't reach `netLog` directly (e.g. `SDLogger` itself, to avoid a circular dependency on `main.cpp`), wire a `setDebugCallback`-style callback to it instead, matching the existing pattern in `DalyRS485`/`SMA_CAN`/`SDLogger`. For state that's polled continuously but only interesting on change (e.g. the Daly MOSFET/alarm status in `bmsTask`, or `[BMS] Data stale`/`Data fresh again` in `canTask`), log edge-triggered — only on transition, with a baseline flag so the first read after boot doesn't log a spurious "changed" event — rather than on every poll, so a stuck-on condition doesn't spam the log queue. The same event-only style applies to a discontinuity in an otherwise-continuous value: `bmsTask` logs `[BMS] SOC jumped ...` only when consecutive `packSOC` reads differ by more than 10 points (or jump to 100% from below 95%), not on every read.
+## Diagnostics runbook
+
+- **Boot:** `logBootDiagnostics()` runs right after the SD logger starts,
+  before the tasks — logs `esp_reset_reason()`, running ELF sha256, OTA
+  partition/state, any rollback notice, core dump summary.
+- **Core dumps:** `GET /api/coredump/summary` (JSON) then `GET
+  /api/coredump` (raw) — summary must register first: AsyncURIMatcher's
+  plain-string match also matches `"<uri>/..."` and would swallow it
+  otherwise. Decode with the matching `firmware.elf`: `espcoredump.py
+  info_corefile -t raw -c coredump.bin firmware.elf`. 404 = no dump, 409 =
+  fails CRC. Keep every deployed build's ELF.
+- **OTA rollback:** see `docs/adr/0002-...md`. While pending, a second OTA
+  is refused - wait for `[SYS] Firmware confirmed ...`, or reboot to roll
+  back. Only works if the bootloader was USB-flashed from a
+  rollback-enabled core.
+- **Health:** every 10 min, `logHealth()` samples heap, per-task stack
+  (`loop`/`BMS_Task`/`CAN_Task`/`SD_LogTask`/`async_tcp`/`arduino_events`),
+  SD drop/failure counters, WiFi RSSI — logs only when `HealthLog::decide()`
+  returns a reason: boot baseline, `STACK LOW` (<512B), `TASK GONE`, a
+  stack/heap/largest-block regression past threshold, `SD DROPS` (any
+  increase), or a 24h heartbeat. Never reintroduce an unconditional
+  periodic line.
+- **WiFi:** `wifiEventHandler()` only records transitions into the WiFi
+  event latch; `drainWifiEvents()` in `loop()` emits `[WIFI]
+  Disconnected`/`Reconnected`/`Lost IP address`, edge-triggered.
 
 ## Engineering conventions
 
-- Prioritize technical accuracy and directness over conversational filler; if a proposed change is technically flawed, say so and explain why.
+- Prioritize technical accuracy and directness over conversational filler;
+  if a proposed change is technically flawed, say so and explain why.
 - Keep responses focused on code/logs/logic.
 
 ### Model split: plan and review with the expensive model, delegate grunt work to cheap models
 
-- **Planning, briefs, review: the most capable model** (the main session, currently Fable-class). Investigation, root-causing, deciding what to change, writing the worker briefs, and reviewing the workers' diffs before anything is committed all stay here. Don't delegate judgment.
-- **Grunt work: cheap subagents** (Sonnet-class, `model: "sonnet"`). Well-specified edits, builds, running tests, scraping logs, mechanical verification, worktree builds of each PR tip. Dispatch independent workers in parallel, in one message.
-- **Review: the capable model again.** Read the worker's diff yourself (or spawn `model: "fable"` reviewers by angle for a big diff) and verify each finding against the code before acting on it. Workers report; they don't self-approve.
-- **Every brief is self-contained.** The worker has no conversation context: give it the repo path, the exact scope, the required report format, and the hard rules verbatim - never `pio run -t upload`, never `pio test` without `-e native` (the device env OTA-flashes the live bridge), no commits or pushes unless the brief says so, don't touch `include/secrets.h` contents.
-- Firmware flashes are never delegated and never autonomous: the main session asks the user before each OTA upload.
-- **Code review before merge: the `mattpocock-skills:code-review` skill** (`/code-review <fixed-point>`, e.g. `main`). It runs two parallel sub-agents and reports them side by side: *Standards* (this file's conventions plus its Fowler smell baseline) and *Spec* (does the diff do what the referenced issues asked; issues resolve via `docs/agents/issue-tracker.md`, so reference them in commit messages). For firmware diffs that touch tasks, mutexes, the glideslope or CAN output, add expensive-model angle reviewers on top (concurrency, safety-critical behaviour, web/diagnostics), since the two axes don't cover runtime correctness. Verify every finding against the code before writing a fix brief.
+- **Planning, briefs, review: the most capable model** (the main session,
+  currently Fable-class). Investigation, root-causing, deciding what to
+  change, writing the worker briefs, and reviewing the workers' diffs before
+  anything is committed all stay here. Don't delegate judgment.
+- **Grunt work: cheap subagents** (Sonnet-class, `model: "sonnet"`).
+  Well-specified edits, builds, running tests, scraping logs, mechanical
+  verification, worktree builds of each PR tip. Dispatch independent
+  workers in parallel, in one message.
+- **Review: the capable model again.** Read the worker's diff yourself (or
+  spawn `model: "fable"` reviewers by angle for a big diff) and verify each
+  finding against the code before acting on it. Workers report; they don't
+  self-approve.
+- **Every brief is self-contained.** The worker has no conversation
+  context: give it the repo path, the exact scope, the required report
+  format, and the hard rules verbatim - never `pio run -t upload`, never
+  `pio test` without `-e native` (the device env OTA-flashes the live
+  bridge), no commits or pushes unless the brief says so, don't touch
+  `include/secrets.h` contents.
+- Firmware flashes are never delegated and never autonomous: the main
+  session asks the user before each OTA upload.
+- **Code review before merge: the `mattpocock-skills:code-review` skill**
+  (`/code-review <fixed-point>`, e.g. `main`). It runs two parallel
+  sub-agents and reports them side by side: *Standards* (this file's
+  conventions plus its Fowler smell baseline) and *Spec* (does the diff do
+  what the referenced issues asked; issues resolve via
+  `docs/agents/issue-tracker.md`, so reference them in commit messages). For
+  firmware diffs that touch tasks, mutexes, the glideslope or CAN output,
+  add expensive-model angle reviewers on top (concurrency, safety-critical
+  behaviour, web/diagnostics), since the two axes don't cover runtime
+  correctness. Verify every finding against the code before writing a fix
+  brief.
 
 ## Agent skills
 
 ### Issue tracker
 
-Issues live in this repo's GitHub Issues, via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+Issues live in this repo's GitHub Issues, via the `gh` CLI. See
+`docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
-Default five-role vocabulary (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+Default five-role vocabulary (`needs-triage`, `needs-info`,
+`ready-for-agent`, `ready-for-human`, `wontfix`). See
+`docs/agents/triage-labels.md`.
 
 ### Domain docs
 
-Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root. See
+`docs/agents/domain.md`.

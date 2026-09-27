@@ -17,51 +17,28 @@ using RollbackConfirm::State;
 void setUp(void) {}
 void tearDown(void) {}
 
-// --- Boundary: nowMs == kConfirmAfterMs is a no-op for every input combo ---
+// --- Up to and including kConfirmAfterMs, decide() is a no-op for every
+// input combination ---
 
-void test_boundary_at_deadline_is_noop_wifi_and_bms_up(void)
+static void test_noop_until_deadline_for_every_input(void)
 {
-    State st;
-    Action a = decide(st, true, true, kConfirmAfterMs, false);
-    TEST_ASSERT_FALSE(a.confirmNow);
-    TEST_ASSERT_FALSE(a.logNotConfirmed);
-    TEST_ASSERT_FALSE(st.imageConfirmed);
-    TEST_ASSERT_FALSE(st.unconfirmedWarned);
-}
-
-void test_boundary_at_deadline_is_noop_wifi_down(void)
-{
-    State st;
-    Action a = decide(st, false, true, kConfirmAfterMs, true);
-    TEST_ASSERT_FALSE(a.confirmNow);
-    TEST_ASSERT_FALSE(a.logNotConfirmed);
-    TEST_ASSERT_FALSE(st.imageConfirmed);
-    TEST_ASSERT_FALSE(st.unconfirmedWarned);
-}
-
-void test_boundary_at_deadline_is_noop_bms_down(void)
-{
-    State st;
-    Action a = decide(st, true, false, kConfirmAfterMs, true);
-    TEST_ASSERT_FALSE(a.confirmNow);
-    TEST_ASSERT_FALSE(a.logNotConfirmed);
-    TEST_ASSERT_FALSE(st.imageConfirmed);
-    TEST_ASSERT_FALSE(st.unconfirmedWarned);
-}
-
-void test_boundary_at_deadline_is_noop_both_down(void)
-{
-    State st;
-    Action a = decide(st, false, false, kConfirmAfterMs, true);
-    TEST_ASSERT_FALSE(a.confirmNow);
-    TEST_ASSERT_FALSE(a.logNotConfirmed);
-    TEST_ASSERT_FALSE(st.imageConfirmed);
-    TEST_ASSERT_FALSE(st.unconfirmedWarned);
+    const unsigned long times[] = {0, kConfirmAfterMs - 1, kConfirmAfterMs};
+    for (unsigned long nowMs : times)
+        for (int in = 0; in < 8; in++)
+        {
+            bool wifiUp = in & 1, bmsUp = in & 2, pending = in & 4;
+            State st;
+            Action a = decide(st, wifiUp, bmsUp, nowMs, pending);
+            TEST_ASSERT_FALSE(a.confirmNow);
+            TEST_ASSERT_FALSE(a.logNotConfirmed);
+            TEST_ASSERT_FALSE(st.imageConfirmed);
+            TEST_ASSERT_FALSE(st.unconfirmedWarned);
+        }
 }
 
 // --- Confirm path + idempotent second call ---
 
-void test_confirm_when_wifi_and_bms_up_past_deadline(void)
+static void test_confirm_when_wifi_and_bms_up_past_deadline(void)
 {
     State st;
     Action a = decide(st, true, true, kConfirmAfterMs + 1, false);
@@ -70,7 +47,7 @@ void test_confirm_when_wifi_and_bms_up_past_deadline(void)
     TEST_ASSERT_TRUE(st.imageConfirmed);
 }
 
-void test_confirm_is_idempotent_on_second_call(void)
+static void test_confirm_is_idempotent_on_second_call(void)
 {
     State st;
     decide(st, true, true, kConfirmAfterMs + 1, false);
@@ -82,7 +59,7 @@ void test_confirm_is_idempotent_on_second_call(void)
 
 // --- Pending-verify warn path + idempotent second call ---
 
-void test_warn_when_pending_verify_and_not_ready(void)
+static void test_warn_when_pending_verify_and_not_ready(void)
 {
     State st;
     Action a = decide(st, false, true, kConfirmAfterMs + 1, true);
@@ -92,7 +69,7 @@ void test_warn_when_pending_verify_and_not_ready(void)
     TEST_ASSERT_FALSE(st.imageConfirmed);
 }
 
-void test_warn_is_idempotent_on_second_call(void)
+static void test_warn_is_idempotent_on_second_call(void)
 {
     State st;
     decide(st, false, true, kConfirmAfterMs + 1, true);
@@ -105,7 +82,7 @@ void test_warn_is_idempotent_on_second_call(void)
 
 // --- Not-pending path: sets unconfirmedWarned with no log line ---
 
-void test_not_pending_sets_warned_flag_without_logging(void)
+static void test_not_pending_sets_warned_flag_without_logging(void)
 {
     State st;
     Action a = decide(st, false, true, kConfirmAfterMs + 1, false);
@@ -115,7 +92,7 @@ void test_not_pending_sets_warned_flag_without_logging(void)
     TEST_ASSERT_FALSE(st.imageConfirmed);
 }
 
-void test_not_pending_second_call_is_noop_even_if_now_pending(void)
+static void test_not_pending_second_call_is_noop_even_if_now_pending(void)
 {
     State st;
     decide(st, false, true, kConfirmAfterMs + 1, false);
@@ -130,7 +107,7 @@ void test_not_pending_second_call_is_noop_even_if_now_pending(void)
 
 // --- Confirm still possible after the warning already fired ---
 
-void test_confirm_still_possible_after_warning_fired(void)
+static void test_confirm_still_possible_after_warning_fired(void)
 {
     State st;
     // First call: not ready, pending-verify -> warns.
@@ -152,10 +129,7 @@ int main(int, char **)
 {
     UNITY_BEGIN();
 
-    RUN_TEST(test_boundary_at_deadline_is_noop_wifi_and_bms_up);
-    RUN_TEST(test_boundary_at_deadline_is_noop_wifi_down);
-    RUN_TEST(test_boundary_at_deadline_is_noop_bms_down);
-    RUN_TEST(test_boundary_at_deadline_is_noop_both_down);
+    RUN_TEST(test_noop_until_deadline_for_every_input);
 
     RUN_TEST(test_confirm_when_wifi_and_bms_up_past_deadline);
     RUN_TEST(test_confirm_is_idempotent_on_second_call);

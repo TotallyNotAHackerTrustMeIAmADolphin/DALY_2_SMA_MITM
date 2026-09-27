@@ -1,25 +1,19 @@
 #include "SMA_CAN.h"
-#include <cstdarg>
-#include <cstdio>
 
-SMA_CAN::SMA_CAN() : _debugCb(nullptr), _ticker35E(0),
-                     _wasBusOff(false), _recoveryTimer(0) {}
-
-void SMA_CAN::setDebugCallback(SMADebugCallback cb)
+namespace
 {
-    _debugCb = cb;
+    constexpr uint32_t kTwaiQueueLen = 10; // both TWAI queues
+    // Frames drained per readMessages() call, so a flooded bus can't
+    // starve canTask's status TX; the rest wait in the queue.
+    constexpr int kRxBatchMax = 10;
 }
 
-void SMA_CAN::debugLog(const char *format, ...)
+SMA_CAN::SMA_CAN() : _debugCb(nullptr), _ticker35E(0),
+                     _driverDown(false), _startFailed(false), _recoveryTimer(0) {}
+
+void SMA_CAN::setDebugCallback(LogSink cb)
 {
-    if (!_debugCb)
-        return;
-    char loc_res[256];
-    va_list arg;
-    va_start(arg, format);
-    vsnprintf(loc_res, sizeof(loc_res), format, arg);
-    va_end(arg);
-    _debugCb(loc_res);
+    _debugCb = cb;
 }
 
 bool SMA_CAN::begin(gpio_num_t txPin, gpio_num_t rxPin, gpio_num_t sePin)
@@ -28,48 +22,69 @@ bool SMA_CAN::begin(gpio_num_t txPin, gpio_num_t rxPin, gpio_num_t sePin)
     _rxPin = rxPin;
     _sePin = sePin;
 
-    // CRITICAL FIX: Wake up the CAN Transmitter!
     if (_sePin != GPIO_NUM_NC)
     {
         pinMode(_sePin, OUTPUT);
         digitalWrite(_sePin, LOW); // LOW = High Speed TX Mode. HIGH = Sleep Mode.
     }
 
-    // Set back to NORMAL mode!
-    twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(txPin, rxPin, TWAI_MODE_NORMAL);
-    g_config.tx_queue_len = 10;
-    g_config.rx_queue_len = 10;
+    // A failed boot start is retried by checkBusHealth() like a bus-off
+    // recovery - the SMA must not be left without frames until reboot.
+    bool ok = startDriver();
+    if (!ok)
+        markDriverDown();
+    return ok;
+}
+
+bool SMA_CAN::startDriver()
+{
+    twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(_txPin, _rxPin, TWAI_MODE_NORMAL);
+    g_config.tx_queue_len = kTwaiQueueLen;
+    g_config.rx_queue_len = kTwaiQueueLen;
 
     twai_timing_config_t t_config = TWAI_TIMING_CONFIG_500KBITS();
     twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
 
+    bool ok = false;
     if (twai_driver_install(&g_config, &t_config, &f_config) == ESP_OK)
     {
         if (twai_start() == ESP_OK)
-        {
-            debugLog("[CAN] TWAI Driver installed and running at 500kbps.\n");
-            return true;
-        }
+            ok = true;
+        else
+            // Installed but not started: uninstall, or every later install
+            // fails with ESP_ERR_INVALID_STATE and recovery never succeeds.
+            twai_driver_uninstall();
     }
-    debugLog("[CAN] Failed to initialize TWAI Driver.\n");
-    return false;
+
+    // Edge-triggered: one failure line per retry streak is enough.
+    if (ok)
+        logTo(_debugCb, "[CAN] TWAI Driver installed and running at 500kbps.\n");
+    else if (!_startFailed)
+        logTo(_debugCb, "[CAN] Failed to initialize TWAI Driver - retrying every second.\n");
+    _startFailed = !ok;
+    return ok;
+}
+
+void SMA_CAN::markDriverDown()
+{
+    _driverDown = true;
+    _recoveryTimer = millis();
 }
 
 void SMA_CAN::checkBusHealth()
 {
-    if (_wasBusOff)
+    if (_driverDown)
     {
-        if (SMAFrames::shouldRetryBusRecovery(millis(), _wasBusOff, _recoveryTimer))
+        // Strict >, and unsigned subtraction keeps this correct across a
+        // millis() wraparound (~49 days uptime).
+        if (millis() - _recoveryTimer > SMAFrames::kBusRecoveryBackoffMs)
         {
-            debugLog("[CAN] Reinstalling TWAI Driver...\n");
-            if (begin(_txPin, _rxPin, _sePin))
-            {
-                _wasBusOff = false;
-            }
+            if (!_startFailed)
+                logTo(_debugCb, "[CAN] Reinstalling TWAI Driver...\n");
+            if (startDriver())
+                _driverDown = false;
             else
-            {
                 _recoveryTimer = millis();
-            }
         }
         return;
     }
@@ -80,28 +95,22 @@ void SMA_CAN::checkBusHealth()
 
     if (twai_stat.state == TWAI_STATE_BUS_OFF)
     {
-        _wasBusOff = true;
-        _recoveryTimer = millis();
-        debugLog("[CAN] Bus-Off! Bypassing ESP-IDF bug with a nuclear driver reset...\n");
+        markDriverDown();
+        logTo(_debugCb, "[CAN] Bus-Off! Bypassing ESP-IDF bug with a nuclear driver reset...\n");
         twai_driver_uninstall();
     }
 }
 
 void SMA_CAN::sendFrame(uint32_t id, uint8_t dlc, const uint8_t *data)
 {
-    if (_wasBusOff)
-        return;
-
     twai_status_info_t twai_stat;
     if (twai_get_status_info(&twai_stat) != ESP_OK || twai_stat.state != TWAI_STATE_RUNNING)
     {
         return;
     }
 
-    twai_message_t msg;
+    twai_message_t msg = {}; // zero flags/padding; msg.data had uninitialized tail bytes
     msg.identifier = id;
-    msg.extd = 0;
-    msg.rtr = 0;
     msg.data_length_code = dlc;
     for (int i = 0; i < dlc; i++)
     {
@@ -111,9 +120,9 @@ void SMA_CAN::sendFrame(uint32_t id, uint8_t dlc, const uint8_t *data)
     twai_transmit(&msg, 0);
 }
 
-void SMA_CAN::sendStatus(const SMATxData &data)
+void SMA_CAN::sendStatus(const SMAFrames::SMATxData &data)
 {
-    if (_wasBusOff)
+    if (_driverDown)
         return;
 
     uint8_t nextTicker;
@@ -129,13 +138,15 @@ void SMA_CAN::sendStatus(const SMATxData &data)
 
 void SMA_CAN::readMessages(DashboardData &dashboardOut)
 {
-    if (_wasBusOff)
+    if (_driverDown)
         return;
 
     twai_message_t in_msg;
     int msgCount = 0;
 
-    while (twai_receive(&in_msg, 0) == ESP_OK && msgCount < 10)
+    // Count first, so the 11th frame isn't dequeued and then dropped
+    // unread once the batch limit is hit.
+    while (msgCount < kRxBatchMax && twai_receive(&in_msg, 0) == ESP_OK)
     {
         msgCount++;
 

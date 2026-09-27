@@ -7,107 +7,104 @@
 
 #include <unity.h>
 #include "StatusFrame.h"
+#include "GlideslopeFixture.h"
 
+using StatusFrame::BmsLink;
 using StatusFrame::ControlState;
 using StatusFrame::Decision;
-using StatusFrame::Snapshot;
+using StatusFrame::UiCommands;
 using StatusFrame::decide;
 
 static SystemConfig cfg;
 
 void setUp(void)
 {
-    cfg = SystemConfig{};
-    // Same charge/discharge shape as test_glideslope's setUp(), so the CCL/
-    // DCL numbers below can be cross-checked against that file.
-    cfg.maxChargeA.setUnchecked(100.0f);
-    cfg.trickleA.setUnchecked(5.0f);
-    cfg.cvStartTaper.setUnchecked(3.3f);
-    cfg.cvHighAlarmGate.setUnchecked(3.4f);
-    cfg.cvMaxCharge.setUnchecked(3.5f);
-    cfg.maintAmps.setUnchecked(20.0f);
-
-    cfg.maxDischargeA.setUnchecked(200.0f);
-    cfg.limpDischargeA.setUnchecked(15.0f);
-    cfg.cvStartDTaper.setUnchecked(3.2f);
-    cfg.cvLowAlarmGate.setUnchecked(3.1f);
-    cfg.cvMinDischarge.setUnchecked(3.0f);
-
-    cfg.bmsTimeout.setUnchecked(60);
-
-    // Deliberately far from cvStartTaper/cvHighAlarmGate/cvMaxCharge so the
-    // maintenance-hysteresis tests don't interact with the taper thresholds.
-    // Per-cell thresholds (#12: compared directly against minCellSmoothedV,
-    // no cell count involved): start 3.0V, stop 3.2V.
-    cfg.cvMaintStart.setUnchecked(3.0f);
-    cfg.cvMaintStop.setUnchecked(3.2f);
-
-    // spreadStartMv=60, spreadMaxMv=150 - left at the SystemConfig defaults,
-    // same as test_glideslope.
+    // Same charge/discharge/maintenance shape as test_glideslope's setUp(),
+    // so the CCL/DCL numbers below can be cross-checked against that file
+    // (#73). Maintenance thresholds: start 3.05V, stop 3.2V - see
+    // GlideslopeFixture.h for why start isn't 3.0V (cvMinDischarge).
+    cfg = glideslopeTestConfig();
 }
 
 void tearDown(void) {}
 
-// Builds a Snapshot with both BMS reads fresh as of nowMs, cell voltages
-// deep in the full-current region both ways (3.0V max / 3.3V min - below
-// cvStartTaper, above cvStartDTaper), zero spread, no maintenance/reset
-// request. Individual tests override only the fields they care about.
-static Snapshot freshSnapshot(uint32_t nowMs)
+// Fresh BmsLink as of nowMs.
+static BmsLink freshLink(uint32_t nowMs)
 {
-    Snapshot s;
-    s.nowMs = nowMs;
-    s.haveBasicInfo = true;
-    s.haveCellData = true;
-    s.lastBasicInfoReadMs = nowMs;
-    s.lastCellReadMs = nowMs;
-    s.packVoltage = 55.0f;
-    s.packCurrent = 0.0f;
-    s.packSOC = 50.0f;
-    s.packTemp = 220;
-    s.maxCellSmoothedV = 3.0f;
-    s.maxCellRawV = 3.0f;
-    s.minCellSmoothedV = 3.3f; // above both maint thresholds -> autoMaint off
-    s.minCellRawV = 3.3f;
-    s.cellSpreadMv = 0;
-    s.manualMaintForce = false;
-    s.resetRequested = false;
-    s.resetHoldStartMs = 0;
-    return s;
+    BmsLink l;
+    l.haveBasicInfo = true;
+    l.haveCellData = true;
+    l.lastBasicInfoMs = nowMs;
+    l.lastCellMs = nowMs;
+    return l;
 }
+
+// Cell voltages deep in the full-current region both ways (3.0V max / 3.3V
+// min - below cvStartTaper, above cvStartDTaper), zero spread. Individual
+// tests override only the fields they care about.
+static DashboardData freshData()
+{
+    DashboardData d;
+    d.packVoltage = 55.0f;
+    d.packCurrent = 0.0f;
+    d.packSOC = 50.0f;
+    d.maxCellVoltage = 3.0f;
+    d.maxCellVoltageRaw = 3.0f;
+    d.minCellVoltage = 3.3f; // above both maint thresholds -> autoMaint off
+    d.minCellVoltageRaw = 3.3f;
+    d.cellSpreadRawMv = 0;
+    return d;
+}
+
+// Mirrors canTask's applyDecision() (src/main.cpp): feeds ui's reset pair
+// into each tick and writes the Decision's back, so a multi-tick reset
+// sequence doesn't hand-copy Decision fields into locals at each call site.
+struct Harness
+{
+    ControlState ctrl;
+    UiCommands ui;
+
+    Decision tick(const DashboardData &d, const BmsLink &link, uint32_t nowMs)
+    {
+        Decision dec = decide(cfg, d, link, ui, nowMs, ctrl);
+        ui.resetRequested = dec.values.isResetting;
+        ui.resetHoldStartMs = dec.resetHoldStartMs;
+        return dec;
+    }
+};
 
 // --- Gate: nothing sent before both BMS reads have succeeded once ---
 
-void test_no_frames_before_basic_info(void)
+static void test_no_frames_before_basic_info(void)
 {
     ControlState ctrl;
-    Snapshot s = freshSnapshot(1000);
-    s.haveBasicInfo = false;
-    Decision d = decide(cfg, s, ctrl);
+    BmsLink link = freshLink(1000);
+    link.haveBasicInfo = false;
+    Decision d = decide(cfg, freshData(), link, UiCommands{}, 1000, ctrl);
     TEST_ASSERT_FALSE(d.sendFrames);
     TEST_ASSERT_FALSE(ctrl.framesEnabled);
 }
 
-void test_no_frames_before_cell_data(void)
+static void test_no_frames_before_cell_data(void)
 {
     ControlState ctrl;
-    Snapshot s = freshSnapshot(1000);
-    s.haveCellData = false;
-    Decision d = decide(cfg, s, ctrl);
+    BmsLink link = freshLink(1000);
+    link.haveCellData = false;
+    Decision d = decide(cfg, freshData(), link, UiCommands{}, 1000, ctrl);
     TEST_ASSERT_FALSE(d.sendFrames);
     TEST_ASSERT_FALSE(ctrl.framesEnabled);
 }
 
 // --- Frames + full limits once fresh ---
 
-void test_frames_full_limits_once_fresh(void)
+static void test_frames_full_limits_once_fresh(void)
 {
     ControlState ctrl;
-    Snapshot s = freshSnapshot(1000);
-    Decision d = decide(cfg, s, ctrl);
+    Decision d = decide(cfg, freshData(), freshLink(1000), UiCommands{}, 1000, ctrl);
 
     TEST_ASSERT_TRUE(d.sendFrames);
     TEST_ASSERT_TRUE(d.fresh);
-    TEST_ASSERT_FALSE(d.maintenanceActive);
+    TEST_ASSERT_FALSE(d.values.maintenanceActive);
     // 3.0V is below cvStartTaper(3.3)/above cvStartDTaper(3.2), spread 0 ->
     // full current both ways, same numbers as test_glideslope's
     // test_ccl_full_below_taper / test_dcl_full_above_taper.
@@ -122,12 +119,12 @@ void test_frames_full_limits_once_fresh(void)
     TEST_ASSERT_TRUE(ctrl.framesEnabled);
 }
 
-void test_first_frames_fires_exactly_once(void)
+static void test_first_frames_fires_exactly_once(void)
 {
     ControlState ctrl;
-    Decision d1 = decide(cfg, freshSnapshot(1000), ctrl);
-    Decision d2 = decide(cfg, freshSnapshot(1250), ctrl);
-    Decision d3 = decide(cfg, freshSnapshot(1500), ctrl);
+    Decision d1 = decide(cfg, freshData(), freshLink(1000), UiCommands{}, 1000, ctrl);
+    Decision d2 = decide(cfg, freshData(), freshLink(1250), UiCommands{}, 1250, ctrl);
+    Decision d3 = decide(cfg, freshData(), freshLink(1500), UiCommands{}, 1500, ctrl);
     TEST_ASSERT_TRUE(d1.events.firstFrames);
     TEST_ASSERT_FALSE(d2.events.firstFrames);
     TEST_ASSERT_FALSE(d3.events.firstFrames);
@@ -135,12 +132,12 @@ void test_first_frames_fires_exactly_once(void)
 
 // --- Staleness: 0A both ways, wentStale once, freshAgain once ---
 
-void test_stale_forces_zero_then_recovers(void)
+static void test_stale_forces_zero_then_recovers(void)
 {
     ControlState ctrl;
 
     // t=1000: fresh, frames enabled, wasFresh -> true.
-    Decision d1 = decide(cfg, freshSnapshot(1000), ctrl);
+    Decision d1 = decide(cfg, freshData(), freshLink(1000), UiCommands{}, 1000, ctrl);
     TEST_ASSERT_TRUE(d1.fresh);
     TEST_ASSERT_FALSE(d1.events.wentStale);
     TEST_ASSERT_FALSE(d1.events.freshAgain);
@@ -148,9 +145,7 @@ void test_stale_forces_zero_then_recovers(void)
     // t=62000: both stamps are 61s old (> cfg.bmsTimeout=60s) -> stale.
     // calculateCCL/DCL fail their bmsFresh check first and return 0
     // regardless of the (still full-current) cell voltages.
-    Snapshot staleS = freshSnapshot(1000);
-    staleS.nowMs = 62000;
-    Decision d2 = decide(cfg, staleS, ctrl);
+    Decision d2 = decide(cfg, freshData(), freshLink(1000), UiCommands{}, 62000, ctrl);
     TEST_ASSERT_FALSE(d2.fresh);
     TEST_ASSERT_EQUAL(0, d2.values.ccl);
     TEST_ASSERT_EQUAL(0, d2.values.dcl);
@@ -158,290 +153,322 @@ void test_stale_forces_zero_then_recovers(void)
     TEST_ASSERT_FALSE(d2.events.freshAgain);
 
     // Still stale next tick: wentStale must not fire again (edge-triggered).
-    Snapshot stillStaleS = freshSnapshot(1000);
-    stillStaleS.nowMs = 62250;
-    Decision d3 = decide(cfg, stillStaleS, ctrl);
+    Decision d3 = decide(cfg, freshData(), freshLink(1000), UiCommands{}, 62250, ctrl);
     TEST_ASSERT_FALSE(d3.fresh);
     TEST_ASSERT_FALSE(d3.events.wentStale);
     TEST_ASSERT_FALSE(d3.events.freshAgain);
 
     // Fresh again: new read stamps at t=62500.
-    Decision d4 = decide(cfg, freshSnapshot(62500), ctrl);
+    Decision d4 = decide(cfg, freshData(), freshLink(62500), UiCommands{}, 62500, ctrl);
     TEST_ASSERT_TRUE(d4.fresh);
     TEST_ASSERT_EQUAL(1000, d4.values.ccl); // limits restored
     TEST_ASSERT_FALSE(d4.events.wentStale);
     TEST_ASSERT_TRUE(d4.events.freshAgain);
 
     // And freshAgain must not repeat on the next fresh tick either.
-    Decision d5 = decide(cfg, freshSnapshot(62750), ctrl);
+    Decision d5 = decide(cfg, freshData(), freshLink(62500), UiCommands{}, 62750, ctrl);
     TEST_ASSERT_FALSE(d5.events.freshAgain);
 }
 
 // --- Reset hold: armed by the first sent frame, 5.5s, isResetting true throughout ---
 
-void test_reset_not_armed_while_no_frames_sent(void)
+static void test_reset_not_armed_while_no_frames_sent(void)
 {
     // Request arrives while the BMS has never reported - decide() must not
     // touch the hold timer (mirrors handleUIAction() arming
-    // resetHoldStartTime=0, and canTask never getting to the reset-hold
-    // code while !(haveBasicInfo && haveCellData)).
+    // resetHoldStartMs=0, and canTask never getting to the reset-hold code
+    // while !(haveBasicInfo && haveCellData)).
     ControlState ctrl;
-    Snapshot s = freshSnapshot(1000);
-    s.haveBasicInfo = false;
-    s.resetRequested = true;
-    s.resetHoldStartMs = 0;
-    Decision d = decide(cfg, s, ctrl);
+    BmsLink link = freshLink(1000);
+    link.haveBasicInfo = false;
+    UiCommands ui;
+    ui.resetRequested = true;
+    Decision d = decide(cfg, freshData(), link, ui, 1000, ctrl);
     TEST_ASSERT_FALSE(d.sendFrames);
-    TEST_ASSERT_TRUE(d.isResetting);      // pass-through, unchanged
+    TEST_ASSERT_TRUE(d.values.isResetting);      // pass-through, unchanged
     TEST_ASSERT_EQUAL_UINT32(0, d.resetHoldStartMs); // still not armed
 }
 
-void test_reset_hold_arms_on_first_sent_frame_and_finishes_after_5500ms(void)
+static void test_reset_hold_arms_on_first_sent_frame_and_finishes_after_5500ms(void)
 {
-    ControlState ctrl;
-    uint32_t resetHoldStartMs = 0;
-    bool isResetting = true;
+    Harness h;
+    h.ui.resetRequested = true;
 
     // First tick with real data flowing, t=1000: hold arms here (was 0).
-    Snapshot s1 = freshSnapshot(1000);
-    s1.resetRequested = isResetting;
-    s1.resetHoldStartMs = resetHoldStartMs;
-    Decision d1 = decide(cfg, s1, ctrl);
+    Decision d1 = h.tick(freshData(), freshLink(1000), 1000);
     TEST_ASSERT_TRUE(d1.sendFrames);
-    TEST_ASSERT_TRUE(d1.isResetting);
     TEST_ASSERT_EQUAL_UINT32(1000, d1.resetHoldStartMs); // armed at nowMs
     TEST_ASSERT_TRUE(d1.values.isResetting);
     TEST_ASSERT_FALSE(d1.events.resetFinished);
-    // Simulate canTask writing the Decision back to the shared globals.
-    isResetting = d1.isResetting;
-    resetHoldStartMs = d1.resetHoldStartMs;
 
-    // t=6499: 5499ms of hold (> not yet > 5500) -> still resetting.
-    Snapshot s2 = freshSnapshot(6499);
-    s2.resetRequested = isResetting;
-    s2.resetHoldStartMs = resetHoldStartMs;
-    Decision d2 = decide(cfg, s2, ctrl);
-    TEST_ASSERT_TRUE(d2.isResetting);
+    // t=6499: 5499ms of hold (not yet > 5500) -> still resetting.
+    Decision d2 = h.tick(freshData(), freshLink(6499), 6499);
     TEST_ASSERT_TRUE(d2.values.isResetting);
     TEST_ASSERT_FALSE(d2.events.resetFinished);
-    isResetting = d2.isResetting;
-    resetHoldStartMs = d2.resetHoldStartMs;
 
     // t=6501: 5501ms of hold (> 5500) -> finishes this tick.
-    Snapshot s3 = freshSnapshot(6501);
-    s3.resetRequested = isResetting;
-    s3.resetHoldStartMs = resetHoldStartMs;
-    Decision d3 = decide(cfg, s3, ctrl);
-    TEST_ASSERT_FALSE(d3.isResetting);
+    Decision d3 = h.tick(freshData(), freshLink(6501), 6501);
+    TEST_ASSERT_FALSE(d3.values.isResetting);
+    TEST_ASSERT_TRUE(d3.events.resetFinished);
+}
+
+static void test_reset_hold_arms_at_nowms_zero_uses_sentinel_one(void)
+{
+    // holdStartMs==0 means "not yet armed" (see advanceResetHold), so
+    // nowMs==0 can't be stored as the real start stamp - it substitutes 1.
+    Harness h;
+    h.ui.resetRequested = true;
+    Decision d = h.tick(freshData(), freshLink(0), 0);
+    TEST_ASSERT_TRUE(d.values.isResetting);
+    TEST_ASSERT_EQUAL_UINT32(1, d.resetHoldStartMs);
+}
+
+static void test_reset_hold_survives_millis_wraparound(void)
+{
+    // holdStartMs armed just before millis() wraps; unsigned subtraction
+    // in advanceResetHold wraps the same way, so the hold must still end
+    // after kResetHoldMs of real elapsed time - not before, not never.
+    Harness h;
+    h.ui.resetRequested = true;
+    uint32_t start = 0xFFFFFFF0u; // 16ms before wraparound
+    Decision d1 = h.tick(freshData(), freshLink(start), start);
+    TEST_ASSERT_EQUAL_UINT32(start, d1.resetHoldStartMs);
+
+    Decision d2 = h.tick(freshData(), freshLink(start), start + 5000u); // wrapped, < hold
+    TEST_ASSERT_TRUE(d2.values.isResetting);
+    TEST_ASSERT_FALSE(d2.events.resetFinished);
+
+    Decision d3 = h.tick(freshData(), freshLink(start), start + StatusFrame::kResetHoldMs + 1u); // wrapped, > hold
     TEST_ASSERT_FALSE(d3.values.isResetting);
     TEST_ASSERT_TRUE(d3.events.resetFinished);
 }
 
 // --- Auto-maintenance hysteresis ---
 
-void test_auto_maint_starts_below_start_stops_above_stop_no_toggle_between(void)
+static void test_auto_maint_starts_below_start_stops_above_stop_no_toggle_between(void)
 {
     // Thresholds (#12: compared directly against the smoothed minimum
-    // cell voltage): start cvMaintStart=3.0V, stop cvMaintStop=3.2V.
+    // cell voltage): start cvMaintStart=3.05V, stop cvMaintStop=3.2V.
     ControlState ctrl;
 
     // 3.3V: above both -> off.
-    Decision d1 = decide(cfg, freshSnapshot(1000), ctrl); // minCellSmoothedV=3.3
-    TEST_ASSERT_FALSE(d1.maintenanceActive);
+    Decision d1 = decide(cfg, freshData(), freshLink(1000), UiCommands{}, 1000, ctrl); // minCellVoltage=3.3
+    TEST_ASSERT_FALSE(d1.values.maintenanceActive);
 
     // 3.1V: between start and stop, autoMaint currently off -> stays off
-    // (3.1 is not < 3.0).
-    Snapshot s2 = freshSnapshot(1250);
-    s2.minCellSmoothedV = 3.1f;
-    Decision d2 = decide(cfg, s2, ctrl);
-    TEST_ASSERT_FALSE(d2.maintenanceActive);
+    // (3.1 is not < 3.05).
+    DashboardData d2data = freshData();
+    d2data.minCellVoltage = 3.1f;
+    Decision d2 = decide(cfg, d2data, freshLink(1250), UiCommands{}, 1250, ctrl);
+    TEST_ASSERT_FALSE(d2.values.maintenanceActive);
 
-    // 2.9V: below start(3.0) -> turns on.
-    Snapshot s3 = freshSnapshot(1500);
-    s3.minCellSmoothedV = 2.9f;
-    Decision d3 = decide(cfg, s3, ctrl);
-    TEST_ASSERT_TRUE(d3.maintenanceActive);
+    // 2.9V: below start(3.05) -> turns on.
+    DashboardData d3data = freshData();
+    d3data.minCellVoltage = 2.9f;
+    Decision d3 = decide(cfg, d3data, freshLink(1500), UiCommands{}, 1500, ctrl);
+    TEST_ASSERT_TRUE(d3.values.maintenanceActive);
 
     // 3.1V again: between start and stop, autoMaint now on -> hysteresis
     // keeps it on (3.1 is not > 3.2).
-    Snapshot s4 = freshSnapshot(1750);
-    s4.minCellSmoothedV = 3.1f;
-    Decision d4 = decide(cfg, s4, ctrl);
-    TEST_ASSERT_TRUE(d4.maintenanceActive);
+    DashboardData d4data = freshData();
+    d4data.minCellVoltage = 3.1f;
+    Decision d4 = decide(cfg, d4data, freshLink(1750), UiCommands{}, 1750, ctrl);
+    TEST_ASSERT_TRUE(d4.values.maintenanceActive);
 
     // 3.3V: above stop(3.2) -> turns off.
-    Snapshot s5 = freshSnapshot(2000);
-    s5.minCellSmoothedV = 3.3f;
-    Decision d5 = decide(cfg, s5, ctrl);
-    TEST_ASSERT_FALSE(d5.maintenanceActive);
+    DashboardData d5data = freshData();
+    d5data.minCellVoltage = 3.3f;
+    Decision d5 = decide(cfg, d5data, freshLink(2000), UiCommands{}, 2000, ctrl);
+    TEST_ASSERT_FALSE(d5.values.maintenanceActive);
 }
 
 // --- #12: trigger on the minimum cell, not the pack average ---
 
-void test_auto_maint_starts_on_weak_cell_even_when_pack_average_is_high(void)
+static void test_auto_maint_starts_on_weak_cell_even_when_pack_average_is_high(void)
 {
     // The exact scenario from #12: Cell 16 sags under discharge and hits
     // the discharge floor while the pack average is still well above the
-    // old pack-voltage trigger (cvMaintStart(3.0) * kCellCount(16) =
-    // 48.0V). packVoltage=49.6V > 48.0V, so the retired pack-average
+    // old pack-voltage trigger (cvMaintStart(3.05) * kPackCells(16) =
+    // 48.8V). packVoltage=49.6V > 48.8V, so the retired pack-average
     // comparison would never have started maintenance here; the minimum
-    // cell (2.99V) is what's actually below cvMaintStart(3.0V).
+    // cell (2.99V) is what's actually below cvMaintStart(3.05V).
     ControlState ctrl;
-    Snapshot s = freshSnapshot(1000);
-    s.packVoltage = 49.6f;
-    s.minCellSmoothedV = 2.99f;
-    Decision d = decide(cfg, s, ctrl);
-    TEST_ASSERT_TRUE(d.maintenanceActive);
+    DashboardData d = freshData();
+    d.packVoltage = 49.6f;
+    d.minCellVoltage = 2.99f;
+    Decision dec = decide(cfg, d, freshLink(1000), UiCommands{}, 1000, ctrl);
+    TEST_ASSERT_TRUE(dec.values.maintenanceActive);
     TEST_ASSERT_TRUE(ctrl.autoMaint);
 }
 
-void test_auto_maint_hysteresis_min_cell_rising_stays_on_until_above_stop(void)
+static void test_auto_maint_never_starts_with_zero_min_cell(void)
 {
-    // Once started, rising back into the start..stop band must not turn
-    // maintenance off; only crossing above cvMaintStop(3.2V) does.
+    // minCellVoltage == 0 means "no data yet" (same sentinel used
+    // elsewhere in Glideslope) - it must never satisfy "< cvMaintStart"
+    // and start maintenance on a value nobody measured.
     ControlState ctrl;
-
-    // 2.95V: below start(3.0) -> turns on.
-    Snapshot s1 = freshSnapshot(1000);
-    s1.minCellSmoothedV = 2.95f;
-    Decision d1 = decide(cfg, s1, ctrl);
-    TEST_ASSERT_TRUE(d1.maintenanceActive);
-
-    // 3.1V: between start(3.0) and stop(3.2), autoMaint on -> stays on
-    // (3.1 is not > 3.2).
-    Snapshot s2 = freshSnapshot(1250);
-    s2.minCellSmoothedV = 3.1f;
-    Decision d2 = decide(cfg, s2, ctrl);
-    TEST_ASSERT_TRUE(d2.maintenanceActive);
-
-    // 3.25V: above stop(3.2) -> turns off.
-    Snapshot s3 = freshSnapshot(1500);
-    s3.minCellSmoothedV = 3.25f;
-    Decision d3 = decide(cfg, s3, ctrl);
-    TEST_ASSERT_FALSE(d3.maintenanceActive);
-}
-
-void test_auto_maint_never_starts_with_zero_min_cell(void)
-{
-    // minCellSmoothedV == 0 means "no data yet" (same sentinel used
-    // elsewhere in Snapshot/Glideslope) - it must never satisfy
-    // "< cvMaintStart" and start maintenance on a value nobody measured.
-    ControlState ctrl;
-    Snapshot s = freshSnapshot(1000);
-    s.minCellSmoothedV = 0.0f;
-    Decision d = decide(cfg, s, ctrl);
-    TEST_ASSERT_FALSE(d.maintenanceActive);
+    DashboardData d = freshData();
+    d.minCellVoltage = 0.0f;
+    Decision dec = decide(cfg, d, freshLink(1000), UiCommands{}, 1000, ctrl);
+    TEST_ASSERT_FALSE(dec.values.maintenanceActive);
     TEST_ASSERT_FALSE(ctrl.autoMaint);
 }
 
-void test_manual_force_overrides(void)
+static void test_manual_force_overrides(void)
 {
-    // minCellSmoothedV=3.3V would leave autoMaint off; manualMaintForce
+    // minCellVoltage=3.3V would leave autoMaint off; manualMaintForce
     // alone must still drive maintenanceActive.
     ControlState ctrl;
-    Snapshot s = freshSnapshot(1000);
-    s.manualMaintForce = true;
-    Decision d = decide(cfg, s, ctrl);
-    TEST_ASSERT_TRUE(d.maintenanceActive);
-    TEST_ASSERT_TRUE(d.values.forceCharge);
+    UiCommands ui;
+    ui.manualMaintForce = true;
+    Decision d = decide(cfg, freshData(), freshLink(1000), ui, 1000, ctrl);
+    TEST_ASSERT_TRUE(d.values.maintenanceActive);
 }
 
-void test_maintenance_overrides_cvl_and_current(void)
-{
-    ControlState ctrl;
-    Snapshot s = freshSnapshot(1000);
-    s.manualMaintForce = true;
-    Decision d = decide(cfg, s, ctrl);
-
-    TEST_ASSERT_TRUE(d.maintenanceActive);
-    // CVL is forced to the fixed 560 (56.0V) maintenance value, not
-    // cvMaxCharge(3.5) x 16 x 10 - which happens to also be 560 with this
-    // cfg, so this is re-checked with a different cvMaxCharge below.
-    TEST_ASSERT_EQUAL(560, d.values.cvl);
-    // CCL = maintAmps(20A) -> 200; DCL is always 0 in maintenance (mirrors
-    // test_glideslope's test_dcl_zero_in_maintenance).
-    TEST_ASSERT_EQUAL(200, d.values.ccl);
-    TEST_ASSERT_EQUAL(0, d.values.dcl);
-}
-
-void test_maintenance_cvl_is_fixed_560_not_cvmaxcharge(void)
+static void test_maintenance_cvl_is_fixed_560_not_cvmaxcharge(void)
 {
     // With cvMaxCharge changed so cvMaxCharge*16*10 != 560, the maintenance
     // CVL must still read 560 - proves it's the fixed override, not the
     // normal formula.
     ControlState ctrl;
     cfg.cvMaxCharge.setUnchecked(3.6f); // normal CVL would be 576, not 560
-    Snapshot s = freshSnapshot(1000);
-    s.manualMaintForce = true;
-    Decision d = decide(cfg, s, ctrl);
+    UiCommands ui;
+    ui.manualMaintForce = true;
+    Decision d = decide(cfg, freshData(), freshLink(1000), ui, 1000, ctrl);
     TEST_ASSERT_EQUAL(560, d.values.cvl);
 
     // And confirm the non-maintenance CVL DOES follow cvMaxCharge, for
     // contrast.
     ControlState ctrl2;
-    Snapshot s2 = freshSnapshot(1000);
-    Decision d2 = decide(cfg, s2, ctrl2);
+    Decision d2 = decide(cfg, freshData(), freshLink(1000), UiCommands{}, 1000, ctrl2);
     TEST_ASSERT_EQUAL(576, d2.values.cvl);
+}
+
+static void test_maintenance_cvl_capped_by_lowered_cvmaxcharge(void)
+{
+    // #60: a lowered cvMaxCharge (here 3.0V x 16 x 10 = 480, below the
+    // fixed 560 maintenance target) must cap the maintenance CVL at the
+    // normal value - maintenance must never ask for a HIGHER pack voltage
+    // than normal operation allows.
+    ControlState ctrl;
+    cfg.cvMaxCharge.setUnchecked(3.0f); // normal CVL = 480
+    UiCommands ui;
+    ui.manualMaintForce = true;
+    Decision d = decide(cfg, freshData(), freshLink(1000), ui, 1000, ctrl);
+    TEST_ASSERT_EQUAL(480, d.values.cvl);
 }
 
 // --- Cell-spread derating ---
 
-void test_derate_factor_applied_once_ccl_at_spread_midpoint_is_half(void)
+static void test_derate_factor_applied_once_ccl_at_spread_midpoint_is_half(void)
 {
     // spreadMv=105 is the midpoint of the default 60..150 span -> factor
-    // 0.5. maxCellSmoothedV/RawV=3.0V is below cvStartTaper -> full-current
-    // branch: 100A * 0.5 = 50A -> 500. Same as test_glideslope's
-    // test_ccl_derated_by_spread_at_midpoint.
+    // 0.5. maxCellVoltage/Raw=3.0V is below cvStartTaper -> full-current
+    // branch: 100A * 0.5 = 50A -> 500. minCellVoltage/Raw=3.3V (freshData
+    // default) is above cvStartDTaper -> 200A * 0.5 = 100A -> 1000. Same
+    // spreadMv, same numbers as test_glideslope's
+    // test_ccl_derated_by_spread_at_midpoint / test_dcl_derated_by_spread.
     ControlState ctrl;
-    Snapshot s = freshSnapshot(1000);
-    s.cellSpreadMv = 105;
-    Decision d = decide(cfg, s, ctrl);
-    TEST_ASSERT_EQUAL(500, d.values.ccl);
-    TEST_ASSERT_EQUAL_FLOAT(0.5f, d.derateFactor);
+    DashboardData d = freshData();
+    d.cellSpreadRawMv = 105;
+    Decision dec = decide(cfg, d, freshLink(1000), UiCommands{}, 1000, ctrl);
+    TEST_ASSERT_EQUAL(500, dec.values.ccl);
+    TEST_ASSERT_EQUAL(1000, dec.values.dcl);
+    TEST_ASSERT_EQUAL_FLOAT(0.5f, dec.derateFactor);
 }
 
-void test_derating_started_once_ended_only_after_hysteresis(void)
+static void test_derating_started_once_ended_only_after_hysteresis(void)
 {
     // spreadStartMv=60 (default) -> "ended" requires spread <= 50.
     ControlState ctrl;
 
     // t=1000, spread=0: below start -> no derating, no event (baseline).
-    Snapshot s1 = freshSnapshot(1000);
-    s1.cellSpreadMv = 0;
-    Decision d1 = decide(cfg, s1, ctrl);
-    TEST_ASSERT_FALSE(d1.events.deratingStarted);
+    DashboardData d1 = freshData();
+    d1.cellSpreadRawMv = 0;
+    Decision dec1 = decide(cfg, d1, freshLink(1000), UiCommands{}, 1000, ctrl);
+    TEST_ASSERT_FALSE(dec1.events.deratingStarted);
     TEST_ASSERT_FALSE(ctrl.derating);
 
     // t=1250, spread=100 (60 < 100 < 150) -> derating starts.
-    Snapshot s2 = freshSnapshot(1250);
-    s2.cellSpreadMv = 100;
-    Decision d2 = decide(cfg, s2, ctrl);
-    TEST_ASSERT_TRUE(d2.events.deratingStarted);
+    DashboardData d2 = freshData();
+    d2.cellSpreadRawMv = 100;
+    Decision dec2 = decide(cfg, d2, freshLink(1250), UiCommands{}, 1250, ctrl);
+    TEST_ASSERT_TRUE(dec2.events.deratingStarted);
     TEST_ASSERT_TRUE(ctrl.derating);
 
     // t=1500, spread=55: factor back to 1.0 (55 <= startMv 60), but
     // 55 > 60-10=50, so NOT far enough below start -> deratingEnded must
     // NOT fire yet (hysteresis).
-    Snapshot s3 = freshSnapshot(1500);
-    s3.cellSpreadMv = 55;
-    Decision d3 = decide(cfg, s3, ctrl);
-    TEST_ASSERT_EQUAL_FLOAT(1.0f, d3.derateFactor);
-    TEST_ASSERT_FALSE(d3.events.deratingEnded);
+    DashboardData d3 = freshData();
+    d3.cellSpreadRawMv = 55;
+    Decision dec3 = decide(cfg, d3, freshLink(1500), UiCommands{}, 1500, ctrl);
+    TEST_ASSERT_EQUAL_FLOAT(1.0f, dec3.derateFactor);
+    TEST_ASSERT_FALSE(dec3.events.deratingEnded);
     TEST_ASSERT_TRUE(ctrl.derating); // still considered derated
 
     // t=1750, spread=45 (<= 50) -> deratingEnded fires now.
-    Snapshot s4 = freshSnapshot(1750);
-    s4.cellSpreadMv = 45;
-    Decision d4 = decide(cfg, s4, ctrl);
-    TEST_ASSERT_TRUE(d4.events.deratingEnded);
+    DashboardData d4 = freshData();
+    d4.cellSpreadRawMv = 45;
+    Decision dec4 = decide(cfg, d4, freshLink(1750), UiCommands{}, 1750, ctrl);
+    TEST_ASSERT_TRUE(dec4.events.deratingEnded);
     TEST_ASSERT_FALSE(ctrl.derating);
 
     // t=2000, spread=45 again: deratingEnded must not repeat.
-    Snapshot s5 = freshSnapshot(2000);
-    s5.cellSpreadMv = 45;
-    Decision d5 = decide(cfg, s5, ctrl);
-    TEST_ASSERT_FALSE(d5.events.deratingEnded);
-    TEST_ASSERT_FALSE(d5.events.deratingStarted);
+    DashboardData d5 = freshData();
+    d5.cellSpreadRawMv = 45;
+    Decision dec5 = decide(cfg, d5, freshLink(2000), UiCommands{}, 2000, ctrl);
+    TEST_ASSERT_FALSE(dec5.events.deratingEnded);
+    TEST_ASSERT_FALSE(dec5.events.deratingStarted);
+}
+
+static void test_half_stale_cells_stale_basic_info_fresh_forces_zero(void)
+{
+    // haveBasicInfo fresh, haveCellData stale (last read further back than
+    // cfg.bmsTimeout(60s)=60000ms) -> decide()'s `fresh` is the AND of
+    // both, so both limits go to 0.
+    ControlState ctrl;
+    BmsLink link = freshLink(100000);
+    link.lastCellMs = 100000 - 70000; // 70s ago, > 60s timeout
+    Decision d = decide(cfg, freshData(), link, UiCommands{}, 100000, ctrl);
+    TEST_ASSERT_EQUAL(0, d.values.ccl);
+    TEST_ASSERT_EQUAL(0, d.values.dcl);
+    TEST_ASSERT_FALSE(d.fresh);
+}
+
+static void test_half_stale_basic_info_stale_cells_fresh_forces_zero(void)
+{
+    // Reverse of the above: haveCellData fresh, haveBasicInfo stale ->
+    // same AND, same result.
+    ControlState ctrl;
+    BmsLink link = freshLink(100000);
+    link.lastBasicInfoMs = 100000 - 70000; // 70s ago, > 60s timeout
+    Decision d = decide(cfg, freshData(), link, UiCommands{}, 100000, ctrl);
+    TEST_ASSERT_EQUAL(0, d.values.ccl);
+    TEST_ASSERT_EQUAL(0, d.values.dcl);
+    TEST_ASSERT_FALSE(d.fresh);
+}
+
+// Two full stale/fresh cycles: each transition fires its event exactly
+// once, and the second recovery is reported like the first (#87).
+static void test_stale_fresh_cycles_each_event_once(void)
+{
+    ControlState ctrl;
+    uint32_t t = 100000;
+    int wentStale = 0, freshAgain = 0;
+    // fresh (5 ticks), stale (5), fresh (5), stale (5), fresh (5)
+    for (int phase = 0; phase < 5; phase++)
+        for (int i = 0; i < 5; i++, t += 250)
+        {
+            BmsLink link = freshLink(t);
+            if (phase % 2 == 1)
+                link.lastCellMs = t - 70000; // > 60 s bmsTimeout
+            Decision d = decide(cfg, freshData(), link, UiCommands{}, t, ctrl);
+            wentStale += d.events.wentStale;
+            freshAgain += d.events.freshAgain;
+            TEST_ASSERT_EQUAL(phase % 2 == 0, d.fresh);
+        }
+    TEST_ASSERT_EQUAL(2, wentStale);
+    TEST_ASSERT_EQUAL(2, freshAgain);
 }
 
 int main(int, char **)
@@ -454,14 +481,18 @@ int main(int, char **)
     RUN_TEST(test_stale_forces_zero_then_recovers);
     RUN_TEST(test_reset_not_armed_while_no_frames_sent);
     RUN_TEST(test_reset_hold_arms_on_first_sent_frame_and_finishes_after_5500ms);
+    RUN_TEST(test_reset_hold_arms_at_nowms_zero_uses_sentinel_one);
+    RUN_TEST(test_reset_hold_survives_millis_wraparound);
     RUN_TEST(test_auto_maint_starts_below_start_stops_above_stop_no_toggle_between);
     RUN_TEST(test_auto_maint_starts_on_weak_cell_even_when_pack_average_is_high);
-    RUN_TEST(test_auto_maint_hysteresis_min_cell_rising_stays_on_until_above_stop);
     RUN_TEST(test_auto_maint_never_starts_with_zero_min_cell);
     RUN_TEST(test_manual_force_overrides);
-    RUN_TEST(test_maintenance_overrides_cvl_and_current);
     RUN_TEST(test_maintenance_cvl_is_fixed_560_not_cvmaxcharge);
+    RUN_TEST(test_maintenance_cvl_capped_by_lowered_cvmaxcharge);
     RUN_TEST(test_derate_factor_applied_once_ccl_at_spread_midpoint_is_half);
     RUN_TEST(test_derating_started_once_ended_only_after_hysteresis);
+    RUN_TEST(test_half_stale_cells_stale_basic_info_fresh_forces_zero);
+    RUN_TEST(test_half_stale_basic_info_stale_cells_fresh_forces_zero);
+    RUN_TEST(test_stale_fresh_cycles_each_event_once);
     return UNITY_END();
 }

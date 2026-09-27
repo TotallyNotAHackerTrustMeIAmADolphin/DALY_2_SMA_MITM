@@ -23,13 +23,13 @@ static Sample steady()
 void setUp(void) {}
 void tearDown(void) {}
 
-void test_first_sample_is_baseline(void)
+static void test_first_sample_is_baseline(void)
 {
     State st;
     TEST_ASSERT_EQUAL(kBaseline, decide(st, steady(), 60000).reason);
 }
 
-void test_steady_device_is_quiet(void)
+static void test_steady_device_is_quiet(void)
 {
     // The 2026-09-26 log: identical numbers every 10 min, free heap
     // wobbling by ~100 bytes. None of it should be logged.
@@ -43,7 +43,7 @@ void test_steady_device_is_quiet(void)
     }
 }
 
-void test_heartbeat_after_a_day(void)
+static void test_heartbeat_after_a_day(void)
 {
     State st;
     decide(st, steady(), 0);
@@ -53,7 +53,7 @@ void test_heartbeat_after_a_day(void)
     TEST_ASSERT_EQUAL(kNone, decide(st, steady(), kHeartbeatMs + kTen).reason);
 }
 
-void test_heartbeat_across_millis_wraparound(void)
+static void test_heartbeat_across_millis_wraparound(void)
 {
     State st;
     decide(st, steady(), 0xFFFFFFFFu - 1000u);
@@ -61,7 +61,7 @@ void test_heartbeat_across_millis_wraparound(void)
     TEST_ASSERT_EQUAL(kHeartbeat, decide(st, steady(), kHeartbeatMs - 1001u).reason);
 }
 
-void test_heap_low_water_drop_boundary(void)
+static void test_heap_low_water_drop_boundary(void)
 {
     State st;
     decide(st, steady(), 0);
@@ -72,7 +72,7 @@ void test_heap_low_water_drop_boundary(void)
     TEST_ASSERT_EQUAL(kHeapDrop, decide(st, s, 2 * kTen).reason);
 }
 
-void test_slow_heap_drift_accumulates_against_last_logged(void)
+static void test_slow_heap_drift_accumulates_against_last_logged(void)
 {
     // 1 KB per sample never crosses 4 KB step-to-step, but it does
     // against the last logged value.
@@ -89,7 +89,7 @@ void test_slow_heap_drift_accumulates_against_last_logged(void)
     TEST_ASSERT_EQUAL(4, logged);
 }
 
-void test_largest_block_shrink_boundary(void)
+static void test_largest_block_shrink_boundary(void)
 {
     State st;
     decide(st, steady(), 0);
@@ -100,7 +100,7 @@ void test_largest_block_shrink_boundary(void)
     TEST_ASSERT_EQUAL(kBlockDrop, decide(st, s, 2 * kTen).reason);
 }
 
-void test_largest_block_recovery_is_quiet(void)
+static void test_largest_block_recovery_is_quiet(void)
 {
     State st;
     decide(st, steady(), 0);
@@ -109,7 +109,7 @@ void test_largest_block_recovery_is_quiet(void)
     TEST_ASSERT_EQUAL(kNone, decide(st, s, kTen).reason);
 }
 
-void test_stack_drop_boundary(void)
+static void test_stack_drop_boundary(void)
 {
     State st;
     decide(st, steady(), 0);
@@ -122,21 +122,24 @@ void test_stack_drop_boundary(void)
     TEST_ASSERT_EQUAL(kNone, decide(st, s, 3 * kTen).reason);
 }
 
-void test_stack_low_wins_reason_and_names_task(void)
+static void test_stack_low_wins_reason_and_names_task(void)
 {
+    // kStackLow sorts before kSdDrops and kHeapDrop (#106): all three fire
+    // at once, and the per-task reason must still win.
     State st;
     Sample s = steady();
     s.stackLeft[kCan] = 600;
     decide(st, s, 0);
     s.stackLeft[kCan] = kStackLowBytes - 1; // 89 B drop: below drop threshold
     s.minFreeHeap -= kHeapDropBytes;        // also a heap drop
+    s.sdDroppedQueueFull += 1;              // also an SD drop
     Decision d = decide(st, s, kTen);
     TEST_ASSERT_EQUAL(kStackLow, d.reason);
     TEST_ASSERT_EQUAL(kCan, d.task);
     TEST_ASSERT_EQUAL(kNone, decide(st, s, 2 * kTen).reason);
 }
 
-void test_stack_low_logs_every_further_drop(void)
+static void test_stack_low_logs_every_further_drop(void)
 {
     // Review finding: 500 -> 245 B is under the 256 B drop threshold but
     // eats half the remaining headroom. Below kStackLowBytes any drop logs.
@@ -151,7 +154,7 @@ void test_stack_low_logs_every_further_drop(void)
     TEST_ASSERT_EQUAL(kNone, decide(st, s, 3 * kTen).reason);
 }
 
-void test_exhausted_stack_zero_is_stack_low(void)
+static void test_exhausted_stack_zero_is_stack_low(void)
 {
     // Review finding: a found task at 0 bytes left used to look like
     // "task not found". kNoTask is the not-found marker now.
@@ -164,7 +167,7 @@ void test_exhausted_stack_zero_is_stack_low(void)
     TEST_ASSERT_EQUAL(kBms, d.task);
 }
 
-void test_late_starting_task_adopts_first_reading(void)
+static void test_late_starting_task_adopts_first_reading(void)
 {
     // async_tcp isn't running at the baseline. Its first healthy reading
     // is adopted quietly, and later drops are measured from it.
@@ -178,7 +181,7 @@ void test_late_starting_task_adopts_first_reading(void)
     TEST_ASSERT_EQUAL(kStackDrop, decide(st, s, 2 * kTen).reason);
 }
 
-void test_late_starting_task_already_low_is_flagged(void)
+static void test_late_starting_task_already_low_is_flagged(void)
 {
     State st;
     Sample s = steady();
@@ -190,7 +193,7 @@ void test_late_starting_task_already_low_is_flagged(void)
     TEST_ASSERT_EQUAL(kAsyncTcp, d.task);
 }
 
-void test_task_disappearing_is_logged(void)
+static void test_task_disappearing_is_logged(void)
 {
     // Review finding: a task that exits used to go silent.
     State st;
@@ -203,7 +206,65 @@ void test_task_disappearing_is_logged(void)
     TEST_ASSERT_EQUAL(kNone, decide(st, s, 2 * kTen).reason);
 }
 
-void test_block_reference_ratchets_up(void)
+// --- SD drop/failure counters (#99): any increase logs, once ---
+
+static void test_sd_drops_increase_triggers_once(void)
+{
+    State st;
+    decide(st, steady(), 0);
+    Sample s = steady();
+    s.sdDroppedQueueFull += 1;
+    Decision d = decide(st, s, kTen);
+    TEST_ASSERT_EQUAL(kSdDrops, d.reason);
+    // Logged value is the new reference: no repeat with the same counters.
+    TEST_ASSERT_EQUAL(kNone, decide(st, s, 2 * kTen).reason);
+}
+
+static void test_sd_drops_each_counter_triggers_independently(void)
+{
+    State st;
+    decide(st, steady(), 0);
+
+    Sample s1 = steady();
+    s1.sdDroppedLockTimeout += 1;
+    TEST_ASSERT_EQUAL(kSdDrops, decide(st, s1, kTen).reason);
+
+    Sample s2 = steady();
+    s2.sdDroppedLockTimeout = s1.sdDroppedLockTimeout; // already-seen value
+    s2.sdWriteFailures += 1;
+    TEST_ASSERT_EQUAL(kSdDrops, decide(st, s2, 2 * kTen).reason);
+}
+
+static void test_sd_drops_no_increase_no_trigger(void)
+{
+    // A steady device with some already-nonzero SD counters from earlier
+    // in its uptime must not re-log every cycle just because they're > 0.
+    State st;
+    Sample baseline = steady();
+    baseline.sdDroppedQueueFull = 3;
+    baseline.sdDroppedLockTimeout = 1;
+    baseline.sdWriteFailures = 2;
+    decide(st, baseline, 0);
+
+    for (uint32_t k = 1; k < 10; k++)
+        TEST_ASSERT_EQUAL(kNone, decide(st, baseline, k * kTen).reason);
+}
+
+static void test_sd_drops_baseline_captures_nonzero_counters(void)
+{
+    // The very first sample (kBaseline) must adopt whatever the counters
+    // already are as the reference, not silently assume 0 - otherwise the
+    // very next identical sample would wrongly look like an increase.
+    State st;
+    Sample s = steady();
+    s.sdDroppedQueueFull = 5;
+    s.sdDroppedLockTimeout = 2;
+    s.sdWriteFailures = 7;
+    TEST_ASSERT_EQUAL(kBaseline, decide(st, s, 0).reason);
+    TEST_ASSERT_EQUAL(kNone, decide(st, s, kTen).reason);
+}
+
+static void test_block_reference_ratchets_up(void)
 {
     // Review finding: a baseline taken while buffers were held (60 KB)
     // must not hide a later 39 KB loss from the 94 KB steady state.
@@ -215,6 +276,31 @@ void test_block_reference_ratchets_up(void)
     TEST_ASSERT_EQUAL(kNone, decide(st, s, kTen).reason);
     s.maxBlock = 55000;
     TEST_ASSERT_EQUAL(kBlockDrop, decide(st, s, 2 * kTen).reason);
+}
+
+// --- priority is a single ordered mechanism (#106): the Reason enum order,
+// applied the same way whether the candidate came from the per-task loop
+// or a global counter ---
+
+static void test_priority_sd_drops_beats_heap_and_block_drop(void)
+{
+    State st;
+    decide(st, steady(), 0);
+    Sample s = steady();
+    s.sdDroppedQueueFull += 1;
+    s.minFreeHeap -= kHeapDropBytes;
+    s.maxBlock -= kBlockDropBytes;
+    TEST_ASSERT_EQUAL(kSdDrops, decide(st, s, kTen).reason);
+}
+
+static void test_priority_heap_drop_beats_block_drop(void)
+{
+    State st;
+    decide(st, steady(), 0);
+    Sample s = steady();
+    s.minFreeHeap -= kHeapDropBytes;
+    s.maxBlock -= kBlockDropBytes;
+    TEST_ASSERT_EQUAL(kHeapDrop, decide(st, s, kTen).reason);
 }
 
 int main(int, char **)
@@ -235,6 +321,12 @@ int main(int, char **)
     RUN_TEST(test_late_starting_task_adopts_first_reading);
     RUN_TEST(test_late_starting_task_already_low_is_flagged);
     RUN_TEST(test_task_disappearing_is_logged);
+    RUN_TEST(test_sd_drops_increase_triggers_once);
+    RUN_TEST(test_sd_drops_each_counter_triggers_independently);
+    RUN_TEST(test_sd_drops_no_increase_no_trigger);
+    RUN_TEST(test_sd_drops_baseline_captures_nonzero_counters);
     RUN_TEST(test_block_reference_ratchets_up);
+    RUN_TEST(test_priority_sd_drops_beats_heap_and_block_drop);
+    RUN_TEST(test_priority_heap_drop_beats_block_drop);
     return UNITY_END();
 }

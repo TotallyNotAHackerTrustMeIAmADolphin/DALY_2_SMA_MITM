@@ -1,18 +1,8 @@
 #pragma once
 
-// When a periodic health sample is worth a log line. Kept free of Arduino/
-// FreeRTOS/ESP-IDF dependencies, same as StatusFrame.h/BmsEvents.h/
-// RollbackConfirm.h, so test/test_healthlog runs this code natively.
-//
-// Diagnostics::logHealth() still samples every 10 minutes, but a steady
-// device used to write an identical heap/stack line 144 times a day. Only
-// the things that can actually go wrong are logged now: the heap low-water
-// mark or largest free block shrinking (a leak or fragmentation), a task's
-// stack high-water mark shrinking (a task heading for overflow), plus one
-// baseline line after boot and a daily heartbeat so a long quiet log still
-// shows the device alive with its current numbers. WiFi RSSI rides along in
-// the line but never triggers one - WiFi transitions have their own
-// edge-triggered [WIFI] lines.
+// Whether a 10-minute health sample is worth a log line - see the Health
+// bullet under Diagnostics in CLAUDE.md for what triggers one. Pure, so
+// test/test_healthlog runs this code natively.
 
 #include <stdint.h>
 
@@ -30,6 +20,22 @@ namespace HealthLog
         kNumTasks
     };
 
+    // xTaskGetHandle() name plus the line's short "stack left: ..." name,
+    // paired so the two can't drift apart - next to the enum so adding a
+    // task is one entry here. Function-local static: the device build predates C++17 inline variables.
+    struct TaskName
+    {
+        const char *full, *shortForm;
+    };
+    inline const TaskName (&taskNames())[kNumTasks]
+    {
+        static const TaskName names[] = {
+            {"loopTask", "loop"}, {"BMS_Task", "bms"}, {"CAN_Task", "can"},
+            {"SD_LogTask", "sd"}, {"async_tcp", "async_tcp"}, {"arduino_events", "events"}};
+        static_assert(sizeof(names) / sizeof(names[0]) == kNumTasks, "taskNames must cover every StackTask");
+        return names;
+    }
+
     // stackLeft value for "task not found" (not started yet, e.g. async_tcp
     // before the network is up, or gone). Not 0: a found task whose stack
     // is completely used up reads 0, and that must count as STACK LOW.
@@ -42,6 +48,11 @@ namespace HealthLog
         uint32_t maxBlock = 0;    // largest allocatable block
         // Stack high-water marks in bytes, or kNoTask.
         uint32_t stackLeft[kNumTasks] = {kNoTask, kNoTask, kNoTask, kNoTask, kNoTask, kNoTask};
+        // SDLogger::Stats' drop/failure counters - monotonic, so any
+        // increase since the last logged line is real.
+        uint32_t sdDroppedQueueFull = 0;
+        uint32_t sdDroppedLockTimeout = 0;
+        uint32_t sdWriteFailures = 0;
     };
 
     // Log when the heap low-water mark has dropped this much since the last
@@ -67,6 +78,7 @@ namespace HealthLog
         kStackLow,
         kTaskGone,
         kStackDrop,
+        kSdDrops,
         kHeapDrop,
         kBlockDrop,
         kHeartbeat
@@ -84,6 +96,8 @@ namespace HealthLog
             return "TASK GONE";
         case kStackDrop:
             return "stack high-water dropped";
+        case kSdDrops:
+            return "SD DROPS";
         case kHeapDrop:
             return "heap low-water dropped";
         case kBlockDrop:
@@ -118,7 +132,11 @@ namespace HealthLog
     };
 
     // Priority when several things moved at once: the most urgent reason
-    // labels the line (the line always carries every value anyway).
+    // labels the line (the line always carries every value anyway). One
+    // mechanism for every candidate - consider() keeps whichever reason
+    // sorts lowest, i.e. earliest in the Reason enum - rather than a
+    // per-task "r < d.reason" comparison plus a separate "d.reason ==
+    // kNone" chain for the rest.
     inline Decision decide(State &st, const Sample &s, uint32_t nowMs)
     {
         Decision d;
@@ -129,31 +147,38 @@ namespace HealthLog
         }
         else
         {
-            for (int i = 0; i < kNumTasks; i++)
+            auto consider = [&](Reason r, int task = -1)
             {
-                uint32_t prev = st.ref.stackLeft[i], cur = s.stackLeft[i];
-                Reason r = kNone;
-                if (prev != kNoTask && cur == kNoTask)
-                    r = kTaskGone;
-                else if (cur != kNoTask && cur < kStackLowBytes && (prev == kNoTask || cur < prev))
-                    r = kStackLow; // first reading already low, or low and still falling
-                else if (prev != kNoTask && cur != kNoTask && cur < prev && prev - cur >= kStackDropBytes)
-                    r = kStackDrop;
                 if (r != kNone && (d.reason == kNone || r < d.reason))
                 {
                     d.reason = r;
-                    d.task = i;
+                    d.task = task;
                 }
+            };
+
+            for (int i = 0; i < kNumTasks; i++)
+            {
+                uint32_t prev = st.ref.stackLeft[i], cur = s.stackLeft[i];
+                if (prev != kNoTask && cur == kNoTask)
+                    consider(kTaskGone, i);
+                else if (cur != kNoTask && cur < kStackLowBytes && (prev == kNoTask || cur < prev))
+                    consider(kStackLow, i); // first reading already low, or low and still falling
+                else if (prev != kNoTask && cur != kNoTask && cur < prev && prev - cur >= kStackDropBytes)
+                    consider(kStackDrop, i);
             }
-            if (d.reason == kNone && s.minFreeHeap < st.ref.minFreeHeap &&
-                st.ref.minFreeHeap - s.minFreeHeap >= kHeapDropBytes)
-                d.reason = kHeapDrop;
-            if (d.reason == kNone && s.maxBlock < st.ref.maxBlock &&
-                st.ref.maxBlock - s.maxBlock >= kBlockDropBytes)
-                d.reason = kBlockDrop;
+            // Unlike the drops below, any increase logs: one dropped
+            // sample or write failure is already worth knowing about.
+            if (s.sdDroppedQueueFull > st.ref.sdDroppedQueueFull ||
+                s.sdDroppedLockTimeout > st.ref.sdDroppedLockTimeout ||
+                s.sdWriteFailures > st.ref.sdWriteFailures)
+                consider(kSdDrops);
+            if (s.minFreeHeap < st.ref.minFreeHeap && st.ref.minFreeHeap - s.minFreeHeap >= kHeapDropBytes)
+                consider(kHeapDrop);
+            if (s.maxBlock < st.ref.maxBlock && st.ref.maxBlock - s.maxBlock >= kBlockDropBytes)
+                consider(kBlockDrop);
             // Unsigned subtraction keeps this right across millis() wrap.
-            if (d.reason == kNone && (uint32_t)(nowMs - st.lastLogMs) >= kHeartbeatMs)
-                d.reason = kHeartbeat;
+            if ((uint32_t)(nowMs - st.lastLogMs) >= kHeartbeatMs)
+                consider(kHeartbeat);
         }
 
         if (d.reason != kNone)

@@ -124,7 +124,7 @@ exception.
 - `DashboardData.h` — live telemetry for the web UI/CAN TX plus Daly MOSFET/alarm fields, Arduino-free
 - `TelemetrySchema.h` — ordered CSV column table — `test_telemetryschema/`
 - `TelemetryJson.h` — SSE JSON via `BoundedWriter`, capped at `kPackCells` — `test_telemetryjson/`
-- `SDLogger.cpp` — SD writer task; access via `sdMutex_`; routes use `webLockTimeout()` (0 if already held); decimation/trim in `CsvDecimation.h`/`TailTrim.h`
+- `SDLogger.cpp` — SD writer task; access via `sdMutex_`; routes use `webLockTimeout()` (0 if already held); decimation in `CsvDecimation.h`
 - `WebDashboard.cpp` — `ESPAsyncWebServer` routes, SSE, `/toggleMaint`/`/resetSMA`, `/api/logs/*` (guarded by `findLogFile()`); `saveConfig()` uses `ConfigForm`/`ConfigStore`
 - `Diagnostics.cpp` — boot diagnostics, health log, OTA rollback, coredump routes (below)
 - `pin_config.h` — LilyGO T-CAN485 pin map (`5V_EN` driven high for RS485/CAN)

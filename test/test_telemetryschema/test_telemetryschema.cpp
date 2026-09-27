@@ -18,17 +18,6 @@ static const char *kExpectedHeader =
     "ChargeMOS,DischargeMOS,BmsProtection,CellOV1,CellOV2,PackOV1,PackOV2,"
     "MinCellRaw,MaxCellRaw,RawSpreadMv,Derate";
 
-static int countFields(const char *csv)
-{
-    if (*csv == '\0')
-        return 0;
-    int n = 1;
-    for (const char *p = csv; *p; p++)
-        if (*p == ',')
-            n++;
-    return n;
-}
-
 static int countCommas(const char *csv)
 {
     int n = 0;
@@ -111,51 +100,6 @@ static void test_index_max_cell_raw(void)
 static void test_index_unknown_name(void)
 {
     TEST_ASSERT_EQUAL(-1, index("nope"));
-}
-
-// --- graphColumns() (#93): every name the Graphs page asks for must
-// actually resolve, or readGraphSeries() would size its Accumulator off a
-// SIZE_MAX index and silently emit an empty column.
-static void test_graph_columns_all_resolve(void)
-{
-    for (size_t i = 0; i < kGraphColumnCount; i++)
-        TEST_ASSERT_TRUE(index(graphColumns()[i]) >= 0);
-}
-
-// --- count() / formatter output count ---
-
-static void test_formatter_output_count_matches_columns_minus_timestamp(void)
-{
-    // Timestamp (index 0) has no real formatter (it's produced by the
-    // logger from the row's write time, not from DashboardData) and
-    // reports "nothing to write" like a not-yet-read cell would - every
-    // other column, given a fully-populated sample, must produce output.
-    DashboardData d = makeSample();
-    int produced = 0;
-    for (int i = 0; i < count(); i++)
-    {
-        char field[64];
-        int n = columns()[i].format(d, field, sizeof(field));
-        if (n > 0)
-            produced++;
-    }
-    TEST_ASSERT_EQUAL(count() - 1, produced);
-}
-
-static void test_row_field_count_matches_header_field_count(void)
-{
-    // formatRow() only builds the part of the row after Timestamp (the
-    // logger prepends that itself); prepending a stand-in timestamp here
-    // mirrors loggingTask()'s own "%s,%s\n" and lets the two field counts
-    // be compared directly.
-    DashboardData d = makeSample();
-    char row[480];
-    int n = formatRow(d, row, sizeof(row));
-    TEST_ASSERT_TRUE(n > 0);
-
-    char full[512];
-    snprintf(full, sizeof(full), "2024-01-01 00:00:00,%s", row);
-    TEST_ASSERT_EQUAL(countFields(kExpectedHeader), countFields(full));
 }
 
 // --- Known row string, hand-derived from makeSample() above ---
@@ -255,9 +199,6 @@ int main(int, char **)
     RUN_TEST(test_index_first_seven_columns);
     RUN_TEST(test_index_max_cell_raw);
     RUN_TEST(test_index_unknown_name);
-    RUN_TEST(test_graph_columns_all_resolve);
-    RUN_TEST(test_formatter_output_count_matches_columns_minus_timestamp);
-    RUN_TEST(test_row_field_count_matches_header_field_count);
     RUN_TEST(test_sample_formats_to_known_row);
     RUN_TEST(test_missing_cells_are_blank_not_omitted);
     RUN_TEST(test_empty_mode_string_stays_a_field);

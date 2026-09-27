@@ -606,7 +606,7 @@ void setup()
   ArduinoOTA.setHostname("BMS-Bridge");
   ArduinoOTA.begin();
 
-  webUI.begin(&cfg);
+  webUI.begin(cfg);
   netReady = true;
 
   netLog("[SYS] Boot sequence complete. Multithreading Active.\n");

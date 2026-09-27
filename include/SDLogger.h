@@ -52,11 +52,7 @@ public:
     // False if not ready or busy - not the same as "no files yet".
     static bool listLogFiles(std::vector<LogFileInfo> &outFiles);
 
-    // Reads up to maxBytes from the end of fileName (a name listLogFiles()
-    // returned). Kept small (default 8KB): the caller copies it again into
-    // one contiguous response buffer, and heap fragmentation can make a
-    // much larger single allocation fail silently.
-    static ReadResult readTail(const String &fileName, String &outContent, size_t maxBytes = 8192);
+    static ReadResult readTail(const String &fileName, String &outContent, size_t maxBytes);
 
     // Decimates a telemetry CSV (a name listLogFiles() returned) down to
     // at most targetPoints rows of Timestamp,PackV,PackI,SOC,MinCellV,
@@ -87,9 +83,6 @@ private:
     static String currentLogPath(const tm &timeinfo, bool haveClock, const char *extension);
     static void writeCSVHeaderIfMissing(const String &path);
     static void logFailure(const char *msg);
-
-    // Bare listLogFiles() name -> SD path.
-    static String pathFor(const String &bareName);
 
     static bool initialized;
     static QueueHandle_t logQueue;

@@ -11,6 +11,7 @@ namespace ConfigStore
     // the BMS/CAN tasks start; needs no network.
     void load(SystemConfig &cfg, LogSink log);
 
-    // Writes every setting present[] marks (parallel to cfg.all()) to NVS.
-    void store(const SystemConfig &cfg, const bool present[SystemConfig::kNumSettings]);
+    // Writes every setting to NVS (NVS itself skips a write that doesn't
+    // change the stored value, and /save always submits every field).
+    void store(const SystemConfig &cfg);
 }

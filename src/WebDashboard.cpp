@@ -137,7 +137,7 @@ void WebDashboard::saveConfig(AsyncWebServerRequest *request)
         return;
     }
 
-    ConfigStore::store(copy, result.present);
+    ConfigStore::store(copy);
 
     // Only now that the save has fully succeeded (published under the lock
     // and written to NVS), never for a refused save.

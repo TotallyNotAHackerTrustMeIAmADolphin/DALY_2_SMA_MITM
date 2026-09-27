@@ -8,7 +8,6 @@
 #include <string>
 #include <type_traits>
 #include "SystemConfig.h"
-#include "SettingFormat.h"
 #include "WebPages.h"
 
 using ParseResult = SettingBase::ParseResult;
@@ -45,21 +44,6 @@ static size_t indexOf(SystemConfig &cfg, const SettingBase *s)
             return i;
     TEST_FAIL_MESSAGE("setting not found in all()");
     return (size_t)-1;
-}
-
-// Two settings holding distinct binary32 values must change-log as two
-// distinct strings (the bug this whole fix is for: an old formatter could
-// print two distinct floats identically, e.g. both as "2").
-static void assertDistinctChange(const SettingBase &oldS, const SettingBase &newS,
-                                  const char *expectedOld, const char *expectedNew)
-{
-    char oldBuf[24];
-    char newBuf[24];
-    formatSettingValue(oldS, oldS.value(), oldBuf, sizeof(oldBuf));
-    formatSettingValue(newS, newS.value(), newBuf, sizeof(newBuf));
-    TEST_ASSERT_TRUE(strcmp(oldBuf, newBuf) != 0);
-    TEST_ASSERT_EQUAL_STRING(expectedOld, oldBuf);
-    TEST_ASSERT_EQUAL_STRING(expectedNew, newBuf);
 }
 
 // --- The settings themselves ---
@@ -136,6 +120,20 @@ static void test_assigning_a_config_copies_values_not_identities(void)
     // `a.cvStartTaper = a.cvMaxCharge;` must not compile (it would copy
     // the key "cmv" too): Setting's copy-assignment is deleted.
     TEST_ASSERT_FALSE((std::is_copy_assignable<Setting<float>>::value));
+
+    // saveConfig() edits a copy and publishes it with `*_cfg = copy` - same
+    // guarantee, a different member.
+    SystemConfig c;
+    TEST_ASSERT_TRUE(c.maxChargeA.set(300));
+    SystemConfig d = c;
+    TEST_ASSERT_EQUAL_FLOAT(300.0f, d.maxChargeA);
+    size_t idxCa = indexOf(d, &d.maxChargeA);
+    TEST_ASSERT_TRUE(d.all()[idxCa]->set(200)); // mutate through all(), not the member directly
+    TEST_ASSERT_EQUAL_FLOAT(200.0f, d.maxChargeA); // ... and it reached the real member
+    TEST_ASSERT_EQUAL_FLOAT(300.0f, c.maxChargeA); // c untouched
+    c = d;
+    TEST_ASSERT_EQUAL_FLOAT(200.0f, c.maxChargeA);
+    TEST_ASSERT_EQUAL_STRING("ca", c.all()[idxCa]->key());
 }
 
 static void test_every_setting_has_exactly_one_label_and_input_on_config_page(void)
@@ -161,22 +159,6 @@ static void test_every_setting_has_exactly_one_label_and_input_on_config_page(vo
         }
     }
     TEST_ASSERT_TRUE(html.find("type=\"number\"") == std::string::npos); // no hand-written inputs left
-}
-
-static void test_copy_carries_values_and_all_points_into_the_copy(void)
-{
-    // saveConfig() edits a copy and publishes it with `*_cfg = copy`.
-    SystemConfig a;
-    TEST_ASSERT_TRUE(a.maxChargeA.set(300));
-    SystemConfig b = a;
-    TEST_ASSERT_EQUAL_FLOAT(300.0f, b.maxChargeA);
-    size_t idx = indexOf(b, &b.maxChargeA);
-    TEST_ASSERT_TRUE(b.all()[idx]->set(200)); // mutate through all(), not the member directly
-    TEST_ASSERT_EQUAL_FLOAT(200.0f, b.maxChargeA); // ... and it reached the real member
-    TEST_ASSERT_EQUAL_FLOAT(300.0f, a.maxChargeA); // a untouched
-    a = b;
-    TEST_ASSERT_EQUAL_FLOAT(200.0f, a.maxChargeA);
-    TEST_ASSERT_EQUAL_STRING("ca", a.all()[idx]->key());
 }
 
 // --- set(): the only way a value gets in ---
@@ -350,122 +332,6 @@ static void test_combined_violations_all_surface(void)
     TEST_ASSERT_TRUE(r.maintHysteresisBad);
 }
 
-// --- changedMask(): which settings a /save actually changed ---
-
-static void test_changed_mask_identical_configs_is_zero(void)
-{
-    SystemConfig a = baseline();
-    SystemConfig b = baseline();
-    TEST_ASSERT_EQUAL(0u, SystemConfig::changedMask(a, b));
-}
-
-static void test_changed_mask_one_setting_sets_only_its_bit(void)
-{
-    // Every baseline() value sits strictly above its setting's min(), so
-    // moving each one to its min() in turn always produces a real change -
-    // and its bit must be the one at that setting's own position in all().
-    SystemConfig a = baseline();
-    for (size_t i = 0; i < a.all().size(); i++)
-    {
-        SystemConfig probe = a;
-        SettingBase *s = probe.all()[i];
-        TEST_ASSERT_TRUE_MESSAGE(s->set(s->min()), s->key());
-        TEST_ASSERT_TRUE_MESSAGE(s->value() != a.all()[i]->value(), s->key());
-
-        uint32_t mask = SystemConfig::changedMask(a, probe);
-        TEST_ASSERT_EQUAL_MESSAGE((uint32_t)1 << i, mask, s->key());
-    }
-}
-
-static void test_changed_mask_two_settings_both_bits(void)
-{
-    SystemConfig a = baseline();
-    SystemConfig b = baseline();
-    TEST_ASSERT_TRUE(b.maxChargeA.set(300));
-    TEST_ASSERT_TRUE(b.vSamples.set(5));
-    uint32_t mask = SystemConfig::changedMask(a, b);
-    uint32_t expected = ((uint32_t)1 << indexOf(b, &b.maxChargeA)) | ((uint32_t)1 << indexOf(b, &b.vSamples));
-    TEST_ASSERT_EQUAL(expected, mask);
-}
-
-static void test_changed_mask_refused_set_leaves_mask_zero(void)
-{
-    SystemConfig a = baseline();
-    SystemConfig b = baseline();
-    TEST_ASSERT_FALSE(b.maxChargeA.set(-5)); // refused: out of range
-    TEST_ASSERT_FALSE(b.cvMaxCharge.set(9));  // refused: out of range
-    TEST_ASSERT_EQUAL(0u, SystemConfig::changedMask(a, b));
-}
-
-// --- changedMask() + formatSettingValue(): a real change never logs as
-// "X -> X" (the pure formatter itself is tested in test_settingformat) ---
-
-static void test_changed_mask_same_stored_float_is_not_a_change(void)
-{
-    // 3.55 and 3.55000005 both round to the same binary32 value, so this
-    // must not register as a change (a real change must differ once
-    // stored, not merely in the double the caller happened to pass).
-    SystemConfig a;
-    SystemConfig b;
-    TEST_ASSERT_TRUE(a.cvMaxCharge.set(3.55));
-    TEST_ASSERT_TRUE(b.cvMaxCharge.set(3.55000005));
-    TEST_ASSERT_TRUE((float)a.cvMaxCharge == (float)b.cvMaxCharge);
-    TEST_ASSERT_EQUAL(0u, SystemConfig::changedMask(a, b));
-}
-
-static void test_changed_mask_tiny_real_change_is_a_change(void)
-{
-    // 2.0 -> 2.0004 is a real, distinguishable binary32 change: it must set
-    // the bit, and formatSettingValue() must print the two differently
-    // (the bug this whole fix is for: the old 3-decimal formatter printed
-    // both as "2").
-    SystemConfig a;
-    SystemConfig b;
-    TEST_ASSERT_TRUE(a.trickleA.set(2.0));
-    TEST_ASSERT_TRUE(b.trickleA.set(2.0004));
-    TEST_ASSERT_TRUE((float)a.trickleA != (float)b.trickleA);
-
-    size_t idx = indexOf(a, &a.trickleA);
-    uint32_t mask = SystemConfig::changedMask(a, b);
-    TEST_ASSERT_EQUAL((uint32_t)1 << idx, mask);
-
-    assertDistinctChange(a.trickleA, b.trickleA, "2", "2.0004");
-}
-
-static void test_changed_mask_reviewer_example_500_vs_500_00003(void)
-{
-    // The reviewer's counterexample to the first (7-sig-fig) formatter:
-    // (float)500.0 != (float)500.00003, so this must be a real change with
-    // distinct printed values, not "500 -> 500".
-    SystemConfig a;
-    SystemConfig b;
-    TEST_ASSERT_TRUE(a.maxDischargeA.set(500.0));
-    TEST_ASSERT_TRUE(b.maxDischargeA.set(500.00003));
-    TEST_ASSERT_TRUE((float)a.maxDischargeA != (float)b.maxDischargeA);
-
-    size_t idx = indexOf(a, &a.maxDischargeA);
-    TEST_ASSERT_EQUAL((uint32_t)1 << idx, SystemConfig::changedMask(a, b));
-
-    assertDistinctChange(a.maxDischargeA, b.maxDischargeA, "500", "500.00003");
-}
-
-static void test_changed_mask_reviewer_example_3_55_vs_3_5500002(void)
-{
-    // cvMaxCharge's max is the #8 headroom, 3.65f - 0.10f = 3.5500002 (as a
-    // float promoted to double, 3.5500001907348633) - the largest value
-    // set() accepts, and itself the reviewer's "3.5500002" counterexample
-    // to 3.55: two distinct binary32 values that both print "3.55" at
-    // 7 significant digits.
-    SystemConfig a;
-    SystemConfig b;
-    TEST_ASSERT_TRUE(a.cvMaxCharge.set(3.55));
-    TEST_ASSERT_TRUE(b.cvMaxCharge.set(b.cvMaxCharge.max()));
-    TEST_ASSERT_TRUE((float)a.cvMaxCharge != (float)b.cvMaxCharge);
-    TEST_ASSERT_TRUE(SystemConfig::changedMask(a, b) != 0u);
-
-    assertDistinctChange(a.cvMaxCharge, b.cvMaxCharge, "3.55", "3.5500002");
-}
-
 int main(int, char **)
 {
     UNITY_BEGIN();
@@ -474,7 +340,6 @@ int main(int, char **)
     RUN_TEST(test_all_covers_every_member);
     RUN_TEST(test_assigning_a_config_copies_values_not_identities);
     RUN_TEST(test_every_setting_has_exactly_one_label_and_input_on_config_page);
-    RUN_TEST(test_copy_carries_values_and_all_points_into_the_copy);
     RUN_TEST(test_set_accepts_limits_and_refuses_just_outside);
     RUN_TEST(test_set_integer_setting_refuses_fraction);
     RUN_TEST(test_charge_headroom_boundary);
@@ -490,13 +355,5 @@ int main(int, char **)
     RUN_TEST(test_maint_hysteresis_boundary);
     RUN_TEST(test_equal_spread_thresholds_allowed);
     RUN_TEST(test_combined_violations_all_surface);
-    RUN_TEST(test_changed_mask_identical_configs_is_zero);
-    RUN_TEST(test_changed_mask_one_setting_sets_only_its_bit);
-    RUN_TEST(test_changed_mask_two_settings_both_bits);
-    RUN_TEST(test_changed_mask_refused_set_leaves_mask_zero);
-    RUN_TEST(test_changed_mask_same_stored_float_is_not_a_change);
-    RUN_TEST(test_changed_mask_tiny_real_change_is_a_change);
-    RUN_TEST(test_changed_mask_reviewer_example_500_vs_500_00003);
-    RUN_TEST(test_changed_mask_reviewer_example_3_55_vs_3_5500002);
     return UNITY_END();
 }

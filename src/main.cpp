@@ -22,8 +22,6 @@
 #include "LocalClock.h"
 #include "LogSink.h"
 
-static_assert(kPackCells <= DalyFrames::kMaxCollectorCells, "DalyRS485 can't collect every cell of the pack");
-
 // Wi-Fi credentials AND network config (static IP, gateway, subnet, DNS) -
 // all in this one gitignored file, so a public checkout never reveals your
 // home network layout. See secrets_example.h for the template.
@@ -64,8 +62,9 @@ StatusFrame::UiCommands uiCommands;
 // holder keeps the lock for microseconds (copies, no I/O), so these only
 // bound the worst case; what a timeout costs differs per site:
 // canTask skips a tick (the next one is 250 ms later), bmsTask drops one
-// reading (logged, see LockDropLog), loop() skips a check, netLog drops
-// the SSE copy of a line (Serial and SD still get it).
+// reading silently (the next one is ~2.4s later; stale data already forces
+// 0A), loop() skips a check, netLog drops the SSE copy of a line (Serial
+// and SD still get it).
 constexpr TickType_t kNetOutLockTimeout = pdMS_TO_TICKS(50);
 constexpr TickType_t kUiLockTimeout = pdMS_TO_TICKS(50);
 constexpr TickType_t kBmsStoreLockTimeout = pdMS_TO_TICKS(50);
@@ -182,32 +181,6 @@ constexpr uint32_t kConfirmCheckPeriodMs = 1000;   // OTA confirm, while it can 
 
 // --- CORE 0: BMS BACKGROUND TASK ---
 
-// A BMS reading bmsTask couldn't store because dataMutex was busy is lost,
-// and enough of them in a row let the data go stale (0 A). Logged
-// edge-triggered: once when drops start, once with the total on recovery.
-struct LockDropLog
-{
-  bool dropping = false;
-  uint32_t dropped = 0;
-
-  void note(bool stored, const char *what)
-  {
-    if (!stored)
-    {
-      if (!dropping)
-        netLog("[BMS] dataMutex busy - %s reading dropped\n", what);
-      dropping = true;
-      dropped++;
-    }
-    else if (dropping)
-    {
-      netLog("[BMS] dataMutex free again - %lu reading(s) dropped\n", (unsigned long)dropped);
-      dropping = false;
-      dropped = 0;
-    }
-  }
-};
-
 // bmsTask's cadence: one cycle is the four Daly reads below with
 // kInterFrameGapMs between them and kBmsCycleIdleMs after the last, about
 // 2.4 s including the reads themselves.
@@ -220,7 +193,6 @@ struct BmsPollState
 {
   // Edge-triggered SOC/MOSFET/alarm decisions - see include/BmsEvents.h.
   BmsEvents::State events;
-  LockDropLog lockDrops;
   // cfg.vSamples as last read under the lock; kept if the lock is briefly
   // contended. Starts at the setting's default (def() never changes, so
   // reading it needs no lock).
@@ -243,7 +215,6 @@ static void pollBasicInfo(BmsPollState &st)
   if (ev.socJumped)
     netLog("[BMS] SOC jumped %.1f -> %.1f %% (Daly recalibration?)\n", ev.socFrom, ev.socTo);
 
-  bool stored = false;
   if (MutexLock lock{dataMutex, kBmsStoreLockTimeout})
   {
     currentData.packVoltage = info.packVoltage;
@@ -251,9 +222,7 @@ static void pollBasicInfo(BmsPollState &st)
     currentData.packSOC = info.packSOC;
     bmsLink.lastBasicInfoMs = millis();
     bmsLink.haveBasicInfo = true;
-    stored = true;
   }
-  st.lockDrops.note(stored, "basic info");
 }
 
 static void pollCells(BmsPollState &st)
@@ -289,7 +258,6 @@ static void pollCells(BmsPollState &st)
     broadcastCopy = currentData; // pushed outside the lock
     stored = true;
   }
-  st.lockDrops.note(stored, "cell voltage");
 
   if (stored)
     pushTelemetry(broadcastCopy);
@@ -310,14 +278,11 @@ static void pollMosfet(BmsPollState &st)
   if (ev.dischargeMosChanged)
     netLog("[BMS] Discharge MOSFET %s\n", ev.dischargeMosOn ? "ON" : "OFF - protection or BMS-initiated cutoff");
 
-  bool stored = false;
   if (MutexLock lock{dataMutex, kBmsStoreLockTimeout})
   {
     currentData.chargeMosOn = mos.chargeMosOn;
     currentData.dischargeMosOn = mos.dischargeMosOn;
-    stored = true;
   }
-  st.lockDrops.note(stored, "MOSFET status");
 }
 
 static void pollAlarms(BmsPollState &st)
@@ -330,18 +295,23 @@ static void pollAlarms(BmsPollState &st)
   // unexpected fault isn't swallowed); the first read after boot is the
   // baseline and logs nothing.
   BmsEvents::Events ev = BmsEvents::decide(st.events, nullptr, nullptr, &alarm);
-  for (int i = 0; i < ev.alarmBitCount; i++)
+  for (int b = 0; b < 7; b++)
   {
-    const BmsEvents::AlarmBitEvent &e = ev.alarmBits[i];
-    if (e.name)
-      netLog("[BMS] Alarm: %s %s\n", e.name, e.set ? "SET" : "CLEARED");
-    else
-      netLog("[BMS] Alarm: bit %d.%d %s\n", e.byteIndex, e.bitIndex, e.set ? "SET" : "CLEARED");
+    for (int bit = 0; bit < 8; bit++)
+    {
+      if (!(ev.alarmChanged[b] & (1 << bit)))
+        continue;
+      bool set = alarm.rawBytes[b] & (1 << bit);
+      const char *name = DalyFrames::kAlarmBitNames()[b][bit];
+      if (name)
+        netLog("[BMS] Alarm: %s %s\n", name, set ? "SET" : "CLEARED");
+      else
+        netLog("[BMS] Alarm: bit %d.%d %s\n", b, bit, set ? "SET" : "CLEARED");
+    }
   }
   if (ev.faultCodeChanged)
     netLog("[BMS] Fault code %u -> %u\n", ev.faultCodeFrom, ev.faultCodeTo);
 
-  bool stored = false;
   if (MutexLock lock{dataMutex, kBmsStoreLockTimeout})
   {
     currentData.bmsProtectionActive = alarm.anyProtectionActive;
@@ -349,9 +319,7 @@ static void pollAlarms(BmsPollState &st)
     currentData.cellOvervoltLevel2 = alarm.cellOvervoltLevel2;
     currentData.packOvervoltLevel1 = alarm.packOvervoltLevel1;
     currentData.packOvervoltLevel2 = alarm.packOvervoltLevel2;
-    stored = true;
   }
-  st.lockDrops.note(stored, "alarm status");
 }
 
 void bmsTask(void *pvParameters)

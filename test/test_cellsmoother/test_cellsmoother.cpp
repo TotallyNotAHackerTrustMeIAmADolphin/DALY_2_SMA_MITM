@@ -13,15 +13,15 @@ void tearDown(void) {}
 static void test_first_update_returns_raw_exactly_and_reseeds(void)
 {
     CellSmoother sm;
-    uint16_t raw[CellSmoother::MAX_CELLS];
-    for (int i = 0; i < CellSmoother::MAX_CELLS; i++)
+    uint16_t raw[kPackCells];
+    for (int i = 0; i < kPackCells; i++)
         raw[i] = 3300 + 10 * i; // 3300 .. 3450 mV
 
-    CellSmoother::Result r = sm.update(raw, CellSmoother::MAX_CELLS, 8);
+    CellSmoother::Result r = sm.update(raw, kPackCells, 8);
 
     TEST_ASSERT_TRUE(r.reseeded);
     TEST_ASSERT_EQUAL_INT(16, r.cells);
-    for (int i = 0; i < CellSmoother::MAX_CELLS; i++)
+    for (int i = 0; i < kPackCells; i++)
         TEST_ASSERT_EQUAL_FLOAT(raw[i] / 1000.0f, r.smoothedV[i]);
 
     TEST_ASSERT_EQUAL_FLOAT(3.30f, r.minV);
@@ -155,11 +155,11 @@ static void test_shrink_then_grow_does_not_pull_stale_values_back(void)
 static void test_raw_min_max_spread_with_16_distinct_cells(void)
 {
     CellSmoother sm;
-    uint16_t raw[CellSmoother::MAX_CELLS];
-    for (int i = 0; i < CellSmoother::MAX_CELLS; i++)
+    uint16_t raw[kPackCells];
+    for (int i = 0; i < kPackCells; i++)
         raw[i] = 3000 + 10 * i; // 3000 .. 3150 mV
 
-    CellSmoother::Result r = sm.update(raw, CellSmoother::MAX_CELLS, 1);
+    CellSmoother::Result r = sm.update(raw, kPackCells, 1);
 
     TEST_ASSERT_EQUAL_FLOAT(3.00f, r.rawMinV);
     TEST_ASSERT_EQUAL_FLOAT(3.15f, r.rawMaxV);
@@ -167,8 +167,8 @@ static void test_raw_min_max_spread_with_16_distinct_cells(void)
     TEST_ASSERT_EQUAL_INT(16, r.cells);
 }
 
-// --- n < MAX_CELLS handled: only the first n cells are touched, avgV divides
-// --- by cells actually read, not MAX_CELLS (#70) ---
+// --- n < kPackCells handled: only the first n cells are touched, avgV
+// --- divides by cells actually read, not kPackCells (#70) ---
 
 static void test_n_less_than_max_cells_handled(void)
 {
@@ -192,11 +192,11 @@ static void test_n_less_than_max_cells_handled(void)
     TEST_ASSERT_EQUAL_UINT16(150, r.rawSpreadMv);
 
     // avgV over the 4 cells actually read (was, before #70, a bug-for-bug
-    // `/MAX_CELLS`, pinned "as-is" - now the real average of the 4 reads).
+    // `/kPackCells`, pinned "as-is" - now the real average of the 4 reads).
     TEST_ASSERT_EQUAL_FLOAT((3100 + 3200 + 3050 + 3150) / 4.0f / 1000.0f, r.avgV);
 }
 
-// --- n > MAX_CELLS is clamped, not read out of bounds ---
+// --- n > kPackCells is clamped, not read out of bounds ---
 
 static void test_n_greater_than_max_cells_clamped(void)
 {
@@ -207,31 +207,8 @@ static void test_n_greater_than_max_cells_clamped(void)
 
     CellSmoother::Result r = sm.update(raw, 20, 4);
 
-    TEST_ASSERT_EQUAL_INT(CellSmoother::MAX_CELLS, r.cells);
+    TEST_ASSERT_EQUAL_INT(kPackCells, r.cells);
     TEST_ASSERT_EQUAL_FLOAT(3.15f, r.rawMaxV); // index 15, not one of the extra 4 entries
-}
-
-// --- n == 0: zeroed Result, no state touched (defensive; unreachable in
-// --- firmware today since kPackCells is a fixed positive constant, #70) ---
-
-static void test_zero_cells_returns_zeroed_result_without_touching_state(void)
-{
-    CellSmoother sm;
-    uint16_t seed[1] = {3300};
-    sm.update(seed, 1, 5); // establish state that a bad n=0 call must not disturb
-
-    CellSmoother::Result r = sm.update(nullptr, 0, 5);
-    TEST_ASSERT_EQUAL_INT(0, r.cells);
-    TEST_ASSERT_FALSE(r.reseeded);
-    TEST_ASSERT_EQUAL_FLOAT(0.0f, r.minV);
-    TEST_ASSERT_EQUAL_FLOAT(0.0f, r.maxV);
-    TEST_ASSERT_EQUAL_FLOAT(0.0f, r.avgV);
-    TEST_ASSERT_EQUAL_UINT16(0, r.rawSpreadMv);
-
-    // Prior state is untouched: the next real reading isn't wrongly reseeded.
-    r = sm.update(seed, 1, 5);
-    TEST_ASSERT_FALSE(r.reseeded);
-    TEST_ASSERT_EQUAL_FLOAT(3.300f, r.smoothedV[0]);
 }
 
 // --- windowSize is clamped to [1, MAX_SAMPLES] ---
@@ -265,7 +242,6 @@ int main(int, char **)
     RUN_TEST(test_raw_min_max_spread_with_16_distinct_cells);
     RUN_TEST(test_n_less_than_max_cells_handled);
     RUN_TEST(test_n_greater_than_max_cells_clamped);
-    RUN_TEST(test_zero_cells_returns_zeroed_result_without_touching_state);
     RUN_TEST(test_window_size_clamped_to_valid_range);
     return UNITY_END();
 }

@@ -60,7 +60,7 @@ void DalyRS485::sendCommand(DalyFrames::Cmd cmd)
 }
 
 bool DalyRS485::receiveFrame(DalyFrames::Cmd expected, uint8_t payload[DalyFrames::kPayloadLen],
-                              unsigned long windowStartMs, unsigned long windowMs, bool logChecksumFailures)
+                              unsigned long windowStartMs, unsigned long windowMs)
 {
     uint8_t frame[DalyFrames::kFrameLen];
 
@@ -79,10 +79,6 @@ bool DalyRS485::receiveFrame(DalyFrames::Cmd expected, uint8_t payload[DalyFrame
                 // A checksum-valid frame for a different command: not ours,
                 // no bytes lost - keep waiting for `expected`.
             }
-            else if (logChecksumFailures && _frameAssembler.checksumFailedOnLastFeed())
-            {
-                logTo(_debugCb, "[DALY-LIB] Stream checksum failed. Continuing...\n");
-            }
         }
         else
         {
@@ -97,7 +93,7 @@ bool DalyRS485::query(DalyFrames::Cmd cmd, uint8_t payload[DalyFrames::kPayloadL
 {
     _frameAssembler.reset();
     sendCommand(cmd);
-    return receiveFrame(cmd, payload, millis(), timeoutMs, /*logChecksumFailures=*/false);
+    return receiveFrame(cmd, payload, millis(), timeoutMs);
 }
 
 bool DalyRS485::readBasicInfo(DalyBasicInfo &info)
@@ -111,11 +107,6 @@ bool DalyRS485::readBasicInfo(DalyBasicInfo &info)
 
 bool DalyRS485::readCellVoltages(uint8_t expectedCells, uint16_t *cellMv)
 {
-    // The collector holds at most kMaxCollectorCells; reading mv() past
-    // that would be out of bounds.
-    if (expectedCells > DalyFrames::kMaxCollectorCells)
-        return false;
-
     DalyFrames::CellFrameCollector collector;
 
     for (int retry = 0; retry < kCellVoltageRetries; retry++)
@@ -125,12 +116,13 @@ bool DalyRS485::readCellVoltages(uint8_t expectedCells, uint16_t *cellMv)
         sendCommand(DalyFrames::CellVoltages); // send the command EXACTLY ONCE
 
         // One receiveFrame() call per frame, all sharing the same
-        // kCellVoltageWindowMs budget off `start`.
+        // kCellVoltageWindowMs budget off `start` - receiveFrame() itself
+        // enforces the window, so a break on its false return is enough.
         unsigned long start = millis();
-        while (millis() - start < kCellVoltageWindowMs && !collector.complete())
+        while (!collector.complete())
         {
             uint8_t payload[DalyFrames::kPayloadLen];
-            if (!receiveFrame(DalyFrames::CellVoltages, payload, start, kCellVoltageWindowMs, /*logChecksumFailures=*/true))
+            if (!receiveFrame(DalyFrames::CellVoltages, payload, start, kCellVoltageWindowMs))
                 break; // window elapsed without another frame
             collector.accept(payload);
         }

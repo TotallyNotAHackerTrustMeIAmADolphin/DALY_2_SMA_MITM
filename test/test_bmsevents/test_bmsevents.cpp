@@ -139,10 +139,12 @@ struct MosfetCase
 };
 
 static const MosfetCase kMosfetCases[] = {
-    {true, true, true, true, false, false, false, false},  // unchanged
-    {true, true, false, true, true, false, false, false},  // charge on -> off
-    {false, true, true, true, true, true, false, false},   // charge off -> on
-    {true, true, false, false, true, false, true, false},  // both change at once
+    {true, true, true, true, false, false, false, false},   // unchanged
+    {true, true, false, true, true, false, false, false},   // charge on -> off
+    {false, true, true, true, true, true, false, false},    // charge off -> on
+    {true, true, false, false, true, false, true, false},   // both change at once
+    {true, true, true, false, false, false, true, false},   // discharge on -> off
+    {true, false, true, true, false, false, true, true},    // discharge off -> on
 };
 
 static void test_mosfet_transitions(void)
@@ -163,25 +165,14 @@ static void test_mosfet_transitions(void)
     }
 }
 
-static void test_mosfet_discharge_on_to_off_and_back(void)
-{
-    State st;
-    DalyMosfetStatus m1 = mosfet(true, true);
-    decide(st, nullptr, &m1, nullptr);
-
-    DalyMosfetStatus m2 = mosfet(true, false);
-    Events ev2 = decide(st, nullptr, &m2, nullptr);
-    TEST_ASSERT_FALSE(ev2.chargeMosChanged);
-    TEST_ASSERT_TRUE(ev2.dischargeMosChanged);
-    TEST_ASSERT_FALSE(ev2.dischargeMosOn);
-
-    DalyMosfetStatus m3 = mosfet(true, true);
-    Events ev3 = decide(st, nullptr, &m3, nullptr);
-    TEST_ASSERT_TRUE(ev3.dischargeMosChanged);
-    TEST_ASSERT_TRUE(ev3.dischargeMosOn);
-}
-
 // --- Alarm bit diff ---
+
+// Asserts every byte of ev.alarmChanged is 0.
+static void assertNoAlarmBitsChanged(const Events &ev)
+{
+    for (int b = 0; b < 7; b++)
+        TEST_ASSERT_EQUAL_UINT8(0, ev.alarmChanged[b]);
+}
 
 static void test_alarm_no_events_on_first_ever_reading(void)
 {
@@ -190,7 +181,7 @@ static void test_alarm_no_events_on_first_ever_reading(void)
     State st;
     DalyAlarmStatus a = alarmFromBytes({0xFF});
     Events ev = decide(st, nullptr, nullptr, &a);
-    TEST_ASSERT_EQUAL_INT(0, ev.alarmBitCount);
+    assertNoAlarmBitsChanged(ev);
 }
 
 static void test_alarm_no_events_when_unchanged(void)
@@ -200,11 +191,11 @@ static void test_alarm_no_events_when_unchanged(void)
     decide(st, nullptr, nullptr, &a1);
     DalyAlarmStatus a2 = zeroAlarm();
     Events ev = decide(st, nullptr, nullptr, &a2);
-    TEST_ASSERT_EQUAL_INT(0, ev.alarmBitCount);
+    assertNoAlarmBitsChanged(ev);
     TEST_ASSERT_FALSE(ev.faultCodeChanged);
 }
 
-static void test_alarm_bit_set_decoded_to_name(void)
+static void test_alarm_bit_set_in_changed_mask(void)
 {
     // Byte 0 bit 0 = "Cell overvoltage Level 1" (kAlarmBitNames()[0][0]).
     State st;
@@ -214,15 +205,12 @@ static void test_alarm_bit_set_decoded_to_name(void)
     DalyAlarmStatus a2 = alarmFromBytes({0x01});
     Events ev = decide(st, nullptr, nullptr, &a2);
 
-    TEST_ASSERT_EQUAL_INT(1, ev.alarmBitCount);
-    TEST_ASSERT_EQUAL_INT(0, ev.alarmBits[0].byteIndex);
-    TEST_ASSERT_EQUAL_INT(0, ev.alarmBits[0].bitIndex);
-    TEST_ASSERT_TRUE(ev.alarmBits[0].set);
-    TEST_ASSERT_NOT_NULL(ev.alarmBits[0].name);
-    TEST_ASSERT_EQUAL_STRING("Cell overvoltage Level 1", ev.alarmBits[0].name);
+    TEST_ASSERT_EQUAL_UINT8(0x01, ev.alarmChanged[0]);
+    for (int b = 1; b < 7; b++)
+        TEST_ASSERT_EQUAL_UINT8(0, ev.alarmChanged[b]);
 }
 
-static void test_alarm_bit_cleared_decoded_to_name(void)
+static void test_alarm_bit_cleared_in_changed_mask(void)
 {
     State st;
     DalyAlarmStatus a1 = alarmFromBytes({0x01});
@@ -231,15 +219,15 @@ static void test_alarm_bit_cleared_decoded_to_name(void)
     DalyAlarmStatus a2 = zeroAlarm(); // bit clears
     Events ev = decide(st, nullptr, nullptr, &a2);
 
-    TEST_ASSERT_EQUAL_INT(1, ev.alarmBitCount);
-    TEST_ASSERT_FALSE(ev.alarmBits[0].set);
-    TEST_ASSERT_EQUAL_STRING("Cell overvoltage Level 1", ev.alarmBits[0].name);
+    // XOR mask flags the toggle either way - the current alarm.rawBytes
+    // themselves (not decide()) tell bmsTask whether it set or cleared.
+    TEST_ASSERT_EQUAL_UINT8(0x01, ev.alarmChanged[0]);
 }
 
-static void test_alarm_undefined_bit_has_null_name(void)
+static void test_alarm_undefined_bit_reported_in_mask(void)
 {
-    // Byte 3 bits 4-7 are undefined in kAlarmBitNames() - still reported,
-    // with name == nullptr so the caller falls back to byte.bit logging.
+    // Byte 3 bits 4-7 are undefined in kAlarmBitNames() - still reported in
+    // the mask; bmsTask falls back to byte.bit logging for those.
     State st;
     DalyAlarmStatus a1 = zeroAlarm();
     decide(st, nullptr, nullptr, &a1);
@@ -247,11 +235,8 @@ static void test_alarm_undefined_bit_has_null_name(void)
     DalyAlarmStatus a2 = alarmFromBytes({0, 0, 0, 0x10}); // byte 3, bit 4
     Events ev = decide(st, nullptr, nullptr, &a2);
 
-    TEST_ASSERT_EQUAL_INT(1, ev.alarmBitCount);
-    TEST_ASSERT_EQUAL_INT(3, ev.alarmBits[0].byteIndex);
-    TEST_ASSERT_EQUAL_INT(4, ev.alarmBits[0].bitIndex);
-    TEST_ASSERT_TRUE(ev.alarmBits[0].set);
-    TEST_ASSERT_NULL(ev.alarmBits[0].name);
+    TEST_ASSERT_EQUAL_UINT8(0x10, ev.alarmChanged[3]);
+    TEST_ASSERT_NULL(DalyFrames::kAlarmBitNames()[3][4]);
 }
 
 static void test_alarm_multiple_bits_across_bytes_same_reading(void)
@@ -265,11 +250,9 @@ static void test_alarm_multiple_bits_across_bytes_same_reading(void)
     DalyAlarmStatus a2 = alarmFromBytes({0x01, 0, 0x04});
     Events ev = decide(st, nullptr, nullptr, &a2);
 
-    TEST_ASSERT_EQUAL_INT(2, ev.alarmBitCount);
-    TEST_ASSERT_EQUAL_STRING("Cell overvoltage Level 1", ev.alarmBits[0].name);
-    TEST_ASSERT_EQUAL_INT(2, ev.alarmBits[1].byteIndex);
-    TEST_ASSERT_EQUAL_INT(2, ev.alarmBits[1].bitIndex);
-    TEST_ASSERT_EQUAL_STRING("Discharge overcurrent Level 1", ev.alarmBits[1].name);
+    TEST_ASSERT_EQUAL_UINT8(0x01, ev.alarmChanged[0]);
+    TEST_ASSERT_EQUAL_UINT8(0, ev.alarmChanged[1]);
+    TEST_ASSERT_EQUAL_UINT8(0x04, ev.alarmChanged[2]);
 }
 
 static void test_alarm_fault_code_change_reported_separately_from_bits(void)
@@ -282,7 +265,7 @@ static void test_alarm_fault_code_change_reported_separately_from_bits(void)
     DalyAlarmStatus a2 = alarmFromBytes({0, 0, 0, 0, 0, 0, 0, 5});
     Events ev = decide(st, nullptr, nullptr, &a2);
 
-    TEST_ASSERT_EQUAL_INT(0, ev.alarmBitCount);
+    assertNoAlarmBitsChanged(ev);
     TEST_ASSERT_TRUE(ev.faultCodeChanged);
     TEST_ASSERT_EQUAL_UINT8(0, ev.faultCodeFrom);
     TEST_ASSERT_EQUAL_UINT8(5, ev.faultCodeTo);
@@ -299,7 +282,7 @@ static void test_alarm_events_do_not_repeat_next_unchanged_reading(void)
 
     DalyAlarmStatus a3 = alarmFromBytes({0x01, 0, 0, 0, 0, 0, 0, 5});
     Events ev3 = decide(st, nullptr, nullptr, &a3);
-    TEST_ASSERT_EQUAL_INT(0, ev3.alarmBitCount);
+    assertNoAlarmBitsChanged(ev3);
     TEST_ASSERT_FALSE(ev3.faultCodeChanged);
 }
 
@@ -336,13 +319,12 @@ int main(int, char **)
 
     RUN_TEST(test_mosfet_no_event_on_first_ever_reading);
     RUN_TEST(test_mosfet_transitions);
-    RUN_TEST(test_mosfet_discharge_on_to_off_and_back);
 
     RUN_TEST(test_alarm_no_events_on_first_ever_reading);
     RUN_TEST(test_alarm_no_events_when_unchanged);
-    RUN_TEST(test_alarm_bit_set_decoded_to_name);
-    RUN_TEST(test_alarm_bit_cleared_decoded_to_name);
-    RUN_TEST(test_alarm_undefined_bit_has_null_name);
+    RUN_TEST(test_alarm_bit_set_in_changed_mask);
+    RUN_TEST(test_alarm_bit_cleared_in_changed_mask);
+    RUN_TEST(test_alarm_undefined_bit_reported_in_mask);
     RUN_TEST(test_alarm_multiple_bits_across_bytes_same_reading);
     RUN_TEST(test_alarm_fault_code_change_reported_separately_from_bits);
     RUN_TEST(test_alarm_events_do_not_repeat_next_unchanged_reading);

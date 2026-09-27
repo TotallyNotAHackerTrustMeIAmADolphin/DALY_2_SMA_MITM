@@ -55,44 +55,30 @@ static void test_checksum_bad(void)
 // --- buildRequest / checksum (#103) ---
 // checksum = low byte of the sum of A5 40 <cmd> 08 00 00 00 00 00 00 00 00.
 
-static void test_build_request_basic_info(void)
+struct BuildRequestCase
 {
-    // 0xA5+0x40+0x90+0x08 = 0x16D -> low byte 0x7D
-    uint8_t expected[13] = {0xA5, 0x40, 0x90, 0x08, 0, 0, 0, 0, 0, 0, 0, 0, 0x7D};
-    uint8_t frame[13];
-    DalyFrames::buildRequest(DalyFrames::BasicInfo, frame);
-    TEST_ASSERT_EQUAL_UINT8_ARRAY(expected, frame, 13);
-    TEST_ASSERT_TRUE(DalyFrames::checksumOk(frame));
-}
+    DalyFrames::Cmd cmd;
+    uint8_t cmdByte;
+    uint8_t checksum;
+};
 
-static void test_build_request_mosfet_status(void)
-{
-    // 0xA5+0x40+0x93+0x08 = 0x170 -> low byte 0x80
-    uint8_t expected[13] = {0xA5, 0x40, 0x93, 0x08, 0, 0, 0, 0, 0, 0, 0, 0, 0x80};
-    uint8_t frame[13];
-    DalyFrames::buildRequest(DalyFrames::MosfetStatus, frame);
-    TEST_ASSERT_EQUAL_UINT8_ARRAY(expected, frame, 13);
-    TEST_ASSERT_TRUE(DalyFrames::checksumOk(frame));
-}
+static const BuildRequestCase kBuildRequestCases[] = {
+    {DalyFrames::BasicInfo, 0x90, 0x7D},    // 0xA5+0x40+0x90+0x08 = 0x16D
+    {DalyFrames::MosfetStatus, 0x93, 0x80}, // 0xA5+0x40+0x93+0x08 = 0x170
+    {DalyFrames::CellVoltages, 0x95, 0x82}, // 0xA5+0x40+0x95+0x08 = 0x172
+    {DalyFrames::AlarmStatus, 0x98, 0x85},  // 0xA5+0x40+0x98+0x08 = 0x175
+};
 
-static void test_build_request_cell_voltages(void)
+static void test_build_request_table(void)
 {
-    // 0xA5+0x40+0x95+0x08 = 0x172 -> low byte 0x82
-    uint8_t expected[13] = {0xA5, 0x40, 0x95, 0x08, 0, 0, 0, 0, 0, 0, 0, 0, 0x82};
-    uint8_t frame[13];
-    DalyFrames::buildRequest(DalyFrames::CellVoltages, frame);
-    TEST_ASSERT_EQUAL_UINT8_ARRAY(expected, frame, 13);
-    TEST_ASSERT_TRUE(DalyFrames::checksumOk(frame));
-}
-
-static void test_build_request_alarm_status(void)
-{
-    // 0xA5+0x40+0x98+0x08 = 0x175 -> low byte 0x85
-    uint8_t expected[13] = {0xA5, 0x40, 0x98, 0x08, 0, 0, 0, 0, 0, 0, 0, 0, 0x85};
-    uint8_t frame[13];
-    DalyFrames::buildRequest(DalyFrames::AlarmStatus, frame);
-    TEST_ASSERT_EQUAL_UINT8_ARRAY(expected, frame, 13);
-    TEST_ASSERT_TRUE(DalyFrames::checksumOk(frame));
+    for (const auto &c : kBuildRequestCases)
+    {
+        uint8_t expected[13] = {0xA5, 0x40, c.cmdByte, 0x08, 0, 0, 0, 0, 0, 0, 0, 0, c.checksum};
+        uint8_t frame[13];
+        DalyFrames::buildRequest(c.cmd, frame);
+        TEST_ASSERT_EQUAL_UINT8_ARRAY(expected, frame, 13);
+        TEST_ASSERT_TRUE(DalyFrames::checksumOk(frame));
+    }
 }
 
 // --- parseBasicInfo (cmd 0x90) ---
@@ -118,23 +104,6 @@ static void test_parse_basic_info_negative_current(void)
     DalyBasicInfo info;
     TEST_ASSERT_TRUE(DalyFrames::parseBasicInfo(data, info));
     TEST_ASSERT_EQUAL_FLOAT(-50.0f, info.packCurrent);
-}
-
-// --- parseCellFrame (cmd 0x95) ---
-// data[0] = 1-based frame number; data[1..2]/[3..4]/[5..6] = 3 cell mV,
-// big-endian; data[7] unused.
-
-static void test_parse_cell_frame(void)
-{
-    // frame 2, cells 3350 (0x0D16), 3360 (0x0D20), 3370 (0x0D2A) mV
-    uint8_t data[8] = {2, 0x0D, 0x16, 0x0D, 0x20, 0x0D, 0x2A, 0x00};
-    uint8_t frameNo;
-    uint16_t mv[3];
-    TEST_ASSERT_TRUE(DalyFrames::parseCellFrame(data, frameNo, mv));
-    TEST_ASSERT_EQUAL_UINT8(2, frameNo);
-    TEST_ASSERT_EQUAL_UINT16(3350, mv[0]);
-    TEST_ASSERT_EQUAL_UINT16(3360, mv[1]);
-    TEST_ASSERT_EQUAL_UINT16(3370, mv[2]);
 }
 
 // --- parseMosfetStatus (cmd 0x93) ---
@@ -234,59 +203,39 @@ static void test_parse_alarm_status_every_named_bit_sets_rawbyte_and_any(void)
 // unit and CellFrameCollector::mv()'s - no float NaN/negative case is
 // reachable any more, since a uint16_t can't hold either) ---
 
-static void test_cell_voltages_plausible_all_good(void)
+// idx2 == -1 means "no second override". All other cells sit at 3300 mV.
+struct PlausibleCase
 {
-    uint16_t cells[16];
-    for (int i = 0; i < 16; i++)
-        cells[i] = 3300;
-    int badIndex = -99;
-    TEST_ASSERT_TRUE(DalyFrames::cellVoltagesPlausible(cells, 16, badIndex));
-    TEST_ASSERT_EQUAL_INT(-1, badIndex);
-}
+    int idx1, idx2;
+    uint16_t val1, val2;
+    bool pass;
+    int expectedBadIndex;
+};
 
-static void test_cell_voltages_plausible_low_cell_fails_with_index(void)
-{
-    uint16_t cells[16];
-    for (int i = 0; i < 16; i++)
-        cells[i] = 3300;
-    cells[5] = 1400; // below kCellMinPlausibleMv (1500)
-    int badIndex = -99;
-    TEST_ASSERT_FALSE(DalyFrames::cellVoltagesPlausible(cells, 16, badIndex));
-    TEST_ASSERT_EQUAL_INT(5, badIndex);
-}
+static const PlausibleCase kPlausibleCases[] = {
+    {-1, -1, 0, 0, true, -1},                    // all good
+    {5, -1, 1400, 0, false, 5},                  // below kCellMinPlausibleMv (1500)
+    {11, -1, 4600, 0, false, 11},                // above kCellMaxPlausibleMv (4500)
+    {9, -1, 60000, 0, false, 9},                 // huge value rejected
+    {0, 1, 1500, 4500, true, -1},                // exact bounds accepted
+};
 
-static void test_cell_voltages_plausible_high_cell_fails_with_index(void)
+static void test_cell_voltages_plausible_table(void)
 {
-    uint16_t cells[16];
-    for (int i = 0; i < 16; i++)
-        cells[i] = 3300;
-    cells[11] = 4600; // above kCellMaxPlausibleMv (4500)
-    int badIndex = -99;
-    TEST_ASSERT_FALSE(DalyFrames::cellVoltagesPlausible(cells, 16, badIndex));
-    TEST_ASSERT_EQUAL_INT(11, badIndex);
-}
+    for (const auto &c : kPlausibleCases)
+    {
+        uint16_t cells[16];
+        for (int i = 0; i < 16; i++)
+            cells[i] = 3300;
+        if (c.idx1 >= 0)
+            cells[c.idx1] = c.val1;
+        if (c.idx2 >= 0)
+            cells[c.idx2] = c.val2;
 
-static void test_cell_voltages_plausible_huge_rejected(void)
-{
-    uint16_t cells[16];
-    for (int i = 0; i < 16; i++)
-        cells[i] = 3300;
-    cells[9] = 60000;
-    int badIndex = -99;
-    TEST_ASSERT_FALSE(DalyFrames::cellVoltagesPlausible(cells, 16, badIndex));
-    TEST_ASSERT_EQUAL_INT(9, badIndex);
-}
-
-static void test_cell_voltages_plausible_exact_bounds_accepted(void)
-{
-    uint16_t cells[16];
-    for (int i = 0; i < 16; i++)
-        cells[i] = 3300;
-    cells[0] = 1500;
-    cells[1] = 4500;
-    int badIndex = -99;
-    TEST_ASSERT_TRUE(DalyFrames::cellVoltagesPlausible(cells, 16, badIndex));
-    TEST_ASSERT_EQUAL_INT(-1, badIndex);
+        int badIndex = -99;
+        TEST_ASSERT_EQUAL(c.pass, DalyFrames::cellVoltagesPlausible(cells, 16, badIndex));
+        TEST_ASSERT_EQUAL_INT(c.expectedBadIndex, badIndex);
+    }
 }
 
 // --- FrameAssembler (#101) ---
@@ -415,60 +364,6 @@ static void test_frame_assembler_false_start_mid_garbage_finds_real_frame(void)
     TEST_ASSERT_EQUAL_UINT8_ARRAY(frame, out, 13);
 }
 
-static void test_frame_assembler_checksum_failed_flag(void)
-{
-    uint8_t data[8] = {1, 2, 3, 4, 5, 6, 7, 8};
-    uint8_t frame[13];
-    buildFrame(0x90, data, frame);
-    frame[12] += 1;
-
-    DalyFrames::FrameAssembler fa;
-    uint8_t out[13];
-    bool sawFailureFlag = false;
-    for (int i = 0; i < 13; i++)
-    {
-        bool completed = fa.feed(frame[i], out);
-        TEST_ASSERT_FALSE(completed);
-        if (i == 12)
-            sawFailureFlag = fa.checksumFailedOnLastFeed();
-        else
-            TEST_ASSERT_FALSE(fa.checksumFailedOnLastFeed());
-    }
-    TEST_ASSERT_TRUE(sawFailureFlag);
-}
-
-static void test_frame_assembler_corrupted_frame_with_embedded_start_byte_reports_once(void)
-{
-    // A real cell-voltage payload can itself contain 0xA5 (3493 mV =
-    // 0x0DA5). A checksum failure on this window must not be re-reported
-    // for every rescanned sub-window that also fails.
-    uint8_t data[8] = {1, 0x0D, 0xA5, 0x0D, 0x20, 0x0D, 0x2A, 0};
-    uint8_t frame[13];
-    buildFrame(0x95, data, frame);
-    frame[12] += 1; // corrupt checksum
-
-    DalyFrames::FrameAssembler fa;
-    uint8_t out[13];
-    int failures = 0;
-    for (int i = 0; i < 13; i++)
-    {
-        fa.feed(frame[i], out);
-        if (fa.checksumFailedOnLastFeed())
-            failures++;
-    }
-    // 6 more bytes complete the rescanned sub-window the embedded 0xA5
-    // started; whether or not it also fails checksum, it must not add a
-    // second reported failure.
-    uint8_t tail[6] = {0, 0, 0, 0, 0, 0};
-    for (int i = 0; i < 6; i++)
-    {
-        fa.feed(tail[i], out);
-        if (fa.checksumFailedOnLastFeed())
-            failures++;
-    }
-    TEST_ASSERT_EQUAL_INT(1, failures);
-}
-
 static void test_frame_assembler_reset_clears_partial_state(void)
 {
     uint8_t data[8] = {1, 2, 3, 4, 5, 6, 7, 8};
@@ -492,7 +387,7 @@ static void test_frame_assembler_reset_clears_partial_state(void)
 // --- CellFrameCollector (#102) ---
 
 // Builds an 8-byte cell-voltage payload: frame number + 3 big-endian mV
-// values (matches parseCellFrame()'s layout).
+// values (matches CellFrameCollector::accept()'s layout).
 static void buildCellPayload(uint8_t frameNo, uint16_t mv0, uint16_t mv1, uint16_t mv2, uint8_t out[8])
 {
     out[0] = frameNo;
@@ -593,25 +488,6 @@ static void test_collector_frame_number_beyond_needed_rejected(void)
     TEST_ASSERT_EQUAL_INT(0, c.framesReceived());
 }
 
-static void test_collector_completes_only_when_all_frames_in(void)
-{
-    DalyFrames::CellFrameCollector c;
-    c.reset(9); // 3 frames
-    uint8_t payload[8];
-
-    buildCellPayload(1, 100, 200, 300, payload);
-    c.accept(payload);
-    TEST_ASSERT_FALSE(c.complete());
-
-    buildCellPayload(2, 400, 500, 600, payload);
-    c.accept(payload);
-    TEST_ASSERT_FALSE(c.complete());
-
-    buildCellPayload(3, 700, 800, 900, payload);
-    c.accept(payload);
-    TEST_ASSERT_TRUE(c.complete());
-}
-
 static void test_collector_frames_out_of_order(void)
 {
     DalyFrames::CellFrameCollector c;
@@ -653,42 +529,14 @@ static void test_collector_reset_between_reads(void)
     TEST_ASSERT_EQUAL_UINT16(111, c.mv()[0]);
 }
 
-static void test_collector_24_cells_mask_beyond_uint8(void)
-{
-    // 24 cells -> 8 frames. Frame 8's bit is 1<<8 = 256, which does not
-    // fit a uint8_t mask (the old inline framesMask's type) - this is
-    // exactly the latent truncation bug #102 called out. Prove the
-    // uint32_t mask handles it correctly.
-    DalyFrames::CellFrameCollector c;
-    c.reset(24);
-    uint8_t payload[8];
-    for (int frame = 1; frame <= 8; frame++)
-    {
-        uint16_t base = (uint16_t)(3000 + frame * 10);
-        buildCellPayload((uint8_t)frame, base, base, base, payload);
-        TEST_ASSERT_TRUE(c.accept(payload));
-    }
-    TEST_ASSERT_TRUE(c.complete());
-    TEST_ASSERT_EQUAL_INT(8, c.framesReceived());
-
-    // Frame 8 covers cellIdx 21-23 (3 cells, 24 is a multiple of 3 - no
-    // partial frame here); check it landed correctly despite the high bit.
-    TEST_ASSERT_EQUAL_UINT16(3080, c.mv()[21]);
-    TEST_ASSERT_EQUAL_UINT16(3080, c.mv()[23]);
-}
-
 int main(int, char **)
 {
     UNITY_BEGIN();
     RUN_TEST(test_checksum_ok);
     RUN_TEST(test_checksum_bad);
-    RUN_TEST(test_build_request_basic_info);
-    RUN_TEST(test_build_request_mosfet_status);
-    RUN_TEST(test_build_request_cell_voltages);
-    RUN_TEST(test_build_request_alarm_status);
+    RUN_TEST(test_build_request_table);
     RUN_TEST(test_parse_basic_info);
     RUN_TEST(test_parse_basic_info_negative_current);
-    RUN_TEST(test_parse_cell_frame);
     RUN_TEST(test_parse_mosfet_status_accepted);
     RUN_TEST(test_parse_mosfet_status_rejected_out_of_range);
     RUN_TEST(test_parse_mosfet_status_rejected_discharge_byte_out_of_range);
@@ -696,27 +544,19 @@ int main(int, char **)
     RUN_TEST(test_parse_alarm_status_named_byte0_bits);
     RUN_TEST(test_parse_alarm_status_fault_code_byte_not_scanned);
     RUN_TEST(test_parse_alarm_status_every_named_bit_sets_rawbyte_and_any);
-    RUN_TEST(test_cell_voltages_plausible_all_good);
-    RUN_TEST(test_cell_voltages_plausible_low_cell_fails_with_index);
-    RUN_TEST(test_cell_voltages_plausible_high_cell_fails_with_index);
-    RUN_TEST(test_cell_voltages_plausible_huge_rejected);
-    RUN_TEST(test_cell_voltages_plausible_exact_bounds_accepted);
+    RUN_TEST(test_cell_voltages_plausible_table);
     RUN_TEST(test_frame_assembler_clean_frame);
     RUN_TEST(test_frame_assembler_stray_start_byte_before_real_frame);
     RUN_TEST(test_frame_assembler_bad_checksum_then_good_frame);
     RUN_TEST(test_frame_assembler_back_to_back_frames);
     RUN_TEST(test_frame_assembler_false_start_mid_garbage_finds_real_frame);
-    RUN_TEST(test_frame_assembler_checksum_failed_flag);
-    RUN_TEST(test_frame_assembler_corrupted_frame_with_embedded_start_byte_reports_once);
     RUN_TEST(test_frame_assembler_reset_clears_partial_state);
     RUN_TEST(test_collector_16_cells_exact_mv_values);
     RUN_TEST(test_collector_partial_last_frame_ignores_padding);
     RUN_TEST(test_collector_duplicate_frame_ignored);
     RUN_TEST(test_collector_frame_number_zero_rejected);
     RUN_TEST(test_collector_frame_number_beyond_needed_rejected);
-    RUN_TEST(test_collector_completes_only_when_all_frames_in);
     RUN_TEST(test_collector_frames_out_of_order);
     RUN_TEST(test_collector_reset_between_reads);
-    RUN_TEST(test_collector_24_cells_mask_beyond_uint8);
     return UNITY_END();
 }

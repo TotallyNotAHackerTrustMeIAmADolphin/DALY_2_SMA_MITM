@@ -41,12 +41,11 @@ private:
     // Receives bytes until either a checksum-valid frame for `expected`
     // completes (payload filled, true returned) or the window
     // [windowStartMs, windowStartMs + windowMs) elapses. A checksum-valid
-    // frame for a different command is discarded and the wait continues;
-    // only a checksum failure optionally logs, via logChecksumFailures.
+    // frame for a different command is discarded and the wait continues.
     // windowStartMs/windowMs are elapsed-based so a caller collecting
     // several frames can share one overall budget (see readCellVoltages()).
     bool receiveFrame(DalyFrames::Cmd expected, uint8_t payload[DalyFrames::kPayloadLen],
-                       unsigned long windowStartMs, unsigned long windowMs, bool logChecksumFailures);
+                       unsigned long windowStartMs, unsigned long windowMs);
 
     // Sends `cmd` and waits up to timeoutMs for its single-frame reply,
     // writing the 8-byte payload into `payload` on success. One attempt,

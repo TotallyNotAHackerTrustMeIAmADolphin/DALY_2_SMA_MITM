@@ -14,14 +14,11 @@
 class CellSmoother
 {
 public:
-    // Buffer capacities, not the pack's cell count (kPackCells).
-    static constexpr int MAX_CELLS = 16;
     static constexpr int MAX_SAMPLES = kMaxVSamples;
-    static_assert(MAX_CELLS >= kPackCells, "CellSmoother can't hold every cell of the pack");
 
     struct Result
     {
-        float smoothedV[MAX_CELLS] = {};
+        float smoothedV[kPackCells] = {};
         float minV = 0.0f, maxV = 0.0f, avgV = 0.0f;
         float rawMinV = 0.0f, rawMaxV = 0.0f;
         uint16_t rawSpreadMv = 0;
@@ -30,9 +27,8 @@ public:
     };
 
     // rawMv: this read's per-cell voltages, in millivolts; n entries
-    // (clamped to [0, MAX_CELLS]). windowSize: cfg.vSamples, clamped to
-    // [1, MAX_SAMPLES]. n == 0 returns a zeroed Result without touching any
-    // stored state - there's nothing to smooth or reseed from.
+    // (clamped to [0, kPackCells]). windowSize: cfg.vSamples, clamped to
+    // [1, MAX_SAMPLES].
     Result update(const uint16_t *rawMv, int n, int windowSize)
     {
         if (windowSize < 1)
@@ -43,13 +39,11 @@ public:
         int cells = n;
         if (cells < 0)
             cells = 0;
-        if (cells > MAX_CELLS)
-            cells = MAX_CELLS;
+        if (cells > kPackCells)
+            cells = kPackCells;
 
         Result r;
         r.cells = cells;
-        if (cells == 0)
-            return r;
 
         // Fill the whole moving-average window from the current reading
         // whenever the window size changes - including the very first call,
@@ -100,7 +94,7 @@ public:
                 rawMaxMv = rawMv[i];
         }
 
-        // Divides by the cells actually read, not MAX_CELLS (#70).
+        // Divides by the cells actually read, not kPackCells (#70).
         r.avgV = (float)sumMv / (1000.0f * cells);
         r.minV = localMinMv / 1000.0f;
         r.maxV = localMaxMv / 1000.0f;
@@ -119,7 +113,7 @@ public:
     }
 
 private:
-    uint16_t buf_[MAX_CELLS][MAX_SAMPLES] = {};
+    uint16_t buf_[kPackCells][MAX_SAMPLES] = {};
     int index_ = 0;
     int lastWindowSize_ = -1; // never matches a real windowSize -> first call always reseeds
 };

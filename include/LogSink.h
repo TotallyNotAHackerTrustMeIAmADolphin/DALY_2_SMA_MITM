@@ -6,6 +6,17 @@
 // of calling netLog() directly: a single already-formatted line, no varargs.
 using LogSink = void (*)(const char *line);
 
+// vsnprintf into buf, then - if truncated - force back the trailing '\n' a
+// longer line would have had, so it can't run onto whatever the next line
+// writes. Shared by logTo() below and main.cpp's netLog(), which wraps the
+// same formatted line with a timestamp before it goes to Serial/SSE/SD.
+inline void vformatLine(char *buf, size_t bufSize, const char *fmt, va_list args)
+{
+    int n = vsnprintf(buf, bufSize, fmt, args);
+    if (n >= (int)bufSize)
+        buf[bufSize - 2] = '\n';
+}
+
 // printf-checked formatting into a 256-byte buffer, then one call to sink
 // (a no-op if null). Takes fmt+args directly, not a pre-formatted string, so
 // an argument with a literal '%' can't be reinterpreted as a format spec.
@@ -19,11 +30,7 @@ inline void logTo(LogSink sink, const char *fmt, ...)
     char buf[256];
     va_list args;
     va_start(args, fmt);
-    int n = vsnprintf(buf, sizeof(buf), fmt, args);
+    vformatLine(buf, sizeof(buf), fmt, args);
     va_end(args);
-    // Truncated: force back the trailing '\n' a longer line would have had,
-    // so it can't run onto whatever the next line writes.
-    if (n >= (int)sizeof(buf))
-        buf[sizeof(buf) - 2] = '\n';
     sink(buf);
 }

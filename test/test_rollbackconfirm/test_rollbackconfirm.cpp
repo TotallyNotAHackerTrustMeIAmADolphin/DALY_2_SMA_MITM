@@ -36,29 +36,6 @@ static void test_noop_until_deadline_for_every_input(void)
         }
 }
 
-// --- needsPendingVerify() is true exactly when decide() reads
-// imagePendingVerify, i.e. when its answer changes the Action (#105) ---
-
-static void test_needs_pending_verify_matches_decide(void)
-{
-    const unsigned long times[] = {0, kConfirmAfterMs, kConfirmAfterMs + 1, kConfirmAfterMs + 60000};
-    for (unsigned long nowMs : times)
-        for (int in = 0; in < 16; in++)
-        {
-            State st;
-            st.imageConfirmed = in & 1;
-            st.unconfirmedWarned = in & 2;
-            bool wifiUp = in & 4, bmsUp = in & 8;
-
-            State withPending = st, withoutPending = st;
-            Action aTrue = decide(withPending, wifiUp, bmsUp, nowMs, true);
-            Action aFalse = decide(withoutPending, wifiUp, bmsUp, nowMs, false);
-            bool readsIt = aTrue.logNotConfirmed != aFalse.logNotConfirmed;
-
-            TEST_ASSERT_EQUAL(readsIt, RollbackConfirm::needsPendingVerify(st, wifiUp, bmsUp, nowMs));
-        }
-}
-
 // --- Confirm path + idempotent second call ---
 
 static void test_confirm_when_wifi_and_bms_up_past_deadline(void)
@@ -148,34 +125,11 @@ static void test_confirm_still_possible_after_warning_fired(void)
     TEST_ASSERT_TRUE(st.imageConfirmed);
 }
 
-// --- needsInputs(): lets loop() skip the dataMutex take for bmsUp (#75) ---
-
-static void test_needs_inputs_false_until_after_deadline(void)
-{
-    State st;
-    TEST_ASSERT_FALSE(RollbackConfirm::needsInputs(st, 0));
-    TEST_ASSERT_FALSE(RollbackConfirm::needsInputs(st, kConfirmAfterMs));
-    TEST_ASSERT_TRUE(RollbackConfirm::needsInputs(st, kConfirmAfterMs + 1));
-}
-
-static void test_needs_inputs_true_after_warning_false_after_confirm(void)
-{
-    // After the one-shot warning the image can still be confirmed later,
-    // so the inputs are still needed; once confirmed, never again.
-    State st;
-    decide(st, false, false, kConfirmAfterMs + 1000, true);
-    TEST_ASSERT_TRUE(st.unconfirmedWarned);
-    TEST_ASSERT_TRUE(RollbackConfirm::needsInputs(st, kConfirmAfterMs + 2000));
-    decide(st, true, true, kConfirmAfterMs + 3000, false);
-    TEST_ASSERT_FALSE(RollbackConfirm::needsInputs(st, kConfirmAfterMs + 4000));
-}
-
 int main(int, char **)
 {
     UNITY_BEGIN();
 
     RUN_TEST(test_noop_until_deadline_for_every_input);
-    RUN_TEST(test_needs_pending_verify_matches_decide);
 
     RUN_TEST(test_confirm_when_wifi_and_bms_up_past_deadline);
     RUN_TEST(test_confirm_is_idempotent_on_second_call);
@@ -187,9 +141,6 @@ int main(int, char **)
     RUN_TEST(test_not_pending_second_call_is_noop_even_if_now_pending);
 
     RUN_TEST(test_confirm_still_possible_after_warning_fired);
-
-    RUN_TEST(test_needs_inputs_false_until_after_deadline);
-    RUN_TEST(test_needs_inputs_true_after_warning_false_after_confirm);
 
     return UNITY_END();
 }

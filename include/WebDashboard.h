@@ -1,6 +1,6 @@
 #pragma once
 #include <ESPAsyncWebServer.h>
-#include "SystemState.h"
+#include "DashboardData.h"
 #include "LogSink.h"
 
 // The dashboard's two buttons. main.cpp's handleUIAction() applies one

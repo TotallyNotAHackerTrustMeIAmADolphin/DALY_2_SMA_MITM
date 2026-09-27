@@ -6,7 +6,7 @@
 #include <time.h>
 
 #include "pin_config.h"
-#include "SystemState.h"
+#include "DashboardData.h"
 #include "CellSmoother.h"
 #include "StatusFrame.h"
 #include "BmsEvents.h"
@@ -97,12 +97,8 @@ void netLog(const char *format, ...)
   char loc_res[256];
   va_list arg;
   va_start(arg, format);
-  int n = vsnprintf(loc_res, sizeof(loc_res), format, arg);
+  vformatLine(loc_res, sizeof(loc_res), format, arg);
   va_end(arg);
-  // Truncated: force back the trailing '\n' a longer line would have had,
-  // so it can't run onto whatever the next line writes.
-  if (n >= (int)sizeof(loc_res))
-    loc_res[sizeof(loc_res) - 2] = '\n';
 
   struct tm timeinfo;
   bool haveClock = LocalClock::localNow(timeinfo);
@@ -640,9 +636,7 @@ void loop()
     Diagnostics::logHealth();
   }
 
-  // bmsUp needs dataMutex, so it's gathered only while the check can still
-  // act (after 2 min, until confirmed) and then at most once a second.
-  if (Diagnostics::confirmCheckDue() && confirmCheck.due(millis()))
+  if (confirmCheck.due(millis()))
   {
     bool wifiUp = WiFi.status() == WL_CONNECTED;
     bool bmsUp = false;

@@ -10,6 +10,10 @@
 #include <SD.h>
 #include <cstddef>
 
+// Guards currentData/cfg; defined in main.cpp. Only saveConfig() below
+// touches it in this file.
+extern SemaphoreHandle_t dataMutex;
+
 namespace
 {
     // Every setting is a Setting<T> member of SystemConfig (include/

@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <WiFi.h>
 #include <ArduinoOTA.h>
@@ -16,7 +17,6 @@
 #include "ConfigStore.h"
 #include "SDLogger.h"
 #include "Diagnostics.h"
-#include "WifiEvents.h"
 #include "MutexLock.h"
 #include "Interval.h"
 #include "LocalClock.h"
@@ -375,36 +375,90 @@ void bmsTask(void *pvParameters)
 // --- WIFI EVENT LOGGING ---
 // Arduino's auto-reconnect handles the actual recovery silently; this just
 // makes drops/recoveries visible in the SD log, edge-triggered (one line
-// per transition, not per retry while the AP is unreachable). The state
-// machine lives in include/WifiEvents.h, pure and natively testable;
-// main.cpp maps ESP events into the latch and logs whatever drain() flags.
-WifiEvents::WifiEventLatch wifiEvents;
+// per transition, not per retry while the AP is unreachable).
+//
+// wifiEventHandler() (the WiFi event task, arduino_events, 4KB stack) writes
+// the flags below; drainWifiEvents() (loop()) consumes them. Every flag is
+// a std::atomic consumed via exchange, since the two tasks can genuinely
+// race.
+namespace
+{
+struct WifiLatch
+{
+  std::atomic<bool> connected{false};
+  std::atomic<bool> everConnected{false};
+  std::atomic<uint32_t> downSinceMs{0};
 
-// WifiEvents::reasonName() spells these out as literals.
-static_assert(WIFI_REASON_UNSPECIFIED == 1 && WIFI_REASON_AUTH_EXPIRE == 2 &&
-                  WIFI_REASON_ASSOC_EXPIRE == 4 && WIFI_REASON_ASSOC_LEAVE == 8 &&
-                  WIFI_REASON_MIC_FAILURE == 14 && WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT == 15 &&
-                  WIFI_REASON_STA_LEAVING == 36 && WIFI_REASON_AP_INITIATED == 47 &&
-                  WIFI_REASON_BEACON_TIMEOUT == 200 && WIFI_REASON_NO_AP_FOUND == 201 &&
-                  WIFI_REASON_AUTH_FAIL == 202,
-              "WIFI_REASON_* values changed - update WifiEvents::reasonName()");
+  std::atomic<bool> pendingDisconnect{false};
+  std::atomic<uint8_t> disconnectReason{0};
+  std::atomic<bool> pendingLostIp{false};
+  std::atomic<bool> pendingFirstConnect{false};
+  std::atomic<bool> pendingReconnect{false};
+
+  void onDisconnected(uint8_t reason, uint32_t nowMs)
+  {
+    // exchange doubles as the "were we actually connected" gate: a repeat
+    // DISCONNECTED while already down is a no-op.
+    if (connected.exchange(false, std::memory_order_acq_rel))
+    {
+      downSinceMs.store(nowMs, std::memory_order_relaxed);
+      disconnectReason.store(reason, std::memory_order_relaxed);
+      pendingDisconnect.store(true, std::memory_order_release);
+    }
+  }
+
+  void onGotIp()
+  {
+    bool everBefore = everConnected.exchange(true, std::memory_order_acq_rel);
+    bool prevConnected = connected.exchange(true, std::memory_order_acq_rel);
+    if (everBefore && !prevConnected)
+      pendingReconnect.store(true, std::memory_order_release);
+    else if (!everBefore)
+      pendingFirstConnect.store(true, std::memory_order_release);
+  }
+
+  void onLostIp() { pendingLostIp.store(true, std::memory_order_release); }
+};
+
+WifiLatch wifiEvents;
+} // namespace
+
+// Decoded ESP-IDF WIFI_REASON_* codes for the [WIFI] Disconnected line.
+const char *reasonName(uint8_t reason)
+{
+  switch (reason)
+  {
+  case WIFI_REASON_UNSPECIFIED: return "unspecified";
+  case WIFI_REASON_AUTH_EXPIRE: return "auth expired";
+  case WIFI_REASON_ASSOC_EXPIRE: return "association expired";
+  case WIFI_REASON_ASSOC_LEAVE: return "we disconnected (assoc leave)";
+  case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT: return "4-way handshake timeout (wrong password?)";
+  case WIFI_REASON_AUTH_FAIL: return "auth failed";
+  case WIFI_REASON_NO_AP_FOUND: return "AP not found (out of range / AP down?)";
+  case WIFI_REASON_BEACON_TIMEOUT: return "beacon timeout (weak signal / interference)";
+  case WIFI_REASON_MIC_FAILURE: return "MIC failure";
+  case WIFI_REASON_AP_INITIATED: return "kicked by AP";
+  case WIFI_REASON_STA_LEAVING: return "we disconnected (leaving)";
+  default: return "see reason code";
+  }
+}
 
 void wifiEventHandler(WiFiEvent_t event, WiFiEventInfo_t info)
 {
-  // Runs on the WiFi event task (arduino_events, 4KB stack) - must stay
-  // allocation- and lock-free (no netLog(), no WiFi.localIP()); netLog()
-  // takes netOutMutex and can push to SSE.
+  // Runs on the WiFi event task - must stay allocation- and lock-free (no
+  // netLog(), no WiFi.localIP()); netLog() takes netOutMutex and can push
+  // to SSE.
   if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED)
   {
-    wifiEvents.onEvent(WifiEvents::Kind::Disconnected, info.wifi_sta_disconnected.reason, millis());
+    wifiEvents.onDisconnected(info.wifi_sta_disconnected.reason, millis());
   }
   else if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP)
   {
-    wifiEvents.onEvent(WifiEvents::Kind::Connected, 0, millis());
+    wifiEvents.onGotIp();
   }
   else if (event == ARDUINO_EVENT_WIFI_STA_LOST_IP)
   {
-    wifiEvents.onEvent(WifiEvents::Kind::LostIp, 0, millis());
+    wifiEvents.onLostIp();
   }
 }
 
@@ -413,27 +467,29 @@ void wifiEventHandler(WiFiEvent_t event, WiFiEventInfo_t info)
 // reconnect - matches the order those conditions actually occur in.
 void drainWifiEvents()
 {
-  WifiEvents::Pending pending = wifiEvents.drain(millis());
+  uint32_t nowMs = millis();
 
-  if (pending.disconnect)
+  if (wifiEvents.pendingDisconnect.exchange(false, std::memory_order_acq_rel))
   {
-    netLog("[WIFI] Disconnected (reason %u: %s)\n", (unsigned)pending.disconnectReason,
-           WifiEvents::reasonName(pending.disconnectReason));
+    uint8_t reason = wifiEvents.disconnectReason.load(std::memory_order_relaxed);
+    netLog("[WIFI] Disconnected (reason %u: %s)\n", (unsigned)reason, reasonName(reason));
   }
 
-  if (pending.lostIp)
+  if (wifiEvents.pendingLostIp.exchange(false, std::memory_order_acq_rel))
   {
     netLog("[WIFI] Lost IP address (still associated)\n");
   }
 
-  if (pending.firstConnect)
+  if (wifiEvents.pendingFirstConnect.exchange(false, std::memory_order_acq_rel))
   {
     netLog("[WIFI] Connected, IP %s\n", WiFi.localIP().toString().c_str());
   }
-  if (pending.reconnect)
+
+  if (wifiEvents.pendingReconnect.exchange(false, std::memory_order_acq_rel))
   {
+    uint32_t downForMs = nowMs - wifiEvents.downSinceMs.load(std::memory_order_relaxed);
     netLog("[WIFI] Reconnected (%s), RSSI %d dBm, was down for %lus\n",
-           WiFi.localIP().toString().c_str(), (int)WiFi.RSSI(), (unsigned long)(pending.downForMs / 1000));
+           WiFi.localIP().toString().c_str(), (int)WiFi.RSSI(), (unsigned long)(downForMs / 1000));
   }
 }
 
@@ -452,12 +508,10 @@ void setupNetwork()
   {
     delay(500);
   }
+  drainWifiEvents(); // the one place the connected line can come from
 
   if (WiFi.status() == WL_CONNECTED)
   {
-    wifiEvents.suppressFirstConnect(); // logged here, don't repeat it from drainWifiEvents()
-    netLog("[WIFI] Connected, IP %s\n", WiFi.localIP().toString().c_str());
-
     configTzTime(kTimeZone, "pool.ntp.org", "ptbtime1.ptb.de");
 
     // Wait for NTP sync (up to 5 seconds)

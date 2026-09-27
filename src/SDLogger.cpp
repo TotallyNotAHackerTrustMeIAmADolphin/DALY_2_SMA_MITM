@@ -282,8 +282,8 @@ bool SDLogger::listLogFiles(std::vector<LogFileInfo> &outFiles)
 {
     outFiles.clear();
 
-    if (!initialized)
-        return false;
+    if (!initialized) // no card mounted: empty list, not a busy-card error
+        return true;
 
     if (xSemaphoreTake(sdMutex_, webLockTimeout(sdMutex_, kListLockTimeout)) != pdTRUE)
         return false;

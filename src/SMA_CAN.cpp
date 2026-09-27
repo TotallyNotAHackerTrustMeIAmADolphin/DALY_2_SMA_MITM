@@ -109,10 +109,8 @@ void SMA_CAN::sendFrame(uint32_t id, uint8_t dlc, const uint8_t *data)
         return;
     }
 
-    twai_message_t msg;
+    twai_message_t msg = {}; // zero flags/padding; msg.data had uninitialized tail bytes
     msg.identifier = id;
-    msg.extd = 0;
-    msg.rtr = 0;
     msg.data_length_code = dlc;
     for (int i = 0; i < dlc; i++)
     {

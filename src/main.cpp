@@ -552,10 +552,14 @@ void canTask(void *pvParameters)
     if (smaTx.due(now))
     {
       StatusFrame::Decision dec;
+      uint32_t tickNow = now;
 
       if (MutexLock lock{dataMutex, kCanTickLockTimeout})
       {
-        dec = StatusFrame::decide(cfg, currentData, bmsLink, uiCommands, now, ctrl);
+        // Fresh timestamp: bmsTask (other core) can stamp lastCellMs after
+        // `now` was read above, which would wrap isFresh()'s subtraction.
+        tickNow = millis();
+        dec = StatusFrame::decide(cfg, currentData, bmsLink, uiCommands, tickNow, ctrl);
         applyDecision(dec);
       }
 
@@ -564,7 +568,7 @@ void canTask(void *pvParameters)
       if (dec.sendFrames)
         inverter.sendStatus(dec.values);
 
-      logDecisionEvents(dec, now);
+      logDecisionEvents(dec, tickNow);
     }
 
     vTaskDelay(pdMS_TO_TICKS(10));

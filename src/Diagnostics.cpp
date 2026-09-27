@@ -206,6 +206,8 @@ void Diagnostics::readCoreDump(CoreDumpInfo &out)
 void Diagnostics::confirmImageIfReady(bool wifiUp, bool bmsUp)
 {
     static RollbackConfirm::State st;
+    if (st.imageConfirmed) // already confirmed: nothing left to check, ever
+        return;
 
     esp_ota_img_states_t otaState = ESP_OTA_IMG_UNDEFINED;
     esp_ota_get_state_partition(esp_ota_get_running_partition(), &otaState);

@@ -70,16 +70,13 @@ void ConfigStore::load(SystemConfig &cfg, LogSink log)
                                                  { logTo(log, "[CFG] Loaded config fails validation: %s\n", msg); });
 }
 
-void ConfigStore::store(const SystemConfig &cfg, const bool present[SystemConfig::kNumSettings])
+void ConfigStore::store(const SystemConfig &cfg)
 {
     Preferences prefs;
     prefs.begin(kNvsNamespace, false);
-    std::array<const SettingBase *, SystemConfig::kNumSettings> settings = cfg.all();
-    for (size_t i = 0; i < settings.size(); i++)
+    for (const SettingBase *sp : cfg.all())
     {
-        if (!present[i])
-            continue;
-        const SettingBase &s = *settings[i];
+        const SettingBase &s = *sp;
         switch (s.kind())
         {
         case SettingBase::KIND_FLOAT:

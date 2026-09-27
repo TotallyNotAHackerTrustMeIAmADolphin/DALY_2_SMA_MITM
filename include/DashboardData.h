@@ -32,7 +32,6 @@ struct DashboardData {
     float derateFactor = 1.0f;
 
     float packCurrent = 0.0f;
-    int16_t packTemp = kFixedPackTempDeciC;
     float packSOC = 0.0f;
     float requestedCurrent = 0.0f;
     const char *smaChargeMode = "Unknown";

@@ -2,9 +2,9 @@
 
 // The status-frame decision logic, kept free of Arduino/FreeRTOS so
 // test/test_statusframe runs this code natively. canTask is I/O only: under
-// dataMutex it builds a Snapshot (snapshotFrom), calls decide() and writes
-// the write-back fields; outside the lock it sends Decision::values and
-// logs whatever events fired.
+// dataMutex it calls decide() directly on currentData/bmsLink/uiCommands and
+// writes the write-back fields; outside the lock it sends Decision::values
+// and logs whatever events fired.
 
 #include <stdint.h>
 #include <math.h>
@@ -39,73 +39,10 @@ namespace StatusFrame
         uint32_t resetHoldStartMs = 0;
     };
 
-    // Everything canTask reads out of currentData / the shared reset
-    // globals under dataMutex to decide one 250ms tick's frame. Plain old
-    // data, copied out under the lock so decide() itself never touches the
-    // lock.
-    struct Snapshot
-    {
-        uint32_t nowMs = 0;
-
-        bool haveBasicInfo = false;
-        bool haveCellData = false;
-        uint32_t lastBasicInfoReadMs = 0;
-        uint32_t lastCellReadMs = 0;
-
-        float packVoltage = 0.0f;
-        float packCurrent = 0.0f;
-        float packSOC = 0.0f;
-        int16_t packTemp = 0;
-
-        // Smoothed pair drives the taper, raw pair drives the hard
-        // cutoff/alarm gate and the spread - see Glideslope.h's comments.
-        float maxCellSmoothedV = 0.0f;
-        float maxCellRawV = 0.0f;
-        float minCellSmoothedV = 0.0f;
-        float minCellRawV = 0.0f;
-        uint16_t cellSpreadMv = 0;
-
-        bool manualMaintForce = false;
-
-        // Mirrors the shared isResetting/resetHoldStartTime globals
-        // (written by handleUIAction() on the web server's task, under the
-        // same dataMutex). resetHoldStartMs == 0 means "requested but not
-        // yet armed" - see decide()'s comment on the reset hold below.
-        bool resetRequested = false;
-        uint32_t resetHoldStartMs = 0;
-    };
-
-    // The one place the shared state is mapped into a Snapshot; pure, so
-    // test/test_canpath can run the same mapping canTask does.
-    inline Snapshot snapshotFrom(const DashboardData &data, const BmsLink &link,
-                                 const UiCommands &ui, uint32_t nowMs)
-    {
-        Snapshot snap;
-        snap.nowMs = nowMs;
-        snap.haveBasicInfo = link.haveBasicInfo;
-        snap.haveCellData = link.haveCellData;
-        snap.lastBasicInfoReadMs = link.lastBasicInfoMs;
-        snap.lastCellReadMs = link.lastCellMs;
-        snap.packVoltage = data.packVoltage;
-        snap.packCurrent = data.packCurrent;
-        snap.packSOC = data.packSOC;
-        snap.packTemp = data.packTemp;
-        snap.maxCellSmoothedV = data.maxCellVoltage;
-        snap.maxCellRawV = data.maxCellVoltageRaw;
-        snap.minCellSmoothedV = data.minCellVoltage;
-        snap.minCellRawV = data.minCellVoltageRaw;
-        snap.cellSpreadMv = data.cellSpreadRawMv;
-        snap.manualMaintForce = ui.manualMaintForce;
-        snap.resetRequested = ui.resetRequested;
-        snap.resetHoldStartMs = ui.resetHoldStartMs;
-        return snap;
-    }
-
     // Persistent between ticks; owned by canTask as a local. The reset hold
     // itself is NOT here - handleUIAction() (a different task) writes
-    // resetHoldStartTime/isResetting directly, so those stay in the shared
-    // globals; decide() only reads/updates them via Snapshot in and
-    // Decision out.
+    // UiCommands directly, under the same dataMutex; decide() only
+    // reads/updates it via the UiCommands in, Decision out pair.
     struct ControlState
     {
         bool autoMaint = false;
@@ -126,9 +63,8 @@ namespace StatusFrame
         float derateFactor = 1.0f;
         bool fresh = false;
 
-        // canTask writes these back to UiCommands under dataMutex, whether
+        // canTask writes this back to UiCommands under dataMutex, whether
         // or not sendFrames is true (a no-op copy-back when it's false).
-        bool isResetting = false;
         uint32_t resetHoldStartMs = 0;
 
         // One-shot log events for this tick - canTask emits the existing
@@ -183,26 +119,19 @@ namespace StatusFrame
                 autoMaint = false;
         }
 
-        // Both read stamps within cfg.bmsTimeout; "never read" is stale.
-        inline bool bmsFresh(const SystemConfig &cfg, const Snapshot &s)
-        {
-            return Glideslope::isFresh(s.haveBasicInfo, s.nowMs, s.lastBasicInfoReadMs, cfg.bmsTimeout) &&
-                   Glideslope::isFresh(s.haveCellData, s.nowMs, s.lastCellReadMs, cfg.bmsTimeout);
-        }
-
-        inline SMAFrames::SMATxData buildValues(const SystemConfig &cfg, const Snapshot &s, bool fresh,
+        inline SMAFrames::SMATxData buildValues(const SystemConfig &cfg, const DashboardData &data, bool fresh,
                                   bool maintenanceActive, bool isResetting)
         {
             SMAFrames::SMATxData v;
-            v.packVoltage = s.packVoltage;
-            v.packCurrent = s.packCurrent;
-            v.packTemp = s.packTemp;
-            v.packSOC = s.packSOC;
+            v.packVoltage = data.packVoltage;
+            v.packCurrent = data.packCurrent;
+            v.packTemp = kFixedPackTempDeciC;
+            v.packSOC = data.packSOC;
             v.maintenanceActive = maintenanceActive;
             v.isResetting = isResetting;
 
-            v.ccl = Glideslope::calculateCCL(cfg, s.maxCellSmoothedV, s.maxCellRawV, s.cellSpreadMv, fresh, maintenanceActive);
-            v.dcl = Glideslope::calculateDCL(cfg, s.minCellSmoothedV, s.minCellRawV, s.cellSpreadMv, fresh, maintenanceActive);
+            v.ccl = Glideslope::calculateCCL(cfg, data.maxCellVoltage, data.maxCellVoltageRaw, data.cellSpreadRawMv, fresh, maintenanceActive);
+            v.dcl = Glideslope::calculateDCL(cfg, data.minCellVoltage, data.minCellVoltageRaw, data.cellSpreadRawMv, fresh, maintenanceActive);
             // Maintenance: fixed absorption target, never above the normal CVL (#60).
             uint16_t normalCvl = Glideslope::toDeciVolts(cfg.cvMaxCharge * kPackCells);
             v.cvl = maintenanceActive ? std::min(kMaintCvlDeciV, normalCvl) : normalCvl;
@@ -248,36 +177,38 @@ namespace StatusFrame
 
     // Everything canTask decides per 250 ms tick. Byte-for-byte the
     // behaviour test/test_statusframe pins down.
-    inline Decision decide(const SystemConfig &cfg, const Snapshot &s, ControlState &st)
+    inline Decision decide(const SystemConfig &cfg, const DashboardData &data, const BmsLink &link,
+                           const UiCommands &ui, uint32_t nowMs, ControlState &st)
     {
         Decision d;
-        d.isResetting = s.resetRequested;
-        d.resetHoldStartMs = s.resetHoldStartMs;
+        d.values.isResetting = ui.resetRequested;
+        d.resetHoldStartMs = ui.resetHoldStartMs;
 
         // Send nothing until the BMS has delivered basic info AND cell
         // voltages once - no made-up SOC/voltage/limits ever go out.
         // ControlState and the reset hold are left untouched.
-        if (!(s.haveBasicInfo && s.haveCellData))
+        if (!(link.haveBasicInfo && link.haveCellData))
             return d;
 
-        bool isResetting = s.resetRequested;
-        uint32_t resetHoldStartMs = s.resetHoldStartMs;
-        d.events.resetFinished = detail::advanceResetHold(isResetting, resetHoldStartMs, s.nowMs);
+        bool isResetting = ui.resetRequested;
+        uint32_t resetHoldStartMs = ui.resetHoldStartMs;
+        d.events.resetFinished = detail::advanceResetHold(isResetting, resetHoldStartMs, nowMs);
 
-        detail::updateAutoMaint(st.autoMaint, s.minCellSmoothedV, cfg);
-        bool maintenanceActive = s.manualMaintForce || st.autoMaint;
+        detail::updateAutoMaint(st.autoMaint, data.minCellVoltage, cfg);
+        bool maintenanceActive = ui.manualMaintForce || st.autoMaint;
 
-        bool fresh = detail::bmsFresh(cfg, s);
+        // Both read stamps within cfg.bmsTimeout; "never read" is stale.
+        bool fresh = Glideslope::isFresh(link.haveBasicInfo, nowMs, link.lastBasicInfoMs, cfg.bmsTimeout) &&
+                     Glideslope::isFresh(link.haveCellData, nowMs, link.lastCellMs, cfg.bmsTimeout);
 
         // Also computed inside calculateCCL/DCL; mirrored here for the
         // dashboard and the derating events only.
-        float derateFactor = Glideslope::spreadFactor(s.cellSpreadMv, cfg.spreadStartMv, cfg.spreadMaxMv);
+        float derateFactor = Glideslope::spreadFactor(data.cellSpreadRawMv, cfg.spreadStartMv, cfg.spreadMaxMv);
 
         d.sendFrames = true;
-        d.values = detail::buildValues(cfg, s, fresh, maintenanceActive, isResetting);
+        d.values = detail::buildValues(cfg, data, fresh, maintenanceActive, isResetting);
         d.derateFactor = derateFactor;
         d.fresh = fresh;
-        d.isResetting = isResetting;
         d.resetHoldStartMs = resetHoldStartMs;
 
         if (!st.framesEnabled)
@@ -287,10 +218,10 @@ namespace StatusFrame
         }
 
         detail::trackFreshness(st, fresh, d.events.wentStale, d.events.freshAgain);
-        detail::trackDerating(st, derateFactor, s.cellSpreadMv, cfg,
+        detail::trackDerating(st, derateFactor, data.cellSpreadRawMv, cfg,
                               d.events.deratingStarted, d.events.deratingEnded);
 
-        d.events.spreadMv = s.cellSpreadMv;
+        d.events.spreadMv = data.cellSpreadRawMv;
         d.events.deratePercent = (uint8_t)round(derateFactor * 100.0f);
         d.events.bmsTimeoutS = cfg.bmsTimeout;
 

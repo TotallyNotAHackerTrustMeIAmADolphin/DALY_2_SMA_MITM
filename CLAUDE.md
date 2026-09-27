@@ -89,7 +89,7 @@ change against `test/test_glideslope/`, `test/test_statusframe/` and
 | Task/core | Responsibility |
 |---|---|
 | `bmsTask` (core 0) | Polls the Daly BMS over RS485 every ~2.4s, feeds `CellSmoother`, stores under `dataMutex`. |
-| `canTask` (core 1) | Every 250ms: under `dataMutex`, builds a `Snapshot`, calls `decide()`, writes `Decision` back; **outside** the lock, `inverter.sendStatus()` if `sendFrames`, then logs one-shot events. Also CAN RX/bus health every 50ms. |
+| `canTask` (core 1) | Every 250ms: under `dataMutex`, calls `decide()`, writes `Decision` back; **outside** the lock, `inverter.sendStatus()` if `sendFrames`, then logs one-shot events. Also CAN RX/bus health every 50ms. |
 | `loop()` (core 1) | OTA, SD telemetry every 10s, boot diagnostics, 10-min health log. |
 | `async_tcp` | Async Web Server + SSE. |
 | SD writer task | Queue-fed CSV/log writer (`SDLogger`). |

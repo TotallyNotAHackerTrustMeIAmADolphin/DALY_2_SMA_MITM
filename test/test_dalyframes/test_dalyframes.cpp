@@ -403,7 +403,7 @@ static void buildCellPayload(uint8_t frameNo, uint16_t mv0, uint16_t mv1, uint16
 static void test_collector_16_cells_exact_mv_values(void)
 {
     DalyFrames::CellFrameCollector c;
-    c.reset(16);
+    c.reset();
 
     // frame 1: cells 1-3, frame 2: cells 4-6, ..., frame 6: cell 16 only
     // (partial - its other two slots are padding and must be ignored).
@@ -432,7 +432,7 @@ static void test_collector_partial_last_frame_ignores_padding(void)
     // 16 cells -> frame 6 carries only cell 16; its 2nd/3rd mv slots
     // (cellIdx 16, 17) must never be written anywhere reachable.
     DalyFrames::CellFrameCollector c;
-    c.reset(16);
+    c.reset();
     uint8_t payload[8];
     for (int frame = 1; frame <= 5; frame++)
     {
@@ -448,7 +448,7 @@ static void test_collector_partial_last_frame_ignores_padding(void)
 static void test_collector_duplicate_frame_ignored(void)
 {
     DalyFrames::CellFrameCollector c;
-    c.reset(6); // 2 frames
+    c.reset();
     uint8_t payload[8];
 
     buildCellPayload(1, 100, 200, 300, payload);
@@ -461,15 +461,18 @@ static void test_collector_duplicate_frame_ignored(void)
     TEST_ASSERT_EQUAL_INT(1, c.framesReceived());
     TEST_ASSERT_EQUAL_UINT16(100, c.mv()[0]);
 
-    buildCellPayload(2, 400, 500, 600, payload);
-    TEST_ASSERT_TRUE(c.accept(payload));
+    for (int frame = 2; frame <= 6; frame++)
+    {
+        buildCellPayload((uint8_t)frame, 400, 500, 600, payload);
+        TEST_ASSERT_TRUE(c.accept(payload));
+    }
     TEST_ASSERT_TRUE(c.complete());
 }
 
 static void test_collector_frame_number_zero_rejected(void)
 {
     DalyFrames::CellFrameCollector c;
-    c.reset(6);
+    c.reset();
     uint8_t payload[8];
     buildCellPayload(0, 100, 200, 300, payload);
     TEST_ASSERT_FALSE(c.accept(payload));
@@ -479,11 +482,11 @@ static void test_collector_frame_number_zero_rejected(void)
 
 static void test_collector_frame_number_beyond_needed_rejected(void)
 {
-    // 6 cells -> 2 frames needed; frame 3 is out of range.
+    // 16 cells -> 6 frames needed; frame 7 is out of range.
     DalyFrames::CellFrameCollector c;
-    c.reset(6);
+    c.reset();
     uint8_t payload[8];
-    buildCellPayload(3, 100, 200, 300, payload);
+    buildCellPayload(7, 100, 200, 300, payload);
     TEST_ASSERT_FALSE(c.accept(payload));
     TEST_ASSERT_EQUAL_INT(0, c.framesReceived());
 }
@@ -491,27 +494,32 @@ static void test_collector_frame_number_beyond_needed_rejected(void)
 static void test_collector_frames_out_of_order(void)
 {
     DalyFrames::CellFrameCollector c;
-    c.reset(9); // 3 frames
+    c.reset();
     uint8_t payload[8];
 
-    buildCellPayload(3, 700, 800, 900, payload);
-    TEST_ASSERT_TRUE(c.accept(payload));
-    buildCellPayload(1, 100, 200, 300, payload);
-    TEST_ASSERT_TRUE(c.accept(payload));
-    buildCellPayload(2, 400, 500, 600, payload);
-    TEST_ASSERT_TRUE(c.accept(payload));
+    // Feed all 6 frames in reverse order.
+    for (int frame = 6; frame >= 1; frame--)
+    {
+        int base = (frame - 1) * 3;
+        uint16_t v0 = (uint16_t)(100 * base + 100);
+        uint16_t v1 = base + 1 < 16 ? (uint16_t)(100 * (base + 1) + 100) : 0xFFFF;
+        uint16_t v2 = base + 2 < 16 ? (uint16_t)(100 * (base + 2) + 100) : 0xFFFF;
+        buildCellPayload((uint8_t)frame, v0, v1, v2, payload);
+        TEST_ASSERT_TRUE(c.accept(payload));
+    }
 
     TEST_ASSERT_TRUE(c.complete());
     const uint16_t *mv = c.mv();
     TEST_ASSERT_EQUAL_UINT16(100, mv[0]);
     TEST_ASSERT_EQUAL_UINT16(500, mv[4]);
     TEST_ASSERT_EQUAL_UINT16(900, mv[8]);
+    TEST_ASSERT_EQUAL_UINT16(1600, mv[15]); // cell 16: frame 6's only real slot
 }
 
 static void test_collector_reset_between_reads(void)
 {
     DalyFrames::CellFrameCollector c;
-    c.reset(6);
+    c.reset();
     uint8_t payload[8];
     buildCellPayload(1, 100, 200, 300, payload);
     c.accept(payload);
@@ -519,7 +527,7 @@ static void test_collector_reset_between_reads(void)
 
     // A fresh read must not see the previous read's frame as already
     // received, and its stale mv values must not leak forward either.
-    c.reset(6);
+    c.reset();
     TEST_ASSERT_EQUAL_INT(0, c.framesReceived());
     TEST_ASSERT_FALSE(c.complete());
     TEST_ASSERT_EQUAL_UINT16(0, c.mv()[0]);

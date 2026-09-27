@@ -105,13 +105,13 @@ bool DalyRS485::readBasicInfo(DalyBasicInfo &info)
     return false;
 }
 
-bool DalyRS485::readCellVoltages(uint8_t expectedCells, uint16_t *cellMv)
+bool DalyRS485::readCellVoltages(uint16_t *cellMv)
 {
     DalyFrames::CellFrameCollector collector;
 
     for (int retry = 0; retry < kCellVoltageRetries; retry++)
     {
-        collector.reset(expectedCells);
+        collector.reset();
         _frameAssembler.reset();
         sendCommand(DalyFrames::CellVoltages); // send the command EXACTLY ONCE
 
@@ -137,14 +137,14 @@ bool DalyRS485::readCellVoltages(uint8_t expectedCells, uint16_t *cellMv)
             // frame, if any cell falls outside a plausible LiFePO4 range;
             // the stale-data fail-safe then drops limits to 0A.
             int badIndex;
-            if (!DalyFrames::cellVoltagesPlausible(mv, expectedCells, badIndex))
+            if (!DalyFrames::cellVoltagesPlausible(mv, kPackCells, badIndex))
             {
                 if (!_cellVoltagesRejecting)
                 {
                     logTo(_debugCb, "[BMS] Rejected cell frame: cell %d = %u mV outside 1.5-4.5 V\n", badIndex + 1, mv[badIndex]);
                     _cellVoltagesRejecting = true;
                 }
-                for (int i = 0; i < expectedCells; i++)
+                for (int i = 0; i < kPackCells; i++)
                     cellMv[i] = 0;
                 return false;
             }
@@ -155,7 +155,7 @@ bool DalyRS485::readCellVoltages(uint8_t expectedCells, uint16_t *cellMv)
                 _cellVoltagesRejecting = false;
             }
 
-            for (int i = 0; i < expectedCells; i++)
+            for (int i = 0; i < kPackCells; i++)
                 cellMv[i] = mv[i];
             return true; // We got them all!
         }

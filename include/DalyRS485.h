@@ -20,9 +20,9 @@ public:
     void setDebugCallback(LogSink cb);
 
     bool readBasicInfo(DalyBasicInfo &info);
-    // cellMv must have at least expectedCells entries; filled in millivolts
+    // cellMv must have at least kPackCells entries; filled in millivolts
     // on success, zeroed on a plausibility-gate rejection.
-    bool readCellVoltages(uint8_t expectedCells, uint16_t *cellMv);
+    bool readCellVoltages(uint16_t *cellMv);
     bool readMosfetStatus(DalyMosfetStatus &status);
     bool readAlarmStatus(DalyAlarmStatus &status);
 

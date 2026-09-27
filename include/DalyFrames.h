@@ -212,19 +212,16 @@ namespace DalyFrames
     }
 
     // Collects the 0x95 "Cell Voltages" stream into per-cell millivolt
-    // values: reset(cells) for a fresh read, accept() once per received
-    // payload, complete() once every frame has arrived. framesMask_ is
-    // uint32_t so 1u << frameNum can't wrap. Buffer is fixed at kPackCells
-    // (SystemConfig.h) - callers always reset() with exactly that count.
+    // values for the pack's fixed kPackCells (SystemConfig.h): reset() for
+    // a fresh read, accept() once per received payload, complete() once
+    // every frame has arrived. framesMask_ is uint32_t so 1u << frameNum
+    // can't wrap for kPackCells's frame count.
     class CellFrameCollector
     {
     public:
-        void reset(int cells)
+        void reset()
         {
-            if (cells < 0)
-                cells = 0;
-            cells_ = cells;
-            expectedFrames_ = (cells_ + 2) / 3;
+            expectedFrames_ = (kPackCells + 2) / 3;
             framesMask_ = 0;
             framesReceived_ = 0;
             for (int i = 0; i < kPackCells; i++)
@@ -234,7 +231,7 @@ namespace DalyFrames
         // Feeds one 8-byte cell-voltage payload: [0] 1-based frame number,
         // [1..2]/[3..4]/[5..6] cell voltage N/N+1/N+2 (mV, big-endian), [7]
         // unused. Out-of-range frame numbers and already-seen duplicates
-        // are rejected. The last frame is partial when cells_ isn't a
+        // are rejected. The last frame is partial when kPackCells isn't a
         // multiple of 3 (e.g. 16 cells -> frame 6 carries only 1 cell); its
         // unused mv slots are never written. Returns true iff this
         // payload's frame number was newly accepted.
@@ -260,7 +257,7 @@ namespace DalyFrames
             for (int i = 0; i < 3; i++)
             {
                 int cellIdx = (frameNo - 1) * 3 + i;
-                if (cellIdx < cells_)
+                if (cellIdx < kPackCells)
                     mv_[cellIdx] = mv[i];
             }
             return true;
@@ -268,7 +265,7 @@ namespace DalyFrames
 
         bool complete() const { return framesReceived_ == expectedFrames_; }
 
-        // Per-cell millivolt values, indexed [0, cells_); valid past an
+        // Per-cell millivolt values, indexed [0, kPackCells); valid past an
         // index once its frame has been accept()-ed.
         const uint16_t *mv() const { return mv_; }
 
@@ -276,7 +273,6 @@ namespace DalyFrames
         int expectedFrames() const { return expectedFrames_; }
 
     private:
-        int cells_ = 0;
         int expectedFrames_ = 0;
         uint32_t framesMask_ = 0;
         int framesReceived_ = 0;

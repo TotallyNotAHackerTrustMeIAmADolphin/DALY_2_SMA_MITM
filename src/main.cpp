@@ -224,7 +224,7 @@ static void pollBasicInfo(BmsPollState &st)
 static void pollCells(BmsPollState &st)
 {
   std::array<uint16_t, kPackCells> cellMv;
-  if (!bms.readCellVoltages(kPackCells, cellMv.data()))
+  if (!bms.readCellVoltages(cellMv.data()))
     return;
 
   if (MutexLock lock{dataMutex, kBmsCfgReadLockTimeout})

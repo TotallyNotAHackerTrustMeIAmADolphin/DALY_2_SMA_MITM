@@ -378,50 +378,6 @@ static void test_derate_factor_applied_once_ccl_at_spread_midpoint_is_half(void)
     TEST_ASSERT_EQUAL_FLOAT(0.5f, dec.derateFactor);
 }
 
-static void test_derating_started_once_ended_only_after_hysteresis(void)
-{
-    // spreadStartMv=60 (default) -> "ended" requires spread <= 50.
-    ControlState ctrl;
-
-    // t=1000, spread=0: below start -> no derating, no event (baseline).
-    DashboardData d1 = freshData();
-    d1.cellSpreadMv = 0;
-    Decision dec1 = decide(cfg, d1, freshLink(1000), UiCommands{}, 1000, ctrl);
-    TEST_ASSERT_FALSE(dec1.events.deratingStarted);
-    TEST_ASSERT_FALSE(ctrl.derating);
-
-    // t=1250, spread=100 (60 < 100 < 150) -> derating starts.
-    DashboardData d2 = freshData();
-    d2.cellSpreadMv = 100;
-    Decision dec2 = decide(cfg, d2, freshLink(1250), UiCommands{}, 1250, ctrl);
-    TEST_ASSERT_TRUE(dec2.events.deratingStarted);
-    TEST_ASSERT_TRUE(ctrl.derating);
-
-    // t=1500, spread=55: factor back to 1.0 (55 <= startMv 60), but
-    // 55 > 60-10=50, so NOT far enough below start -> deratingEnded must
-    // NOT fire yet (hysteresis).
-    DashboardData d3 = freshData();
-    d3.cellSpreadMv = 55;
-    Decision dec3 = decide(cfg, d3, freshLink(1500), UiCommands{}, 1500, ctrl);
-    TEST_ASSERT_EQUAL_FLOAT(1.0f, dec3.derateFactor);
-    TEST_ASSERT_FALSE(dec3.events.deratingEnded);
-    TEST_ASSERT_TRUE(ctrl.derating); // still considered derated
-
-    // t=1750, spread=45 (<= 50) -> deratingEnded fires now.
-    DashboardData d4 = freshData();
-    d4.cellSpreadMv = 45;
-    Decision dec4 = decide(cfg, d4, freshLink(1750), UiCommands{}, 1750, ctrl);
-    TEST_ASSERT_TRUE(dec4.events.deratingEnded);
-    TEST_ASSERT_FALSE(ctrl.derating);
-
-    // t=2000, spread=45 again: deratingEnded must not repeat.
-    DashboardData d5 = freshData();
-    d5.cellSpreadMv = 45;
-    Decision dec5 = decide(cfg, d5, freshLink(2000), UiCommands{}, 2000, ctrl);
-    TEST_ASSERT_FALSE(dec5.events.deratingEnded);
-    TEST_ASSERT_FALSE(dec5.events.deratingStarted);
-}
-
 static void test_half_stale_cells_stale_basic_info_fresh_forces_zero(void)
 {
     // haveBasicInfo fresh, haveCellData stale (last read further back than
@@ -491,7 +447,6 @@ int main(int, char **)
     RUN_TEST(test_maintenance_cvl_is_fixed_560_not_cvmaxcharge);
     RUN_TEST(test_maintenance_cvl_capped_by_lowered_cvmaxcharge);
     RUN_TEST(test_derate_factor_applied_once_ccl_at_spread_midpoint_is_half);
-    RUN_TEST(test_derating_started_once_ended_only_after_hysteresis);
     RUN_TEST(test_half_stale_cells_stale_basic_info_fresh_forces_zero);
     RUN_TEST(test_half_stale_basic_info_stale_cells_fresh_forces_zero);
     RUN_TEST(test_stale_fresh_cycles_each_event_once);

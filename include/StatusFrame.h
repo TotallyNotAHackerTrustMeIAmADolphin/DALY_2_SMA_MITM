@@ -7,7 +7,6 @@
 // and logs whatever events fired.
 
 #include <stdint.h>
-#include <math.h>
 #include <algorithm>
 #include "SystemConfig.h"
 #include "Glideslope.h"
@@ -49,7 +48,6 @@ namespace StatusFrame
         bool framesEnabled = false;
         bool wasFresh = false;
         bool staleBaseline = false;
-        bool derating = false;
     };
 
     struct Decision
@@ -75,17 +73,12 @@ namespace StatusFrame
             bool resetFinished = false;
             bool wentStale = false;
             bool freshAgain = false;
-            bool deratingStarted = false;
-            bool deratingEnded = false;
-            uint16_t spreadMv = 0;
-            uint8_t deratePercent = 0;
             int bmsTimeoutS = 0;
         } events;
     };
 
     constexpr uint32_t kResetHoldMs = 5500;    // cluster reset: DVL 0 this long
     constexpr uint16_t kMaintCvlDeciV = 560;   // 56.0 V absorption target in maintenance
-    constexpr int kDerateEndHysteresisMv = 10; // "derating ended" needs spread this far below start
 
     namespace detail
     {
@@ -156,25 +149,6 @@ namespace StatusFrame
             }
             st.wasFresh = fresh;
         }
-
-        // Edge-triggered spread derating events; "ended" needs the factor
-        // back at 1.0 AND the spread kDerateEndHysteresisMv below
-        // spreadStartMv, so it doesn't chatter at the boundary.
-        inline void trackDerating(ControlState &st, float derateFactor, uint16_t spreadMv,
-                                  const SystemConfig &cfg, bool &started, bool &ended)
-        {
-            if (!st.derating && derateFactor < 1.0f)
-            {
-                started = true;
-                st.derating = true;
-            }
-            else if (st.derating && derateFactor >= 1.0f &&
-                     (int)spreadMv <= (int)cfg.spreadStartMv - kDerateEndHysteresisMv)
-            {
-                ended = true;
-                st.derating = false;
-            }
-        }
     }
 
     // Everything canTask decides per 250 ms tick. Byte-for-byte the
@@ -204,7 +178,7 @@ namespace StatusFrame
                      Glideslope::isFresh(link.haveCellData, nowMs, link.lastCellMs, cfg.bmsTimeout);
 
         // Also computed inside calculateCCL/DCL; mirrored here for the
-        // dashboard and the derating events only.
+        // dashboard and telemetry only.
         float derateFactor = Glideslope::spreadFactor(data.cellSpreadMv, cfg.spreadStartMv, cfg.spreadMaxMv);
 
         d.sendFrames = true;
@@ -220,11 +194,7 @@ namespace StatusFrame
         }
 
         detail::trackFreshness(st, fresh, d.events.wentStale, d.events.freshAgain);
-        detail::trackDerating(st, derateFactor, data.cellSpreadMv, cfg,
-                              d.events.deratingStarted, d.events.deratingEnded);
 
-        d.events.spreadMv = data.cellSpreadMv;
-        d.events.deratePercent = (uint8_t)round(derateFactor * 100.0f);
         d.events.bmsTimeoutS = cfg.bmsTimeout;
 
         return d;

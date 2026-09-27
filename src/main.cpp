@@ -542,11 +542,6 @@ static void logDecisionEvents(const StatusFrame::Decision &dec, unsigned long no
     netLog("[BMS] Data stale (both reads older than %d s) - CCL/DCL forced to 0 A\n", dec.events.bmsTimeoutS);
   if (dec.events.freshAgain)
     netLog("[BMS] Data fresh again - limits restored\n");
-  if (dec.events.deratingStarted)
-    netLog("[BMS] Cell spread %u mV - limits derated to %u %%\n",
-           (unsigned)dec.events.spreadMv, (unsigned)dec.events.deratePercent);
-  if (dec.events.deratingEnded)
-    netLog("[BMS] Cell spread %u mV - derating ended\n", (unsigned)dec.events.spreadMv);
 }
 
 // Runs in its own task rather than loop(), so CAN starts before setup()'s

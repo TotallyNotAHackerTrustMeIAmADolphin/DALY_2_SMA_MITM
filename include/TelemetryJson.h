@@ -15,11 +15,11 @@ namespace TelemetryJson
         BoundedWriter w(buf, len);
         w.append("{\"v\":%.2f,\"cv\":%.3f,\"minC\":%.3f,\"maxC\":%.3f,\"minCellRaw\":%.3f,\"maxCellRaw\":%.3f,"
                   "\"i\":%.1f,\"reqI\":%.1f,\"soc\":%.1f,\"smam\":\"%s\",\"maint\":%d,\"force\":%d,\"isR\":%d,"
-                  "\"spreadMv\":%u,\"derate\":%.2f,\"cells\":[",
+                  "\"spreadMv\":%u,\"derate\":%.2f,\"w\":%.0f,\"cells\":[",
                   d.packVoltage, d.avgCellVoltage, d.minCellVoltage, d.maxCellVoltage,
                   d.minCellVoltageRaw, d.maxCellVoltageRaw, d.packCurrent, d.requestedCurrent, d.packSOC,
                   d.smaChargeMode, (int)d.maintenanceActive, (int)d.forceCharge, (int)d.isResetting,
-                  (unsigned)d.cellSpreadRawMv, d.derateFactor);
+                  (unsigned)d.cellSpreadRawMv, d.derateFactor, d.packVoltage * d.packCurrent);
 
         size_t n = d.cellVoltages.size();
         if (n > (size_t)kPackCells)

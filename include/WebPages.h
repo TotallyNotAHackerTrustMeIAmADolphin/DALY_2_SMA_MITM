@@ -76,7 +76,7 @@ const char index_html[] PROGMEM = HTML_HEAD("BMS Bridge Pro") R"rawliteral(
   <div class="card"><div>Cell Spread</div><div id="spread" class="value">--</div></div>
   <div class="card"><div>Current</div><div id="i" class="value">--</div></div>
   <div class="card"><div>SOC</div><div id="soc" class="value">--</div></div>
-  <div class="card"><div>SMA Status</div><div id="smastat" class="value">--</div></div>
+  <div class="card"><div>Power</div><div id="w" class="value">--</div></div>
   <div class="card"><div>Max Cell V</div><div id="maxCellV" class="value">--</div></div>
   <div class="card"><div>Min Cell V</div><div id="minCellV" class="value">--</div></div>
 </div>
@@ -158,11 +158,14 @@ const char index_html[] PROGMEM = HTML_HEAD("BMS Bridge Pro") R"rawliteral(
     if (obj.i < -0.1) curEl.classList.add('negative-val');
     else curEl.classList.remove('negative-val');
     document.getElementById('soc').innerHTML = obj.soc.toFixed(1) + "%";
-    
-    // --- SMA MODE DISPLAY ---
-    document.getElementById('smastat').innerHTML = obj.smam.toUpperCase();
-    document.getElementById('smastat').className = "value";
-    
+
+    // Pack power (#132): w = packV * packI computed firmware-side; sign
+    // follows the current (positive = charging, negative = discharging).
+    const wEl = document.getElementById('w');
+    wEl.innerHTML = Math.abs(obj.w) >= 1000 ? (obj.w / 1000).toFixed(2) + " kW" : Math.round(obj.w) + " W";
+    if (obj.w < -0.5) wEl.classList.add('negative-val');
+    else wEl.classList.remove('negative-val');
+
     const mb = document.getElementById('mbtn');
     if(obj.force) { mb.innerHTML = "STOP FORCE CHARGE"; mb.style.background = "#ff9800"; }
     else { mb.innerHTML = "TRIGGER FORCE CHARGE"; mb.style.background = "#0277bd"; }
@@ -319,6 +322,34 @@ const char graphs_html[] PROGMEM = HTML_HEAD("Graphs") R"rawliteral(
 )rawliteral" SHARED_LIST_JS FILE_PAGE_JS R"rawliteral(
   let charts = {};
 
+  // Selecting a point in one chart selects the same index (= same timestamp,
+  // all four charts share data.labels) in every other chart (#131).
+  // setActiveElements()/update() don't fire onHover, but the guard keeps a
+  // future change from turning this into a feedback loop.
+  let syncing = false;
+  function syncSelection(src, elements) {
+    if (syncing) return;
+    syncing = true;
+    try {
+      const idx = elements.length ? elements[0].index : -1;
+      Object.values(charts).forEach(ch => {
+        if (ch === src) return;
+        const pt = idx < 0 ? null : ch.getDatasetMeta(0).data[idx];
+        if (pt) {
+          const active = ch.data.datasets.map((_, di) => ({ datasetIndex: di, index: idx }));
+          ch.setActiveElements(active);
+          ch.tooltip.setActiveElements(active, { x: pt.x, y: pt.y });
+        } else {
+          ch.setActiveElements([]);
+          ch.tooltip.setActiveElements([], { x: 0, y: 0 });
+        }
+        ch.update('none');
+      });
+    } finally {
+      syncing = false;
+    }
+  }
+
   function darkChart(canvasId, labels, datasets, extraScales) {
     const ctx = document.getElementById(canvasId).getContext('2d');
     if (charts[canvasId]) charts[canvasId].destroy();
@@ -328,6 +359,7 @@ const char graphs_html[] PROGMEM = HTML_HEAD("Graphs") R"rawliteral(
       options: {
         animation: false,
         interaction: { mode: 'index', intersect: false },
+        onHover: (evt, elements, chart) => syncSelection(chart, elements),
         scales: Object.assign({
           x: { ticks: { color: '#888', maxTicksLimit: 12 }, grid: { color: '#222' } }
         }, extraScales),
@@ -336,6 +368,10 @@ const char graphs_html[] PROGMEM = HTML_HEAD("Graphs") R"rawliteral(
         plugins: { legend: { display: datasets.length > 1, labels: { color: '#ccc' } } }
       }
     });
+    // Chart.js drops its own tooltip on mouseleave without calling onHover,
+    // so clear the other charts here. Assigned (not addEventListener) so a
+    // reload of the graphs doesn't stack handlers on the same canvas.
+    ctx.canvas.onmouseleave = () => syncSelection(charts[canvasId], []);
     return charts[canvasId];
   }
 

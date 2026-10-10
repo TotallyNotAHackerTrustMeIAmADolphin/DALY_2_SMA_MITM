@@ -43,9 +43,25 @@ static void test_matches_pre_refactor_output_exactly(void)
     TEST_ASSERT_EQUAL_STRING(
         "{\"v\":52.34,\"cv\":3.271,\"minC\":3.201,\"maxC\":3.350,\"minCellRaw\":3.195,\"maxCellRaw\":3.360,"
         "\"i\":12.5,\"reqI\":250.0,\"soc\":87.5,\"smam\":\"Bulk\",\"maint\":0,\"force\":1,\"isR\":0,"
-        "\"spreadMv\":45,\"derate\":0.85,\"cells\":[3.201,3.210,3.215,3.220,3.225,3.230,3.235,3.240,"
+        "\"spreadMv\":45,\"derate\":0.85,\"w\":654,\"cells\":[3.201,3.210,3.215,3.220,3.225,3.230,3.235,3.240,"
         "3.245,3.250,3.255,3.260,3.265,3.270,3.275,3.350]}",
         buf);
+}
+
+// Pack power (#132): packV * packI, signed like the current.
+static void test_power_is_voltage_times_current_signed(void)
+{
+    DashboardData d = sample();
+    char buf[1024];
+
+    d.packVoltage = 52.0f;
+    d.packCurrent = -20.0f; // discharging
+    TEST_ASSERT_TRUE(TelemetryJson::format(d, buf, sizeof(buf)));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"w\":-1040,"));
+
+    d.packCurrent = 0.0f;
+    TEST_ASSERT_TRUE(TelemetryJson::format(d, buf, sizeof(buf)));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"w\":0,"));
 }
 
 static void test_empty_cells_array(void)
@@ -115,6 +131,7 @@ int main(int, char **)
 {
     UNITY_BEGIN();
     RUN_TEST(test_matches_pre_refactor_output_exactly);
+    RUN_TEST(test_power_is_voltage_times_current_signed);
     RUN_TEST(test_empty_cells_array);
     RUN_TEST(test_cell_loop_caps_at_kPackCells);
     RUN_TEST(test_worst_case_16_cells_fits_and_is_well_formed);

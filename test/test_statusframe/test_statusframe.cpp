@@ -428,6 +428,201 @@ static void test_stale_fresh_cycles_each_event_once(void)
     TEST_ASSERT_EQUAL(2, freshAgain);
 }
 
+// --- Charge cutoff / gate events: debounced, fresh-only, raw voltage ---
+
+// One tick at nowMs with raw max cell voltage rawV and a fresh link.
+static Decision chargeTick(ControlState &ctrl, float rawV, uint32_t nowMs)
+{
+    DashboardData d = freshData();
+    d.maxCellVoltageRaw = rawV;
+    d.maxCellVoltage = rawV;
+    return decide(cfg, d, freshLink(nowMs), UiCommands{}, nowMs, ctrl);
+}
+
+static void test_cutoff_trips_once_on_first_crossing(void)
+{
+    ControlState ctrl;
+    Decision d0 = chargeTick(ctrl, 3.3f, 1000);
+    TEST_ASSERT_FALSE(d0.events.chargeCutoffTripped);
+    Decision d1 = chargeTick(ctrl, 3.51f, 1250);
+    TEST_ASSERT_TRUE(d1.events.chargeCutoffTripped);
+    TEST_ASSERT_FALSE(d1.events.chargeCutoffCleared);
+    Decision d2 = chargeTick(ctrl, 3.52f, 1500);
+    TEST_ASSERT_FALSE(d2.events.chargeCutoffTripped);
+    TEST_ASSERT_FALSE(d2.events.chargeCutoffCleared);
+}
+
+static void test_cutoff_short_clear_then_retrip_is_silent(void)
+{
+    ControlState ctrl;
+    chargeTick(ctrl, 3.51f, 1000);
+    // Clear for 10 s, then back above: no cleared, no second tripped.
+    Decision a = chargeTick(ctrl, 3.45f, 2000);
+    Decision b = chargeTick(ctrl, 3.45f, 12000);
+    Decision c = chargeTick(ctrl, 3.51f, 12250);
+    TEST_ASSERT_FALSE(a.events.chargeCutoffCleared);
+    TEST_ASSERT_FALSE(b.events.chargeCutoffCleared);
+    TEST_ASSERT_FALSE(c.events.chargeCutoffTripped);
+    TEST_ASSERT_FALSE(c.events.chargeCutoffCleared);
+    // The clear timer restarted: a new clear shorter than the hold still
+    // does not fire.
+    chargeTick(ctrl, 3.45f, 20000);
+    Decision e = chargeTick(ctrl, 3.45f, 20000 + StatusFrame::kChargeLimitClearHoldMs - 1);
+    TEST_ASSERT_FALSE(e.events.chargeCutoffCleared);
+}
+
+static void test_cutoff_clear_held_60s_fires_cleared_once(void)
+{
+    ControlState ctrl;
+    chargeTick(ctrl, 3.51f, 1000);
+    Decision a = chargeTick(ctrl, 3.45f, 2000);
+    TEST_ASSERT_FALSE(a.events.chargeCutoffCleared);
+    Decision b = chargeTick(ctrl, 3.45f, 2000 + StatusFrame::kChargeLimitClearHoldMs);
+    TEST_ASSERT_TRUE(b.events.chargeCutoffCleared);
+    TEST_ASSERT_FALSE(b.events.chargeCutoffTripped);
+    Decision c = chargeTick(ctrl, 3.45f, 2000 + StatusFrame::kChargeLimitClearHoldMs + 250);
+    TEST_ASSERT_FALSE(c.events.chargeCutoffCleared);
+    // Trips again afterwards.
+    Decision d = chargeTick(ctrl, 3.51f, 70000);
+    TEST_ASSERT_TRUE(d.events.chargeCutoffTripped);
+}
+
+static void test_gate_trips_once_on_first_crossing(void)
+{
+    ControlState ctrl;
+    // 3.45 V: above the gate (3.4) but below the cutoff (3.5).
+    Decision d1 = chargeTick(ctrl, 3.45f, 1000);
+    TEST_ASSERT_TRUE(d1.events.chargeGateTripped);
+    TEST_ASSERT_FALSE(d1.events.chargeCutoffTripped);
+    Decision d2 = chargeTick(ctrl, 3.46f, 1250);
+    TEST_ASSERT_FALSE(d2.events.chargeGateTripped);
+    TEST_ASSERT_FALSE(d2.events.chargeGateCleared);
+}
+
+static void test_gate_short_clear_then_retrip_is_silent(void)
+{
+    ControlState ctrl;
+    chargeTick(ctrl, 3.45f, 1000);
+    Decision a = chargeTick(ctrl, 3.3f, 2000);
+    Decision b = chargeTick(ctrl, 3.3f, 30000);
+    Decision c = chargeTick(ctrl, 3.45f, 30250);
+    TEST_ASSERT_FALSE(a.events.chargeGateCleared);
+    TEST_ASSERT_FALSE(b.events.chargeGateCleared);
+    TEST_ASSERT_FALSE(c.events.chargeGateTripped);
+    TEST_ASSERT_FALSE(c.events.chargeGateCleared);
+}
+
+static void test_gate_clear_held_60s_fires_cleared_once(void)
+{
+    ControlState ctrl;
+    chargeTick(ctrl, 3.45f, 1000);
+    chargeTick(ctrl, 3.3f, 2000);
+    Decision b = chargeTick(ctrl, 3.3f, 2000 + StatusFrame::kChargeLimitClearHoldMs);
+    TEST_ASSERT_TRUE(b.events.chargeGateCleared);
+    Decision c = chargeTick(ctrl, 3.3f, 2000 + StatusFrame::kChargeLimitClearHoldMs + 250);
+    TEST_ASSERT_FALSE(c.events.chargeGateCleared);
+}
+
+static void test_charge_limit_events_silent_and_state_kept_when_stale(void)
+{
+    ControlState ctrl;
+    chargeTick(ctrl, 3.51f, 1000); // trips cutoff + gate
+    TEST_ASSERT_TRUE(ctrl.cutoffActive);
+    TEST_ASSERT_TRUE(ctrl.gateActive);
+
+    // Stale (stamps 61 s old), cell voltage low: nothing emitted, state kept.
+    DashboardData d = freshData();
+    d.maxCellVoltageRaw = 3.0f;
+    Decision s = decide(cfg, d, freshLink(1000), UiCommands{}, 62000, ctrl);
+    TEST_ASSERT_FALSE(s.fresh);
+    TEST_ASSERT_FALSE(s.events.chargeCutoffTripped);
+    TEST_ASSERT_FALSE(s.events.chargeCutoffCleared);
+    TEST_ASSERT_FALSE(s.events.chargeGateTripped);
+    TEST_ASSERT_FALSE(s.events.chargeGateCleared);
+    TEST_ASSERT_TRUE(ctrl.cutoffActive);
+    TEST_ASSERT_TRUE(ctrl.gateActive);
+    TEST_ASSERT_EQUAL_UINT32(0, ctrl.cutoffClearSinceMs);
+    TEST_ASSERT_EQUAL_UINT32(0, ctrl.gateClearSinceMs);
+
+    // Stale + high voltage on a fresh ControlState: no trip either.
+    ControlState ctrl2;
+    DashboardData hi = freshData();
+    hi.maxCellVoltageRaw = 3.6f;
+    Decision s2 = decide(cfg, hi, freshLink(1000), UiCommands{}, 62000, ctrl2);
+    TEST_ASSERT_FALSE(s2.events.chargeCutoffTripped);
+    TEST_ASSERT_FALSE(s2.events.chargeGateTripped);
+    TEST_ASSERT_FALSE(ctrl2.cutoffActive);
+}
+
+static void test_charge_limit_events_carry_voltages(void)
+{
+    ControlState ctrl;
+    Decision d = chargeTick(ctrl, 3.512f, 1000);
+    TEST_ASSERT_TRUE(d.events.chargeCutoffTripped);
+    TEST_ASSERT_EQUAL_FLOAT(3.512f, d.events.rawMaxV);
+    TEST_ASSERT_EQUAL_FLOAT(3.5f, d.events.cutoffV);
+    TEST_ASSERT_EQUAL_FLOAT(3.4f, d.events.gateV);
+}
+
+// A stale gap during a running clear timer must not count toward the hold:
+// the first fresh tick after it starts the 60 s afresh.
+static void test_stale_gap_resets_clear_timer(void)
+{
+    ControlState ctrl;
+    chargeTick(ctrl, 3.51f, 1000);
+    chargeTick(ctrl, 3.45f, 2000); // clear timer starts at 2000
+    // Stale tick well past the hold: no event, timer dropped.
+    DashboardData d = freshData();
+    d.maxCellVoltageRaw = 3.0f;
+    Decision s = decide(cfg, d, freshLink(1000), UiCommands{}, 2000 + StatusFrame::kChargeLimitClearHoldMs + 5000, ctrl);
+    TEST_ASSERT_FALSE(s.fresh);
+    TEST_ASSERT_FALSE(s.events.chargeCutoffCleared);
+    TEST_ASSERT_TRUE(ctrl.cutoffActive);
+    // First fresh tick after the gap: not cleared yet, the hold restarts.
+    uint32_t t = 2000 + StatusFrame::kChargeLimitClearHoldMs + 10000;
+    Decision a = chargeTick(ctrl, 3.45f, t);
+    TEST_ASSERT_FALSE(a.events.chargeCutoffCleared);
+    Decision b = chargeTick(ctrl, 3.45f, t + StatusFrame::kChargeLimitClearHoldMs);
+    TEST_ASSERT_TRUE(b.events.chargeCutoffCleared);
+}
+
+// One read jumping from below the gate to above the cutoff trips both in
+// the same tick (the log layer suppresses the redundant gate line).
+static void test_cutoff_and_gate_trip_same_tick(void)
+{
+    ControlState ctrl;
+    chargeTick(ctrl, 3.3f, 1000);
+    Decision d = chargeTick(ctrl, 3.52f, 1250);
+    TEST_ASSERT_TRUE(d.events.chargeCutoffTripped);
+    TEST_ASSERT_TRUE(d.events.chargeGateTripped);
+}
+
+// The event thresholds must agree with what Glideslope actually does:
+// cutoff trips exactly when CCL is forced to 0 A, gate exactly when the
+// raw voltage reaches cvHighAlarmGate.
+static void test_events_match_glideslope_thresholds(void)
+{
+    {
+        ControlState ctrl;
+        Decision below = chargeTick(ctrl, cfg.cvMaxCharge - 0.001f, 1000);
+        TEST_ASSERT_FALSE(below.events.chargeCutoffTripped);
+        TEST_ASSERT_TRUE(below.values.ccl > 0);
+        ControlState ctrl2;
+        Decision at = chargeTick(ctrl2, cfg.cvMaxCharge, 1000);
+        TEST_ASSERT_TRUE(at.events.chargeCutoffTripped);
+        TEST_ASSERT_EQUAL(0, at.values.ccl);
+    }
+    {
+        ControlState ctrl;
+        Decision below = chargeTick(ctrl, cfg.cvHighAlarmGate - 0.001f, 1000);
+        TEST_ASSERT_FALSE(below.events.chargeGateTripped);
+        ControlState ctrl2;
+        Decision at = chargeTick(ctrl2, cfg.cvHighAlarmGate, 1000);
+        TEST_ASSERT_TRUE(at.events.chargeGateTripped);
+        TEST_ASSERT_TRUE(at.values.ccl <= below.values.ccl);
+    }
+}
+
 int main(int, char **)
 {
     UNITY_BEGIN();
@@ -450,5 +645,16 @@ int main(int, char **)
     RUN_TEST(test_half_stale_cells_stale_basic_info_fresh_forces_zero);
     RUN_TEST(test_half_stale_basic_info_stale_cells_fresh_forces_zero);
     RUN_TEST(test_stale_fresh_cycles_each_event_once);
+    RUN_TEST(test_cutoff_trips_once_on_first_crossing);
+    RUN_TEST(test_cutoff_short_clear_then_retrip_is_silent);
+    RUN_TEST(test_cutoff_clear_held_60s_fires_cleared_once);
+    RUN_TEST(test_gate_trips_once_on_first_crossing);
+    RUN_TEST(test_gate_short_clear_then_retrip_is_silent);
+    RUN_TEST(test_gate_clear_held_60s_fires_cleared_once);
+    RUN_TEST(test_charge_limit_events_silent_and_state_kept_when_stale);
+    RUN_TEST(test_charge_limit_events_carry_voltages);
+    RUN_TEST(test_stale_gap_resets_clear_timer);
+    RUN_TEST(test_cutoff_and_gate_trip_same_tick);
+    RUN_TEST(test_events_match_glideslope_thresholds);
     return UNITY_END();
 }

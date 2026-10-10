@@ -48,6 +48,14 @@ namespace StatusFrame
         bool framesEnabled = false;
         bool wasFresh = false;
         bool staleBaseline = false;
+        // Charge-side hard cutoff (raw max cell >= cvMaxCharge, CCL 0 A) and
+        // gate (raw max cell >= cvHighAlarmGate, CCL trickle), as last
+        // logged. clearSinceMs == 0 means no clear timer is running; see
+        // detail::trackChargeLimit.
+        bool cutoffActive = false;
+        uint32_t cutoffClearSinceMs = 0;
+        bool gateActive = false;
+        uint32_t gateClearSinceMs = 0;
     };
 
     struct Decision
@@ -74,11 +82,25 @@ namespace StatusFrame
             bool wentStale = false;
             bool freshAgain = false;
             int bmsTimeoutS = 0;
+            // Debounced (kChargeLimitClearHoldMs) firmware-side charge
+            // limits; only ever set on a fresh, sending tick.
+            bool chargeCutoffTripped = false;
+            bool chargeCutoffCleared = false;
+            bool chargeGateTripped = false;
+            bool chargeGateCleared = false;
+            // Raw max cell voltage at this tick and the configured
+            // thresholds, so logging needs neither cfg nor the mutex.
+            float rawMaxV = 0.0f;
+            float cutoffV = 0.0f;
+            float gateV = 0.0f;
         } events;
     };
 
     constexpr uint32_t kResetHoldMs = 5500;    // cluster reset: DVL 0 this long
     constexpr uint16_t kMaintCvlDeciV = 560;   // 56.0 V absorption target in maintenance
+    // A charge cutoff/gate must stay clear this long before "cleared" is
+    // logged; the cutoff flaps at the boundary many times a day.
+    constexpr uint32_t kChargeLimitClearHoldMs = 60000;
 
     namespace detail
     {
@@ -132,6 +154,35 @@ namespace StatusFrame
             v.cvl = maintenanceActive ? std::min(kMaintCvlDeciV, normalCvl) : normalCvl;
             v.dvl = Glideslope::toDeciVolts(cfg.cvMinDischarge * kPackCells);
             return v;
+        }
+
+        // Debounced edge detector for one charge limit. Trips immediately;
+        // clears only after the condition has been false for
+        // kChargeLimitClearHoldMs. A re-trip inside that window is silent
+        // (still active, clear timer reset).
+        inline void trackChargeLimit(bool &active, uint32_t &clearSinceMs, bool condition, uint32_t nowMs,
+                                     bool &tripped, bool &cleared)
+        {
+            if (condition)
+            {
+                clearSinceMs = 0;
+                if (!active)
+                {
+                    active = true;
+                    tripped = true;
+                }
+            }
+            else if (active)
+            {
+                if (clearSinceMs == 0)
+                    clearSinceMs = nowMs ? nowMs : 1; // 0 is the "no timer" sentinel
+                if (nowMs - clearSinceMs >= kChargeLimitClearHoldMs)
+                {
+                    active = false;
+                    clearSinceMs = 0;
+                    cleared = true;
+                }
+            }
         }
 
         // Edge-triggered stale/fresh events. staleBaseline keeps the very
@@ -196,6 +247,26 @@ namespace StatusFrame
         detail::trackFreshness(st, fresh, d.events.wentStale, d.events.freshAgain);
 
         d.events.bmsTimeoutS = cfg.bmsTimeout;
+
+        // Raw gate/cutoff always apply (maintenance only changes the taper
+        // branch). Stale ticks emit nothing and keep the active flags, but
+        // drop any running clear timer: "cleared" must mean 60 s of observed
+        // fresh, clear data, not a gap.
+        d.events.rawMaxV = data.maxCellVoltageRaw;
+        d.events.cutoffV = cfg.cvMaxCharge;
+        d.events.gateV = cfg.cvHighAlarmGate;
+        if (fresh)
+        {
+            detail::trackChargeLimit(st.cutoffActive, st.cutoffClearSinceMs, d.events.rawMaxV >= d.events.cutoffV, nowMs,
+                                     d.events.chargeCutoffTripped, d.events.chargeCutoffCleared);
+            detail::trackChargeLimit(st.gateActive, st.gateClearSinceMs, d.events.rawMaxV >= d.events.gateV, nowMs,
+                                     d.events.chargeGateTripped, d.events.chargeGateCleared);
+        }
+        else
+        {
+            st.cutoffClearSinceMs = 0;
+            st.gateClearSinceMs = 0;
+        }
 
         return d;
     }

@@ -542,6 +542,19 @@ static void logDecisionEvents(const StatusFrame::Decision &dec, unsigned long no
     netLog("[BMS] Data stale (both reads older than %d s) - CCL/DCL forced to 0 A\n", dec.events.bmsTimeoutS);
   if (dec.events.freshAgain)
     netLog("[BMS] Data fresh again - limits restored\n");
+  if (dec.events.chargeCutoffTripped)
+    netLog("[BMS] Charge cutoff: raw max cell %.3f V >= %.3f V - CCL forced to 0 A\n",
+           dec.events.rawMaxV, dec.events.cutoffV);
+  if (dec.events.chargeCutoffCleared)
+    netLog("[BMS] Charge cutoff cleared (raw max cell below limit for %u s)\n",
+           (unsigned)(StatusFrame::kChargeLimitClearHoldMs / 1000));
+  // A same-tick cutoff already says CCL is 0 A; the gate line would mislead.
+  if (dec.events.chargeGateTripped && !dec.events.chargeCutoffTripped)
+    netLog("[BMS] Charge gate: raw max cell %.3f V >= %.3f V - CCL limited\n",
+           dec.events.rawMaxV, dec.events.gateV);
+  if (dec.events.chargeGateCleared)
+    netLog("[BMS] Charge gate cleared (raw max cell below limit for %u s)\n",
+           (unsigned)(StatusFrame::kChargeLimitClearHoldMs / 1000));
 }
 
 // Runs in its own task rather than loop(), so CAN starts before setup()'s
